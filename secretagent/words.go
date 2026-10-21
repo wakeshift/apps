@@ -1,0 +1,38 @@
+package secretagent
+
+// codewords are the words a game's civilians can share: concrete things,
+// easy to hint at without saying. A game avoids the ones its players have
+// had recently (see App.pickCodeword).
+var codewords = []string{
+	"lighthouse", "avalanche", "pineapple", "telescope", "volcano", "saxophone", "glacier", "origami", "lantern", "cactus",
+	"submarine", "carousel", "meteor", "harmonica", "waterfall", "compass", "dragonfly", "igloo", "parachute", "marble", "orchid",
+	"trombone", "pyramid", "hammock", "kaleidoscope", "anchor", "blizzard", "chessboard", "firefly", "windmill", "accordion",
+	"acorn", "airship", "alligator", "anvil", "aquarium", "armadillo", "astronaut", "asteroid", "backpack", "bagpipes", "balloon",
+	"bamboo", "banjo", "barnacle", "barometer", "bathtub", "beehive", "bicycle", "binoculars", "birdhouse", "blacksmith",
+	"blueprint", "bonfire", "boomerang", "bowtie", "bridge", "broomstick", "bubblegum", "bulldozer", "butterfly", "cabin",
+	"calculator", "calendar", "camel", "campfire", "candle", "cannon", "canoe", "canyon", "carnival", "castle", "caterpillar",
+	"cathedral", "cauldron", "cello", "chameleon", "chandelier", "cheetah", "chimney", "chopsticks", "circus", "clocktower",
+	"cobweb", "coconut", "comet", "compost", "coral", "corkscrew", "cornfield", "cowboy", "crayon", "crocodile", "crossword",
+	"crown", "crystal", "cupcake", "curtain", "cyclone", "dandelion", "desert", "diamond", "dinosaur", "dolphin", "domino",
+	"doorbell", "dragon", "drawbridge", "drum", "dumpling", "dynamite", "eclipse", "elevator", "elephant", "embroidery", "emerald",
+	"envelope", "escalator", "falcon", "fireplace", "fireworks", "fishbowl", "flamingo", "flashlight", "flute", "fog", "fossil",
+	"fountain", "fox", "frostbite", "garden", "gargoyle", "geyser", "giraffe", "gondola", "gramophone", "grasshopper", "greenhouse",
+	"guitar", "hailstorm", "hamster", "harbor", "harp", "hedgehog", "helicopter", "hieroglyph", "hourglass", "hurricane", "iceberg",
+	"jellyfish", "jigsaw", "jukebox", "jungle", "kangaroo", "kayak", "kettle", "keyboard", "kite", "koala", "labyrinth", "ladder",
+	"ladybug", "lagoon", "lasso", "lava", "lemonade", "library", "lizard", "lobster", "locomotive", "lollipop", "magnet", "mailbox",
+	"mammoth", "mango", "mapmaker", "marathon", "mask", "maze", "meadow", "mermaid", "microscope", "mirror", "monsoon", "moose",
+	"mosaic", "mountain", "mushroom", "museum", "necklace", "nest", "noodle", "notebook", "nutcracker", "oasis", "observatory",
+	"octopus", "omelette", "orchestra", "ostrich", "otter", "owl", "paddleboat", "paintbrush", "pancake", "panda", "parrot",
+	"passport", "peacock", "pendulum", "penguin", "periscope", "pharaoh", "piano", "pickaxe", "pigeon", "pinball", "pirate",
+	"planetarium", "platypus", "pogo", "popcorn", "porcupine", "postcard", "pretzel", "prism", "puffin", "pumpkin", "puppet",
+	"quicksand", "quill", "raccoon", "radio", "rainbow", "raft", "reindeer", "rhinoceros", "riverboat", "robot", "rocket",
+	"rollercoaster", "rowboat", "ruby", "saddle", "sailboat", "salamander", "sandcastle", "satellite", "scarecrow", "scorpion",
+	"seahorse", "seesaw", "shipwreck", "skateboard", "skyscraper", "sled", "snorkel", "snowflake", "snowman", "sombrero",
+	"spaceship", "spatula", "sphinx", "spider", "spinach", "sponge", "squid", "stagecoach", "stalactite", "starfish", "stethoscope",
+	"stopwatch", "strawberry", "sundial", "sunflower", "surfboard", "swamp", "swan", "sword", "tadpole", "tambourine", "tapestry",
+	"teapot", "telegraph", "tent", "thermometer", "thunderstorm", "tiara", "toaster", "tornado", "tortoise", "totem", "tractor",
+	"treasure", "treehouse", "trampoline", "trumpet", "tsunami", "tuba", "tugboat", "tulip", "tumbleweed", "tunnel", "turtle",
+	"typewriter", "ukulele", "umbrella", "unicorn", "vacuum", "vampire", "velvet", "violin", "vineyard", "volleyball", "vulture",
+	"waffle", "walrus", "wardrobe", "warehouse", "waterslide", "weathervane", "whale", "wheelbarrow", "whirlpool", "whistle",
+	"wigwam", "windchime", "wizard", "wolf", "woodpecker", "xylophone", "yacht", "yoyo", "zebra", "zeppelin", "zipper",
+}

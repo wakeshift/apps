@@ -1,0 +1,78 @@
+{{define "home"}}{{template "head" .}}
+{{with .Data}}
+<div class="wrap narrow">
+<div class="pagehead">
+<div><h1>Your agents</h1><p class="muted" style="margin:6px 0 0">Signed in as {{.User.Name}}{{if .User.TeamName}} in {{.User.TeamName}}{{end}}.</p></div>
+{{if .Agents}}<a class="btn btn-ghost" href="#connect">Connect an agent</a>{{end}}
+</div>
+{{if .Notice}}<div class="callout notice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg><p>{{.Notice}}</p></div>{{end}}
+{{if not .Installed}}<div class="callout warn install"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg><p>Slackline isn't in your Slack workspace yet, so your agents can't reach you. An admin may need to approve it.</p><a class="btn btn-slack sm" href="/install">{{template "slack"}}Add to Slack</a></div>{{end}}
+
+{{range .Agents}}{{$agent := .}}
+<article class="card agent">
+<div class="agent-head">
+<div class="av-agent">{{initial .Label}}</div>
+<div class="who"><h3>{{.Label}}</h3><p class="muted small">{{.ClientName}} · connected {{since .CreatedAt}}</p></div>
+{{if .Listeners}}<span class="pill live">Listening</span>{{else}}<span class="pill">Not listening</span>{{end}}
+</div>
+<div class="agent-body">
+{{if .Listeners}}<p class="small">Listening in {{len .Listeners}} conversation{{if gt (len .Listeners) 1}}s{{end}}:
+{{range $i, $l := .Listeners}}{{if $i}}, {{end}}<strong>{{$l.Label}}</strong> <span class="muted">(active {{since $l.ActiveAt}})</span>{{end}}.</p>
+{{else}}<p class="small muted">Ask it to watch Slack, and it starts listening in its thread in your DM with Slackline.</p>{{end}}
+
+<h4>Channels</h4>
+{{if .Rules}}<ul class="rules">
+{{range .Rules}}<li><span class="chan">#{{.ChannelName}}</span>
+<span class="rule-what">{{if eq .Mode "all"}}Every message{{else}}@Slackline mentions{{end}}</span>
+{{if eq .Senders "anyone"}}<span class="pill open">From anyone there</span>{{else}}<span class="pill">From you only</span>{{end}}
+<form class="inline" method="post" action="/agents/{{$agent.ID}}/rules/{{.ChannelID}}/remove"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="quiet sm">Remove</button></form></li>{{end}}
+</ul>{{else}}<p class="small muted">Only your DM with Slackline.</p>{{end}}
+
+{{if $.Data.Channels}}
+<form class="addrule" method="post" action="/agents/{{.ID}}/rules">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<div class="row">
+<select name="channel" required><option value="">Add a channel…</option>{{range $.Data.Channels}}<option value="{{.ID}}">{{if .Private}}🔒{{else}}#{{end}}{{.Name}}</option>{{end}}</select>
+<select name="mode"><option value="mentions">@Slackline mentions</option><option value="all">every message</option></select>
+<select name="senders"><option value="me">from me only</option><option value="anyone">from anyone there</option></select>
+<button>Add</button>
+</div>
+<label class="check"><input type="checkbox" name="understood" value="1"><span>I understand that “from anyone there” lets anyone in the channel wake this agent and ask it things. It runs on my machine with my access, and their messages reach it as outside information. (Needed only for “from anyone there”.)</span></label>
+</form>
+{{else if $.Data.Installed}}<p class="small muted">To add a channel, invite Slackline there first: <code>/invite @Slackline</code>.{{if $.Data.NotIn}} It can see {{$.Data.NotIn}} channel{{if gt $.Data.NotIn 1}}s{{end}} it isn't in yet.{{end}}</p>{{end}}
+</div>
+<details class="manage"><summary>Rename or revoke</summary>
+<div class="row">
+<form class="inline rename" method="post" action="/agents/{{.ID}}/label"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="text" name="label" value="{{.Label}}" maxlength="40" aria-label="Name in Slack"> <button class="quiet">Rename</button></form>
+<form class="inline" method="post" action="/agents/{{.ID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="danger">Revoke</button></form>
+</div>
+</details>
+</article>
+{{else}}
+<div class="card empty">
+<div class="bridge"><div class="node agent"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2.5"/><path d="m7 9 3 2.5L7 14M12.5 14H17"/></svg></div><svg class="rope" viewBox="0 0 110 40" aria-hidden="true"><path d="M4 12Q55 44 106 12" stroke="#9EE096" stroke-width="2" fill="none" stroke-dasharray="2 6" stroke-linecap="round"/></svg><div class="node">{{template "mark"}}</div></div>
+<h2>You haven't connected an agent yet</h2>
+<p class="muted">Connect one below. It shows up here, and gets its own thread in your DM with Slackline.</p>
+</div>
+{{end}}
+
+<section id="connect" class="card pad connect">
+<h2>Connect an agent</h2>
+<p class="muted">Add Slackline's MCP server to your agent, then ask it to watch Slack. It signs in through your browser with Slack, and you approve it here.</p>
+<div class="cmd"><span class="lbl">Claude Code</span><code>claude mcp add --transport http slackline {{$.MCPURL}}</code></div>
+<div class="cmd"><span class="lbl">Codex</span><code>codex mcp add slackline --url {{$.MCPURL}}</code></div>
+<div class="cmd"><span class="lbl">Others</span><span>Add <code>{{$.MCPURL}}</code> as a remote MCP server (streamable HTTP).</span></div>
+</section>
+
+{{if .Log}}<section class="activity">
+<h2>Recent activity</h2>
+<ul class="card log">{{range .Log}}<li><span>{{activity . $.Data.Labels}}</span><time class="muted">{{since .At}}</time></li>{{end}}</ul>
+</section>{{end}}
+
+<section class="card pad danger-zone">
+<div><h3>Sign out everywhere</h3><p class="muted small" style="margin:4px 0 0">Signs you out of Slackline in every browser. Your agents stay connected.</p></div>
+<form method="post" action="/signout"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="everywhere" value="1"><button class="quiet">Sign out everywhere</button></form>
+</section>
+</div>
+{{end}}
+{{template "foot" .}}{{end}}
