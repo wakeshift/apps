@@ -10,27 +10,62 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/auth"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/wakeshift-go/internal/mcpevents/event"
 )
 
-// Events serves MCP Events on the app's MCP endpoint, so ChatGPT can be
-// woken: it advertises the events capability (server/discover and
-// initialize), lists one event, wakeshift.message (a conversation's
-// messages), and passes events/subscribe and events/unsubscribe on to
-// Wakeshift, which verifies the client's callback and POSTs the
-// conversation's messages to it, signed (docs/connectors.md, "ChatGPT").
-// Everything else goes to next.
+// EventsOptions configure ServeEvents.
+type EventsOptions struct {
+	// User is the app's ID for the person behind a request, from the
+	// endpoint's authentication ("" for none): subscriptions belong to them,
+	// a personal event's subscriptions need one, and list_subscriptions
+	// lists theirs. Guest sign-in: the TokenInfo's UserID.
+	User func(*auth.TokenInfo) string
+}
+
+// ServeEvents lets every client subscribe to the app's event types (define
+// them first, with DefineEvent), and returns the middleware that serves
+// MCP Events (SEP-3415, the revision event.Revision names) on the app's
+// MCP endpoint.
 //
-// The subscription names its conversation by the session handle the app's
-// tool results gave it (session_key), and Wakeshift only accepts one
-// of the caller's own: user returns the app's ID for the person calling
-// (as given to CallFrom; "" for none). Put it after the endpoint's
-// authentication, before the MCP handler:
+//   - Clients that speak MCP Events (ChatGPT) subscribe natively: the
+//     middleware advertises the events capability (server/discover and
+//     initialize, under both the draft's extension key and the top-level
+//     key ChatGPT reads), answers events/list with the event types, and
+//     passes events/subscribe and events/unsubscribe to Wakeshift, which
+//     verifies the client's callback and POSTs occurrences to it, signed,
+//     in order (docs/mcp-events-bridge.md). It speaks two dialects, chosen
+//     per request by the client's clientInfo (or User-Agent): ChatGPT's and
+//     the draft's. An Mcp-Name header, when present, must match
+//     params.name.
+//   - Every other client subscribes with the subscribe_events tool, which
+//     ServeEvents adds to srv (tools/list hides it from native clients),
+//     and Wakeshift wakes it the way its harness can be woken.
+//   - Every client can list its subscriptions (list_subscriptions) and stop
+//     one (unsubscribe_events): a headless app's users have no other way.
 //
+// Call it once per server, after the last DefineEvent (calling it again
+// replaces the tools, as the MCP SDK's AddTool does). Each event type's
+// Authorize runs before any subscription. The tools'
+// wording is fixed, and the TypeScript SDK's is the same
+// (sdk/typescript/test/event-tools.json). Put the middleware after the
+// endpoint's authentication, before the MCP handler:
+//
+//	events := app.ServeEvents(srv, appkit.EventsOptions{User: func(ti *auth.TokenInfo) string { return ti.UserID }})
 //	h := mcp.NewStreamableHTTPHandler(…, &mcp.StreamableHTTPOptions{Stateless: true})
-//	mux.Handle("/mcp", requireAuth(app.Events(userOf)(h)))
-func (a *App) Events(user func(r *http.Request) string) func(http.Handler) http.Handler {
+//	mux.Handle("/mcp", requireAuth(events(h)))
+func (a *App) ServeEvents(srv *mcp.Server, opts EventsOptions) func(http.Handler) http.Handler {
+	userOf := func(ti *auth.TokenInfo) string {
+		if ti == nil || opts.User == nil {
+			return ""
+		}
+		return opts.User(ti)
+	}
+	a.addEventTools(srv, userOf)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -55,33 +90,137 @@ func (a *App) Events(user func(r *http.Request) string) func(http.Handler) http.
 			switch req.Method {
 			case "server/discover", "initialize":
 				withEventsCapability(next, w, r)
+				return
+			case "tools/list":
+				if nativeClient(r, req.Params) {
+					withoutTool(next, w, r, subscribeTool)
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
 			case "events/list":
-				rpcResult(w, req.ID, map[string]any{"events": []any{event.Definition()}})
-			case "events/subscribe", "events/unsubscribe":
-				var p eventParams
-				if err := json.Unmarshal(req.Params, &p); err != nil {
-					rpcError(w, req.ID, -32602, "invalid params", nil)
-					return
+				defs := []any{}
+				for _, t := range a.events() {
+					defs = append(defs, t.definition())
 				}
-				call := Call{Meta: p.Meta, UserAgent: r.Header.Get("User-Agent")}
-				if user != nil {
-					call.User = user(r)
-				}
-				if info, ok := p.Meta["io.modelcontextprotocol/clientInfo"].(map[string]any); ok {
-					call.Client, _ = info["name"].(string)
-				}
-				out, err := a.eventCall(r.Context(), req.Method, call, p)
-				if err != nil {
-					code, msg, data := rpcErrorOf(err)
-					rpcError(w, req.ID, code, msg, data)
-					return
-				}
-				rpcResult(w, req.ID, out)
+				rpcResult(w, req.ID, map[string]any{"resultType": event.ResultType, "events": defs})
+				return
+			case "events/subscribe", "events/unsubscribe", "events/poll", "events/stream":
 			default:
 				next.ServeHTTP(w, r)
+				return
 			}
+			var p eventParams
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				rpcError(w, req.ID, event.InvalidParams, "invalid params", nil)
+				return
+			}
+			call := Call{Meta: p.Meta, UserAgent: r.Header.Get("User-Agent"), User: userOf(auth.TokenInfoFromContext(r.Context()))}
+			if info, ok := p.Meta["io.modelcontextprotocol/clientInfo"].(map[string]any); ok {
+				call.Client, _ = info["name"].(string)
+			}
+			dialect := event.DialectOf(call.Client, call.UserAgent)
+			codes := event.CodesFor(dialect)
+			if h := r.Header.Get(event.NameHeader); h != "" {
+				if v, ok := event.HeaderValue(h); !ok || v != p.Name {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{
+						"code": event.HeaderMismatch, "message": "Header mismatch: Mcp-Name doesn't match params.name"}})
+					return
+				}
+			}
+			if req.Method == "events/poll" || req.Method == "events/stream" {
+				rpcError(w, req.ID, codes.Unsupported, "only webhook delivery is offered", map[string]string{"feature": "deliveryMode",
+					"value": strings.TrimPrefix(req.Method, "events/")})
+				return
+			}
+			t := a.eventByName(p.Name)
+			if t == nil {
+				nameJSON, _ := json.Marshal(p.Name)
+				rpcError(w, req.ID, codes.NotFound, fill("native_unknown_event", "{event}", string(nameJSON)), map[string]string{"kind": "event"})
+				return
+			}
+			p.Arguments = t.known(p.Arguments)
+			if req.Method == "events/subscribe" && p.Delivery.Mode != "webhook" {
+				rpcError(w, req.ID, codes.Unsupported, `delivery.mode must be "webhook": the only delivery offered`,
+					map[string]string{"feature": "deliveryMode", "value": p.Delivery.Mode})
+				return
+			}
+			if call.User == "" {
+				rpcError(w, req.ID, codes.Forbidden, eventTools["native_no_user"], nil)
+				return
+			}
+			if req.Method == "events/subscribe" && t.authorize != nil {
+				args, _ := json.Marshal(p.Arguments)
+				if !t.authorize(r.Context(), Subscriber{User: call.User, Client: call.Client, Native: true}, args) {
+					rpcError(w, req.ID, codes.Forbidden, fill("native_refused", "{event}", t.name), nil)
+					return
+				}
+			}
+			out, err := a.eventCall(r.Context(), req.Method, call, dialect, p)
+			if err != nil {
+				code, msg, data := rpcErrorOf(err, codes)
+				rpcError(w, req.ID, code, msg, data)
+				return
+			}
+			rpcResult(w, req.ID, out)
 		})
 	}
+}
+
+// nativeClient reports whether the request comes from a client that
+// subscribes with MCP Events itself: one that declares the extension in
+// its capabilities (the request's _meta, as stateless clients send them),
+// or that is known to (ChatGPT).
+func nativeClient(r *http.Request, params json.RawMessage) bool {
+	var p struct {
+		Meta map[string]any `json:"_meta"`
+	}
+	json.Unmarshal(params, &p)
+	var client string
+	if info, ok := p.Meta["io.modelcontextprotocol/clientInfo"].(map[string]any); ok {
+		client, _ = info["name"].(string)
+	}
+	if event.DialectOf(client, r.Header.Get("User-Agent")) == event.DialectChatGPT {
+		return true
+	}
+	caps, _ := p.Meta["io.modelcontextprotocol/clientCapabilities"].(map[string]any)
+	if _, ok := caps[event.LegacyKey]; ok {
+		return true
+	}
+	ext, _ := caps["extensions"].(map[string]any)
+	_, ok := ext[event.ExtensionKey]
+	return ok
+}
+
+// withoutTool serves a tools/list request with next, leaving out the tool
+// named name, in a JSON answer or an SSE one.
+func withoutTool(next http.Handler, w http.ResponseWriter, r *http.Request, name string) {
+	rewrite(next, w, r, func(b []byte) []byte {
+		var resp map[string]any
+		if json.Unmarshal(b, &resp) != nil {
+			return b
+		}
+		res, ok := resp["result"].(map[string]any)
+		if !ok {
+			return b
+		}
+		tools, _ := res["tools"].([]any)
+		kept := []any{}
+		for _, t := range tools {
+			if m, ok := t.(map[string]any); ok && m["name"] == name {
+				continue
+			}
+			kept = append(kept, t)
+		}
+		res["tools"] = kept
+		out, err := json.Marshal(resp)
+		if err != nil {
+			return b
+		}
+		return out
+	})
 }
 
 // eventParams are events/subscribe's and events/unsubscribe's params.
@@ -93,50 +232,83 @@ type eventParams struct {
 		URL    string `json:"url"`
 		Secret string `json:"secret,omitempty"`
 	} `json:"delivery"`
-	TTLMs *int64         `json:"ttlMs"`
-	Meta  map[string]any `json:"_meta"`
+	TTLMs    *int64         `json:"ttlMs"`
+	Cursor   *string        `json:"cursor"`
+	MaxAgeMs *int64         `json:"maxAgeMs"`
+	Meta     map[string]any `json:"_meta"`
 }
 
-func (a *App) eventCall(ctx context.Context, method string, call Call, p eventParams) (map[string]any, error) {
-	body := map[string]any{"call": call, "name": p.Name, "arguments": p.Arguments, "delivery": p.Delivery}
+// errNoSubscription is an events/unsubscribe that matched nothing.
+var errNoSubscription = errors.New("no subscription matches")
+
+func (a *App) eventCall(ctx context.Context, method string, call Call, dialect string, p eventParams) (map[string]any, error) {
+	body := map[string]any{"call": call, "name": p.Name, "arguments": p.Arguments, "delivery": p.Delivery, "dialect": dialect}
 	if method == "events/unsubscribe" {
-		err := a.appCall(ctx, "POST", "/api/apps/v1/events/unsubscribe", body, nil)
-		return map[string]any{}, err
+		var out struct {
+			Ended bool `json:"ended"`
+		}
+		if err := a.appCall(ctx, "POST", "/api/apps/v1/events/unsubscribe", body, &out); err != nil {
+			return nil, err
+		}
+		// The draft says NotFound for a key that matches nothing; ChatGPT
+		// gets the empty result it always has.
+		if !out.Ended && dialect != event.DialectChatGPT {
+			return nil, errNoSubscription
+		}
+		return map[string]any{"resultType": event.ResultType}, nil
 	}
 	if p.TTLMs != nil {
 		body["ttl_ms"] = *p.TTLMs
 	}
+	if p.Cursor != nil {
+		body["cursor"] = *p.Cursor
+	}
+	if p.MaxAgeMs != nil {
+		body["max_age_ms"] = *p.MaxAgeMs
+	}
 	var out struct {
-		ID            string `json:"id"`
-		RefreshBefore string `json:"refresh_before"`
+		ID             string          `json:"id"`
+		RefreshBefore  time.Time       `json:"refresh_before"`
+		Cursor         string          `json:"cursor"`
+		Truncated      bool            `json:"truncated"`
+		DeliveryStatus json.RawMessage `json:"delivery_status"`
 	}
 	if err := a.appCall(ctx, "POST", "/api/apps/v1/events/subscribe", body, &out); err != nil {
 		return nil, err
 	}
-	return map[string]any{"id": out.ID, "refreshBefore": out.RefreshBefore, "cursor": nil, "truncated": false}, nil
+	res := map[string]any{"resultType": event.ResultType, "id": out.ID, "refreshBefore": out.RefreshBefore.UTC().Format(time.RFC3339),
+		"cursor": out.Cursor, "truncated": out.Truncated}
+	if len(out.DeliveryStatus) > 0 && string(out.DeliveryStatus) != "null" {
+		res["deliveryStatus"] = out.DeliveryStatus
+	}
+	return res, nil
 }
 
-// JSON-RPC error codes: invalid params, internal error, and ChatGPT's
-// CallbackEndpointError (SEP-3415 drafts number it -32027; ChatGPT's docs
-// say -32015).
-const (
-	rpcInvalidParams = -32602
-	rpcInternal      = -32603
-	rpcCallback      = -32015
-)
+// rpcInternal is JSON-RPC's internal error.
+const rpcInternal = -32603
 
-func rpcErrorOf(err error) (code int, msg string, data any) {
+// rpcErrorOf is the JSON-RPC error for a failed call, in the client's
+// dialect's codes. A conversation that isn't the caller's is Forbidden,
+// whether it exists or not, so a handle can't be probed.
+func rpcErrorOf(err error, codes event.Codes) (code int, msg string, data any) {
+	if errors.Is(err, errNoSubscription) {
+		return codes.NotFound, "no subscription matches that event, arguments and delivery URL", map[string]string{"kind": "subscription"}
+	}
 	var e *APIError
 	if !errors.As(err, &e) {
 		return rpcInternal, "Wakeshift couldn't be reached", nil
 	}
 	switch e.Code {
 	case "callback_failed":
-		return rpcCallback, e.Message, map[string]string{"reason": e.Reason}
-	case "unknown_event", "bad_request":
-		return rpcInvalidParams, e.Message, nil
+		return codes.CallbackEndpoint, e.Message, map[string]string{"reason": e.Reason}
+	case "unknown_event":
+		return codes.NotFound, e.Message, map[string]string{"kind": "event"}
+	case "unsupported":
+		return codes.Unsupported, e.Message, map[string]string{"feature": "deliveryMode"}
+	case "bad_request", "bad_arguments":
+		return event.InvalidParams, e.Message, nil
 	case "unknown_session", "other_client", "unknown_conversation":
-		return rpcInvalidParams, "no conversation of yours has that session handle: pass the session_key a result of this app's tools gave you", nil
+		return codes.Forbidden, "another client of yours holds that subscription", nil
 	}
 	return rpcInternal, "Wakeshift refused the subscription: " + e.Message, nil
 }
@@ -156,21 +328,26 @@ func rpcError(w http.ResponseWriter, id json.RawMessage, code int, msg string, d
 }
 
 // withEventsCapability serves a discover (or initialize) request with
-// next, adding "events" (as ChatGPT reads it) and the
-// io.modelcontextprotocol/events extension (SEP-3415) to the server's
-// capabilities, in a JSON answer or an SSE one.
+// next, adding the events capability to the server's capabilities, in a
+// JSON answer or an SSE one.
 func withEventsCapability(next http.Handler, w http.ResponseWriter, r *http.Request) {
+	rewrite(next, w, r, addEventsCapability)
+}
+
+// rewrite serves a request with next, passing each JSON-RPC message of the
+// answer (a JSON one, or an SSE one's data lines) through f.
+func rewrite(next http.Handler, w http.ResponseWriter, r *http.Request, f func([]byte) []byte) {
 	rec := httptest.NewRecorder()
 	next.ServeHTTP(rec, r)
 	out := rec.Body.Bytes()
 	switch ct := rec.Header().Get("Content-Type"); {
 	case strings.HasPrefix(ct, "application/json"):
-		out = addEventsCapability(out)
+		out = f(out)
 	case strings.HasPrefix(ct, "text/event-stream"):
 		lines := bytes.Split(out, []byte("\n"))
 		for i, l := range lines {
 			if data, ok := bytes.CutPrefix(l, []byte("data: ")); ok {
-				lines[i] = append([]byte("data: "), addEventsCapability(data)...)
+				lines[i] = append([]byte("data: "), f(data)...)
 			}
 		}
 		out = bytes.Join(lines, []byte("\n"))
@@ -182,7 +359,9 @@ func withEventsCapability(next http.Handler, w http.ResponseWriter, r *http.Requ
 }
 
 // addEventsCapability adds the capability to a JSON-RPC result that has
-// capabilities (anything else comes back as it was).
+// capabilities (anything else comes back as it was): the draft's
+// extensions["io.modelcontextprotocol/events"], and the top-level "events"
+// ChatGPT reads.
 func addEventsCapability(b []byte) []byte {
 	var resp map[string]any
 	if json.Unmarshal(b, &resp) != nil {
@@ -196,12 +375,13 @@ func addEventsCapability(b []byte) []byte {
 	if caps == nil {
 		caps = map[string]any{}
 	}
-	caps["events"] = map[string]any{}
+	settings := map[string]any{"listChanged": false}
+	caps[event.LegacyKey] = settings
 	ext, _ := caps["extensions"].(map[string]any)
 	if ext == nil {
 		ext = map[string]any{}
 	}
-	ext["io.modelcontextprotocol/events"] = map[string]any{}
+	ext[event.ExtensionKey] = settings
 	caps["extensions"] = ext
 	res["capabilities"] = caps
 	out, err := json.Marshal(resp)

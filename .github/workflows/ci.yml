@@ -70,3 +70,33 @@ jobs:
         env:
           WAKESHIFT_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
         run: cd webhooks && npm ci --no-fund --no-audit && npm run lint && npm test
+
+  holdem:
+    name: Agent Hold'em
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: The TypeScript SDK (until it's on npm)
+        run: if [ -d third_party/wakeshift-node ]; then cd third_party/wakeshift-node && npm ci --no-fund --no-audit && npm run build; fi
+      - name: The engine
+        run: cd holdem/engine && npm ci --no-fund --no-audit && npm run lint && npm test
+      - name: Lint and test
+        env:
+          WAKESHIFT_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+        run: cd holdem && npm ci --no-fund --no-audit && npm run lint && npm test

@@ -23,28 +23,43 @@ const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
 }) as typeof fetch;
 
 const seed = Buffer.alloc(32, 7).toString("base64url");
-const ws = new Wakeshift({ key: `wst_test_ci-bot_${seed}`, core: "http://core.test", fetch: fakeFetch });
+const wake = new Wakeshift({ key: `wst_test_ci-bot_${seed}`, core: "http://core.test", fetch: fakeFetch });
 const server = new McpServer({ name: "ci-bot", version: "1.0.0" });
 
 server.registerTool(
   "watch_ci",
-  { description: "Wake me when CI finishes", inputSchema: { repo: z.string(), branch: z.string().optional(), ...ws.args } },
+  { description: "Wake me when CI finishes", inputSchema: { repo: z.string(), branch: z.string().optional(), ...wake.args } },
   async ({ repo, branch, ...args }, extra) => {
-    const sub = await ws.subscribe(ws.call(extra, { server, args }), `ci/${repo.toLowerCase()}`, { filter: branch ? { branch } : undefined });
+    const sub = await wake.subscribe(wake.call(extra, { server, args }), `ci/${repo.toLowerCase()}`, { filter: branch ? { branch } : undefined });
     return sub.result(`Watching CI on ${repo}.`);
   },
 );
-server.registerTool("list_prs", { inputSchema: { repo: z.string(), ...ws.args } }, async ({ repo, ...args }, extra) =>
-  ws.annotate(ws.call(extra, { server, args }), { content: [{ type: "text", text: `No PRs on ${repo}.` }] }),
+server.registerTool("list_prs", { inputSchema: { repo: z.string(), ...wake.args } }, async ({ repo, ...args }, extra) =>
+  wake.annotate(wake.call(extra, { server, args }), { content: [{ type: "text", text: `No PRs on ${repo}.` }] }),
 );
 server.registerTool("ping", { inputSchema: { repo: z.string() } }, async () => ({ content: [{ type: "text", text: "pong" }] }));
+
+// Events: the zod schemas become JSON Schema with whichever zod is installed.
+const ev = new Wakeshift({ key: `wst_test_ci-bot_${seed}`, core: "http://core.test", fetch: fakeFetch });
+const build = ev.defineEvent("ci.build", {
+  description: "A CI run finished",
+  args: z.object({ repo: z.string(), branch: z.string().optional() }),
+  payload: z.object({ conclusion: z.string(), branch: z.string() }),
+  text: (p, a) => `CI ${p.conclusion} on ${a.repo}`,
+});
+assert.equal(build.manifest.topic, "ev/ci.build/{repo}");
+assert.deepEqual(build.manifest.filter, { branch: "{branch}" });
+assert.deepEqual(build.manifest.arguments.required, ["repo"]);
+assert.equal((build.manifest.payload.properties as any).conclusion.type, "string");
+const evServer = new McpServer({ name: "ci-bot-events", version: "1.0.0" });
+ev.serveEvents(evServer, { user: () => "u1" });
 
 const [a, b] = InMemoryTransport.createLinkedPair();
 const client = new Client({ name: "Cursor", version: "1.0.0" });
 await Promise.all([server.connect(a), client.connect(b)]);
 
 const { tools } = await client.listTools();
-assert.deepEqual(Object.keys(tools.find((t) => t.name === "ping")!.inputSchema.properties ?? {}), ["repo"], "a tool without ws.args is left alone");
+assert.deepEqual(Object.keys(tools.find((t) => t.name === "ping")!.inputSchema.properties ?? {}), ["repo"], "a tool without wake.args is left alone");
 const watched = (await client.callTool({ name: "watch_ci", arguments: { repo: "acme", session_key: "h1", harness: "grok-bot", conversation_id: "c1" } })) as CallToolResult;
 assert.equal((watched.content[0] as { text: string }).text, "Watching CI on acme.\n\nStart the Monitor tool now.");
 const listed = (await client.callTool({ name: "list_prs", arguments: { repo: "acme", session_key: "h1" } })) as CallToolResult;

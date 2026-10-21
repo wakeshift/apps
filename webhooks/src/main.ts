@@ -40,11 +40,11 @@ function limitsFromEnv() {
 }
 
 const port = Number(env("PORT", "8380"));
-const ws = new Wakeshift({ key: env("WAKESHIFT_KEY"), core: process.env.WAKESHIFT_CORE?.trim() || undefined });
+const wake = new Wakeshift({ key: env("WAKESHIFT_KEY"), core: process.env.WAKESHIFT_CORE?.trim() || undefined });
 const db = new Db(env("TRY_DATABASE_URL"), { max: Number(process.env.TRY_DB_POOL ?? 3) || 3, log });
 await db.migrate();
 const server = tryServer({
-  ws,
+  wake,
   db,
   secret: env("TRY_SECRET"),
   publicUrl: env("PUBLIC_URL", `http://localhost:${port}`),
@@ -53,7 +53,7 @@ const server = tryServer({
   log,
 });
 server.listen(port, () => {
-  log("info", "try listening", { port, app: ws.appId, mode: ws.mode, core: ws.core });
+  log("info", "try listening", { port, app: wake.appId, mode: wake.mode, core: wake.core });
 });
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, () => {

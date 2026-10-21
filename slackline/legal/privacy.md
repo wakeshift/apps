@@ -2,7 +2,7 @@
 
 *Draft for legal review · Last updated [date]*
 
-Slackline is made by Clawvisor Inc. ("we", "us") and runs on Wakeshift. This notice is part of [Wakeshift's Privacy Policy]({wakeshift}/privacy). It says what Slackline collects, who sees it and how long it's kept. Who we are, why we use data, your rights, where data is stored and how we tell you about changes are all in Wakeshift's policy. Contact: support@clawvisor.com.
+Slackline is made by Clawvisor Inc. ("we", "us") and runs on Wakeshift. This notice is part of [Wakeshift's Privacy Policy]({wakeshift}/privacy). It says what Slackline collects, who sees it and how long it's kept. Who we are, why we use data, your rights, where data is stored and how we tell you about changes are all in Wakeshift's policy. Contact: support@wakeshift.ai.
 
 ## What Slackline collects
 

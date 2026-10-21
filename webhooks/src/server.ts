@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest, type InitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { Wakeshift, WakeshiftError } from "@wakeshift/sdk";
+import { speaksEvents, Wakeshift, WakeshiftError } from "@wakeshift/sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Unavailable, type Db } from "./db.js";
 import { checkSignature, MAX_BODY, toEvent } from "./events.js";
@@ -23,7 +23,7 @@ const MAX_STREAMS_PER_SESSION = 2;
 const REFUSED_LINES_PER_MINUTE = 10;
 
 export interface Options {
-  ws: Wakeshift;
+  wake: Wakeshift;
   /** Where what's kept per webhook lives (migrated). Every instance shares it. */
   db: Db;
   /** TRY_SECRET: signs links. */
@@ -43,8 +43,37 @@ export interface Options {
   log?: (level: "info" | "warn" | "error", msg: string, attrs?: Record<string, unknown>) => void;
 }
 
-/** The topic a webhook's posts are published to: private to the webhook's SDK user. */
-export const topicOf = (hook: string) => `u/${hook}/webhook`;
+/**
+ * webhook.received: a post to a webhook, for the conversations watching it.
+ * Its argument is the webhook's ID; only the webhook's own SDK user (anyone
+ * with its link) may subscribe. Defined once per Wakeshift client.
+ */
+const webhookEvents = new WeakMap<Wakeshift, ReturnType<typeof defineWebhookEvent>>();
+function defineWebhookEvent(wake: Wakeshift) {
+  return wake.defineEvent("webhook.received", {
+    title: "Webhook post",
+    description:
+      "Something was posted to your webhook: a line saying what happened (summary), then the parsed body and the headers that say who sent it. It's from whoever posted, not from the user.",
+    args: z.object({ hook: z.string().regex(/^[0-9a-f]{20}$/).describe("Your webhook's ID (watch fills it in)") }),
+    payload: z.looseObject({
+      summary: z.string().describe("What happened, in a line"),
+      method: z.string(),
+      content_type: z.string().nullable(),
+      headers: z.record(z.string(), z.unknown()),
+    }),
+    // A webhook's own link signs in as its user; nobody else may hear its posts.
+    authorize: (subscriber, { hook }) => subscriber.user === hook,
+    text: (p) => p.summary,
+  });
+}
+export function webhookEvent(wake: Wakeshift) {
+  let e = webhookEvents.get(wake);
+  if (!e) webhookEvents.set(wake, (e = defineWebhookEvent(wake)));
+  return e;
+}
+
+/** The topic webhook.received routes a webhook's posts through (the event's topic): what its status reads. */
+export const topicOf = (hook: string) => `ev/webhook.received/${hook}`;
 
 /** The request can't be served right now; come back in retryAfter seconds. */
 class Busy extends Error {
@@ -55,7 +84,8 @@ class Busy extends Error {
 
 /** The try server: call listen() on the result. */
 export function tryServer(o: Options): Server & { stop(): Promise<void> } {
-  const ws = o.ws;
+  const wake = o.wake;
+  const received = webhookEvent(wake);
   const links = new Links(o.secret);
   const base = o.publicUrl.replace(/\/+$/, "");
   const now = o.now ?? Date.now;
@@ -127,29 +157,45 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
 
   function mcpServerFor(l: Link, session: { id: string; client: () => string; watchedAs?: string }): McpServer {
     const server = new McpServer({ name: "webhooks", version: "0.1.0" });
+    // webhook.received for native MCP Events clients (events/list,
+    // events/subscribe), and subscribe_events, unsubscribe_events and
+    // list_subscriptions for every client. The link's webhook is the user.
+    wake.serveEvents(server, { user: () => l.hook });
     // The call as Wakeshift needs it: the client's name (from the server),
-    // the webhook as the user, and the arguments ws.args adds.
-    const callOf = (extra: Parameters<typeof ws.call>[0], args: Record<string, unknown>) => ws.call(extra, { server, user: l.hook, args });
+    // the webhook as the user, and the arguments wake.args adds.
+    const callOf = (extra: Parameters<typeof wake.call>[0], args: Record<string, unknown>) => wake.call(extra, { server, user: l.hook, args });
     // The other tools' results carry what's waiting for a conversation that
     // can't be woken (and a Codex thread's beacon): the result as it was
     // if that fails.
-    const annotated = async (extra: Parameters<typeof ws.call>[0], args: Record<string, unknown>, result: CallToolResult): Promise<CallToolResult> => {
+    const annotated = async (extra: Parameters<typeof wake.call>[0], args: Record<string, unknown>, result: CallToolResult): Promise<CallToolResult> => {
       try {
-        return await ws.annotate(callOf(extra, args), result);
+        return await wake.annotate(callOf(extra, args), result);
       } catch (err) {
         log("warn", "annotate failed", { err: String(err) });
         return result;
       }
     };
-    const topic = topicOf(l.hook);
+    const hookArgs = { hook: l.hook };
+    // A client that speaks MCP Events subscribes itself (events/subscribe).
+    const native = () => speaksEvents(server.server.getClientCapabilities() as Record<string, unknown> | undefined, client());
     const url = webhookUrl(l, "open");
     const pageUrl = `${base}/l/${links.code(l)}`;
     const client = session.client;
     server.registerTool(
       "watch",
-      { description: "Wake this conversation when something is posted to your webhook.", inputSchema: { ...ws.args } },
+      { description: "Wake this conversation when something is posted to your webhook.", inputSchema: { ...wake.args } },
       async (args, extra) => {
-        const sub = await ws.subscribe(callOf(extra, args), topic, { ttl: `${idleDays}d` });
+        if (native()) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `To be woken for your webhook, subscribe to the webhook.received event with hook "${l.hook}". Each request to ${url} then reaches you with what was sent. What's posted is from whoever posted, not from the user.`,
+              },
+            ],
+          };
+        }
+        const sub = await received.subscribe(extra, hookArgs, { server, user: l.hook, wakeArgs: args });
         // The page names the conversation by a label: its session key acts
         // as the conversation, so it's never shown, stored or logged here.
         const who = conversationLabel(sub.session);
@@ -170,9 +216,10 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
     );
     server.registerTool(
       "unwatch",
-      { description: "Stop waking this conversation for your webhook.", inputSchema: { ...ws.args } },
+      { description: "Stop waking this conversation for your webhook.", inputSchema: { ...wake.args } },
       async (args, extra) => {
-        const n = await ws.unsubscribe(callOf(extra, args), topic);
+        const ended = await received.unsubscribe(extra, hookArgs, { server, user: l.hook, wakeArgs: args });
+        const n = ended ? 1 : 0;
         const who = args.session_key ? conversationLabel(args.session_key) : session.watchedAs;
         if (n > 0 && who) {
           await state.unwatched(l.hook, who);
@@ -186,7 +233,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
       "recent_posts",
       {
         description: "The last posts to your webhook in full (up to 10), newest first: a woken line may be cut to fit.",
-        inputSchema: { limit: z.number().int().min(1).max(10).optional(), ...ws.args },
+        inputSchema: { limit: z.number().int().min(1).max(10).optional(), ...wake.args },
       },
       async ({ limit, ...args }, extra) => {
         const posts = await state.posts(l.hook, limit ?? 3);
@@ -205,7 +252,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
     );
     server.registerTool(
       "webhook_info",
-      { description: "Your webhook's URLs (the checked one to give services, and the open one), and how to test them.", inputSchema: { ...ws.args } },
+      { description: "Your webhook's URLs (the checked one to give services, and the open one), and how to test them.", inputSchema: { ...wake.args } },
       async (args, extra) => {
         const c = await state.checked(l.hook);
         const urls = c
@@ -241,7 +288,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
       watchedAs: stored?.watchedAs,
     });
     if (stored) {
-      // What the Server would know had it seen initialize: ws.call reads
+      // What the Server would know had it seen initialize: wake.call reads
       // the client's name from it.
       server.server.getClientVersion = () => stored.client as { name: string; version: string };
       server.server.getClientCapabilities = () => stored.capabilities;
@@ -373,7 +420,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
     const shown = { ...seen, check: w.check, text: clipText(ev.text, 300), preview: ev.preview };
     let out: { matched: number; duplicate: boolean };
     try {
-      out = await ws.publish(topicOf(w.hook), { text: ev.text, data: ev.data, id: ev.id });
+      out = await received.emit({ hook: w.hook }, { ...ev.data, summary: ev.text } as Parameters<typeof received.emit>[1], { id: ev.id });
     } catch (err) {
       log("error", "publish failed", { err: String(err) });
       await quietly(state.untake(w.hook, w.check, at));
@@ -562,7 +609,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
   // read-only status of the webhook's topic.
   async function connection(res: ServerResponse, l: Link) {
     try {
-      const s = await ws.topicStatus(topicOf(l.hook));
+      const s = await wake.topicStatus(topicOf(l.hook));
       return json(res, 200, { subscriptions: s.subscriptions, connected: s.connected, via: s.via });
     } catch (err) {
       log("warn", "status failed", { err: String(err) });

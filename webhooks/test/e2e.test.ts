@@ -155,7 +155,7 @@ const codeById = (html: string, id: string) => {
 
 test("try against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (scripts/e2e.sh)" }, async (t) => {
   const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
-  const ws = new Wakeshift({ key, core });
+  const wake = new Wakeshift({ key, core });
   const perHour = 8;
   // The public URL has to be known before listening: find a free port first.
   const port = await new Promise<number>((resolve) => {
@@ -165,7 +165,7 @@ test("try against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (
     });
   });
   const dbUrl = await testDatabase(t);
-  const app = tryServer({ ws, db: openDb(t, dbUrl), secret, publicUrl: `http://127.0.0.1:${port}`, limits: { perHour, perDay: 100 }, log: () => {} });
+  const app = tryServer({ wake, db: openDb(t, dbUrl), secret, publicUrl: `http://127.0.0.1:${port}`, limits: { perHour, perDay: 100 }, log: () => {} });
   await new Promise<void>((r) => app.listen(port, "127.0.0.1", () => r()));
   const base = `http://127.0.0.1:${port}`;
 
@@ -215,7 +215,7 @@ test("try against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (
   // Claude Code: watch says to start Monitor with the session's wait in a loop.
   const claude = await connect("claude-code");
   const tools = (await claude.listTools()).tools.map((x) => x.name).sort();
-  assert.deepEqual(tools, ["recent_posts", "unwatch", "watch", "webhook_info"]);
+  assert.deepEqual(tools, ["list_subscriptions", "recent_posts", "subscribe_events", "unsubscribe_events", "unwatch", "watch", "webhook_info"]);
   const watched = (await claude.callTool({ name: "watch", arguments: {} })) as CallToolResult;
   const said = textOf(watched);
   assert.match(said, /^Watching your webhook\./);
@@ -259,7 +259,7 @@ test("try against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (
   assert.equal(got.event?.data?.headers?.authorization, undefined);
   const codexGot = await expectEvent(codexStream.inbox, want);
   assert.equal(codexGot.event?.trust, "external");
-  assert.deepEqual(codexGot.event?.from, { kind: "app", id: ws.appId });
+  assert.deepEqual(codexGot.event?.from, { kind: "app", id: wake.appId });
   const seen = await nextLive("post");
   assert.equal(seen.text, want);
   // The post in full, from recent_posts (a woken line may be cut to fit).
@@ -443,7 +443,7 @@ test("try against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (
   // post to one wakes it, and a page connected to the other shows the post.
   const startB = async () => {
     const db = openDb(t, dbUrl);
-    const b = tryServer({ ws, db, secret, publicUrl: base, limits: { perHour, perDay: 100 }, log: () => {} });
+    const b = tryServer({ wake, db, secret, publicUrl: base, limits: { perHour, perDay: 100 }, log: () => {} });
     await new Promise<void>((r) => b.listen(0, "127.0.0.1", () => r()));
     t.after(() => b.stop());
     return { b, url: `http://127.0.0.1:${(b.address() as AddressInfo).port}` };

@@ -1,0 +1,30 @@
+{
+  "name": "@wakeshift/holdem",
+  "version": "0.1.0",
+  "description": "Agent Hold'em: no-limit Texas Hold'em for AI agents, with play money and a daily leaderboard.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/main.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/src/main.js",
+    "test": "tsc -p tsconfig.json && node --test --test-concurrency=1 'dist/test/unit.test.js'"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/pg": "^8.23.1",
+    "@wakeshift/sdk": "file:../third_party/wakeshift-node",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
+}

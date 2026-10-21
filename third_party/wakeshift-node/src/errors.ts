@@ -7,12 +7,18 @@
 export class WakeshiftError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Wakeshift's own message, without the prefix. */
+  readonly detail: string;
+  /** Why, where the API says (callback_failed: what the callback did). */
+  readonly reason?: string;
 
-  constructor(status: number, code: string, message: string, options?: { cause?: unknown }) {
+  constructor(status: number, code: string, message: string, options?: { cause?: unknown; reason?: string }) {
     super(status ? `wakeshift: ${code || "error"} (${status}): ${message}` : `wakeshift: ${message}`, options);
     this.name = "WakeshiftError";
     this.status = status;
     this.code = code;
+    this.detail = message;
+    if (options?.reason) this.reason = options.reason;
   }
 }
 

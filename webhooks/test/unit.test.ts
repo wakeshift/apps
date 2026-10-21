@@ -560,8 +560,8 @@ test("pages escape what they're given", () => {
 const seed = Buffer.alloc(32, 7).toString("base64url");
 
 async function mcpFixture(t: { after: (fn: () => Promise<void>) => void }) {
-  const ws = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
-  const app = tryServer({ ws, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", log: () => {} });
+  const wake = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
+  const app = tryServer({ wake, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", log: () => {} });
   await new Promise<void>((r) => app.listen(0, "127.0.0.1", () => r()));
   t.after(() => app.stop());
   const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
@@ -611,7 +611,7 @@ test("mcp: a notification before initialize is accepted, and initialize works af
   await client.connect(new StreamableHTTPClientTransport(new URL(url)));
   t.after(() => client.close());
   const tools = (await client.listTools()).tools.map((x) => x.name).sort();
-  assert.deepEqual(tools, ["recent_posts", "unwatch", "watch", "webhook_info"]);
+  assert.deepEqual(tools, ["list_subscriptions", "recent_posts", "subscribe_events", "unsubscribe_events", "unwatch", "watch", "webhook_info"]);
 });
 
 test("mcp: the GET stream's headers and first bytes go out at once", async (t) => {
@@ -651,17 +651,18 @@ const codeIn = (html: string, id: string) => {
 };
 
 async function webhookFixture(t: { after: (fn: () => Promise<void>) => void }, perHour = 3) {
-  const ws = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
+  const wake = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
   const published: { text: string; data?: unknown; id?: string }[] = [];
   const ids = new Set<string>();
-  // Core's dedupe, in miniature.
-  ws.publish = async (_topic, ev) => {
-    const duplicate = !!ev.id && ids.has(ev.id);
-    if (ev.id) ids.add(ev.id);
-    if (!duplicate) published.push(ev);
+  // Core's dedupe, in miniature: webhook.received's emit, as what was published (its summary is the text).
+  wake.emitEvent = async (e) => {
+    const { summary: _summary, ...data } = e.payload as Record<string, unknown>;
+    const duplicate = !!e.id && ids.has(e.id);
+    if (e.id) ids.add(e.id);
+    if (!duplicate) published.push({ text: e.text, data, id: e.id });
     return { matched: 1, duplicate };
   };
-  const app = tryServer({ ws, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", limits: { perHour, perDay: 100 }, log: () => {} });
+  const app = tryServer({ wake, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", limits: { perHour, perDay: 100 }, log: () => {} });
   await new Promise<void>((r) => app.listen(0, "127.0.0.1", () => r()));
   t.after(() => app.stop());
   const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
@@ -824,15 +825,24 @@ async function instance(
   dbUrl: string,
   o: { now?: () => number; limits?: Record<string, number>; capacity?: { requests?: number; streams?: number }; calls?: Call[]; harness?: string } = {},
 ): Promise<Instance> {
-  const ws = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
-  ws.publish = async () => ({ matched: 1, duplicate: false });
-  ws.subscribe = async (call, topic) => {
-    o.calls?.push(call);
-    return { id: "sub_1", topic, once: false, expiresAt: new Date(), session: "wsc_" + call.client + "-secret", addition: {}, agent: { harness: o.harness ?? null, via: o.harness ? "meta" : null, claimed: null }, result: (text) => ({ content: [{ type: "text", text: String(text) }] }) };
-  };
-  ws.unsubscribe = async () => 1;
+  const wake = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
+  wake.emitEvent = async () => ({ matched: 1, duplicate: false });
+  // The event-subscription calls watch and unwatch make (webhook.received).
+  wake.requestApp = (async (_method: string, path: string, body: any) => {
+    if (path === "/event-subscriptions") {
+      o.calls?.push(body.call as Call);
+      return {
+        event_subscription: { id: "es_1", created: true },
+        session: "wsc_" + body.call.client + "-secret",
+        addition: {},
+        agent: { harness: o.harness ?? null, via: o.harness ? "meta" : null, claimed: null },
+      };
+    }
+    if (path === "/event-subscriptions/unsubscribe") return { ended: true };
+    return {};
+  }) as typeof wake.requestApp;
   const db = new Db(dbUrl);
-  const app = tryServer({ ws, db, secret, publicUrl: "http://127.0.0.1", limits: { perDay: 100, ...o.limits }, capacity: o.capacity, now: o.now, log: () => {} });
+  const app = tryServer({ wake, db, secret, publicUrl: "http://127.0.0.1", limits: { perDay: 100, ...o.limits }, capacity: o.capacity, now: o.now, log: () => {} });
   await new Promise<void>((r) => app.listen(0, "127.0.0.1", () => r()));
   let stopped = false;
   const stop = async () => {
@@ -962,7 +972,7 @@ test("two instances: one MCP session, its requests alternating between them, sur
   t.after(() => client.close());
   const sid = transport.sessionId!;
   assert.ok(sid);
-  for (let i = 0; i < 4; i++) assert.deepEqual((await client.listTools()).tools.map((x) => x.name).sort(), ["recent_posts", "unwatch", "watch", "webhook_info"]);
+  for (let i = 0; i < 4; i++) assert.deepEqual((await client.listTools()).tools.map((x) => x.name).sort(), ["list_subscriptions", "recent_posts", "subscribe_events", "unsubscribe_events", "unwatch", "watch", "webhook_info"]);
   // Every tool call is served by a server rebuilt from what initialize
   // said: the client's name reaches Wakeshift whichever instance it lands on.
   for (let i = 0; i < 2; i++) await client.callTool({ name: "watch", arguments: {} });
@@ -1150,8 +1160,8 @@ test("overload: a stream counts as a request until it's admitted, then gives its
 // ── Legal pages ──────────────────────────────────────────────────────────
 
 test("legal: /terms, /tos and /privacy are Webhooks' own, linking to Wakeshift's for the platform", async (t) => {
-  const ws = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
-  const app = tryServer({ ws, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", log: () => {} });
+  const wake = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
+  const app = tryServer({ wake, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", log: () => {} });
   await new Promise<void>((r) => app.listen(0, "127.0.0.1", () => r()));
   t.after(() => app.stop());
   const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
@@ -1330,8 +1340,8 @@ test("links: an IPv6 client is counted by its /64", async (t) => {
   assert.equal(addressKey("2001:DB8:1:2::ffff%en0"), "2001:db8:1:2::/64");
   assert.notEqual(addressKey("2001:db8:1:3::1"), addressKey("2001:db8:1:2::1"));
   // Through the server, behind a proxy: addresses in one /64 share the limit.
-  const ws = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
-  const app = tryServer({ ws, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", proxyHops: 1, limits: { linksPerHour: 2 }, log: () => {} });
+  const wake = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
+  const app = tryServer({ wake, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", proxyHops: 1, limits: { linksPerHour: 2 }, log: () => {} });
   await new Promise<void>((r) => app.listen(0, "127.0.0.1", () => r()));
   t.after(() => app.stop());
   const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;

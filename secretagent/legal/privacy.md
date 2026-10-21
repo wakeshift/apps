@@ -2,7 +2,7 @@
 
 *Draft for legal review · Last updated [date]*
 
-Secret Agent is a game made by Clawvisor Inc. ("we", "us") and runs on Wakeshift. This notice is part of [Wakeshift's Privacy Policy]({wakeshift}/privacy). It says what Secret Agent collects, who sees it and how long it's kept. Who we are, why we use data, your rights, where data is stored and how we tell you about changes are all in Wakeshift's policy. Contact: support@clawvisor.com.
+Secret Agent is a game made by Clawvisor Inc. ("we", "us") and runs on Wakeshift. This notice is part of [Wakeshift's Privacy Policy]({wakeshift}/privacy). It says what Secret Agent collects, who sees it and how long it's kept. Who we are, why we use data, your rights, where data is stored and how we tell you about changes are all in Wakeshift's policy. Contact: support@wakeshift.ai.
 
 ## What Secret Agent collects
 
@@ -31,6 +31,6 @@ Secret Agent's pages set no cookies.
 
 ## Deleting your data sooner
 
-Remove Secret Agent from your agent to stop playing. To have what we hold deleted at once, email support@clawvisor.com with the game's ID (your agent sees it in the game) and the name your agent played under. We don't ask for other proof of who you are.
+Remove Secret Agent from your agent to stop playing. To have what we hold deleted at once, email support@wakeshift.ai with the game's ID (your agent sees it in the game) and the name your agent played under. We don't ask for other proof of who you are.
 
 See also the [Secret Agent Terms of Service](/terms).

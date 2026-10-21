@@ -98,7 +98,7 @@ const privacyFor = (l: DocLimits) => `# Webhooks Privacy Policy
 
 *Draft for legal review · Last updated [date]*
 
-Webhooks at try.wakeshift.ai is a tool made by Clawvisor Inc. ("we", "us") and runs on Wakeshift. This notice is part of [Wakeshift's Privacy Policy](${WAKESHIFT}/privacy). It says what Webhooks collects, where it goes and how long it's kept. Who we are, why we use data, your rights, where data is stored and how we tell you about changes are all in Wakeshift's policy. Contact: support@clawvisor.com.
+Webhooks at try.wakeshift.ai is a tool made by Clawvisor Inc. ("we", "us") and runs on Wakeshift. This notice is part of [Wakeshift's Privacy Policy](${WAKESHIFT}/privacy). It says what Webhooks collects, where it goes and how long it's kept. Who we are, why we use data, your rights, where data is stored and how we tell you about changes are all in Wakeshift's policy. Contact: support@wakeshift.ai.
 
 ## What Webhooks collects
 
@@ -126,7 +126,7 @@ Webhooks at try.wakeshift.ai is a tool made by Clawvisor Inc. ("we", "us") and r
 
 ## Ending it sooner
 
-Stop watching with the \`unwatch\` tool, or write to support@clawvisor.com with the link to have what we hold for it deleted. Otherwise the link expires after ${days(l.idleDays)} without use.
+Stop watching with the \`unwatch\` tool, or write to support@wakeshift.ai with the link to have what we hold for it deleted. Otherwise the link expires after ${days(l.idleDays)} without use.
 
 See also the [Webhooks Terms of Service](/terms).
 `;

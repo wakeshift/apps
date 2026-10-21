@@ -14,6 +14,8 @@ export interface AppKey {
   mode: "test" | "live";
   appId: string;
   privateKey: KeyObject;
+  /** The 32-byte seed: what the SDK's own signed values (guest sign-in) are keyed from. */
+  seed: Buffer;
 }
 
 const appIdRE = /^[a-z][a-z0-9-]{1,39}$/;
@@ -37,7 +39,7 @@ export function parseKey(key: string): AppKey {
   const raw = seedRE.test(seed) ? Buffer.from(seed, "base64url") : Buffer.alloc(0);
   if (raw.length !== 32) throw new Error("wakeshift: the app key is cut short or mistyped");
   const privateKey = createPrivateKey({ key: Buffer.concat([pkcs8Prefix, raw]), format: "der", type: "pkcs8" });
-  return { mode, appId, privateKey };
+  return { mode, appId, privateKey, seed: raw };
 }
 
 /** The app's public key, base64url (what the console stores). */

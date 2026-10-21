@@ -18,9 +18,45 @@ In the [Wakeshift console](https://app.wakeshift.ai), open **Build → New app**
 app, err := appkit.FromKey(os.Getenv("WAKESHIFT_KEY"), "https://app.wakeshift.ai", "https://your-app.example/mcp")
 ```
 
+## Events
+
+Define each event your app offers once, at startup: its name, the arguments a subscriber picks and what each occurrence carries (both Go types; their JSON Schemas come from them), who may subscribe, and the line it reads as.
+
+```go
+type channelArgs struct {
+	Channel string `json:"channel" jsonschema:"The channel to watch"`
+}
+type message struct {
+	From string `json:"from"`
+	Text string `json:"text"`
+}
+
+msg, err := appkit.DefineEvent(app, "chat.message", appkit.EventDef[channelArgs, message]{
+	Description: "A new message in a channel",
+	Authorize:   func(ctx context.Context, s appkit.Subscriber, a channelArgs) bool { return canRead(s.User, a.Channel) },
+	Text:        func(m message, a channelArgs) string { return m.From + " in #" + a.Channel + ": " + m.Text },
+})
+```
+
+Publish your manifest (it carries the events) and serve them on your MCP endpoint, after its authentication:
+
+```go
+app.PublishManifest(ctx, appkit.Manifest{Description: "Team chat"})
+events := app.ServeEvents(srv, appkit.EventsOptions{User: func(ti *auth.TokenInfo) string { return ti.UserID }})
+mux.Handle("/mcp", requireAuth(events(mcpHandler)))
+```
+
+Every client can now subscribe: ChatGPT with MCP Events, every other agent with the `subscribe_events` tool that `ServeEvents` adds, and anyone can see and stop theirs with `list_subscriptions` and `unsubscribe_events`. When something happens, emit it:
+
+```go
+msg.Emit(ctx, channelArgs{Channel: "eng"}, message{From: "ada", Text: "shipped it"})
+```
+
+Every conversation subscribed to `#eng` wakes with it, framed as information from outside. A **personal** event (`Personal: true`) belongs to each subscriber: `Emit(…, appkit.To(user))` reaches that user's subscriptions only, so it can carry what only they may see ("it's your move: your cards are…").
+
 ## Subscribe and publish
 
-A tool subscribes the conversation that called it to a topic. Add `appkit.Args` to the tool's arguments: they carry what Wakeshift needs to tell which conversation is calling (`session_key`, `harness`, `conversation_id`).
+Events are built on topics, which you can use directly. A tool subscribes the conversation that called it to a topic. Add `appkit.Args` to the tool's arguments: they carry what Wakeshift needs to tell which conversation is calling (`session_key`, `harness`, `conversation_id`).
 
 ```go
 type watchArgs struct {

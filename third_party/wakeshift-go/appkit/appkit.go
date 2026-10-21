@@ -35,6 +35,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,8 @@ type App struct {
 	jwksAt    time.Time         // last successful fetch
 	jwksTried time.Time         // last attempt
 	exchanged map[string]*Agent // by the agent's token
+
+	eventTypes []*eventType // DefineEvent's, in order
 }
 
 // APIError is an error response from Wakeshift.
@@ -163,6 +166,9 @@ type Manifest struct {
 	Accounts  string          `json:"accounts,omitempty"`
 	Agent     *AgentScope     `json:"agent,omitempty"`
 	Workspace *WorkspaceScope `json:"workspace,omitempty"`
+	// Events are the app's event types. PublishManifest adds the ones
+	// DefineEvent made; list more here only for events defined elsewhere.
+	Events []ManifestEvent `json:"events,omitempty"`
 }
 
 type AgentScope struct {
@@ -202,8 +208,16 @@ type ScopeEvent struct {
 	Description string `json:"description"`
 }
 
-// PublishManifest tells Wakeshift what the app may do.
+// PublishManifest tells Wakeshift what the app may do, with the event
+// types DefineEvent made. An event type both defined and listed in
+// m.Events is an error: the two could differ.
 func (a *App) PublishManifest(ctx context.Context, m Manifest) error {
+	for _, t := range a.events() {
+		if slices.ContainsFunc(m.Events, func(e ManifestEvent) bool { return e.Name == t.name }) {
+			return fmt.Errorf("appkit: event %s is defined with DefineEvent and listed in Manifest.Events: keep one", t.name)
+		}
+		m.Events = append(m.Events, t.manifestEntry())
+	}
 	return a.appCall(ctx, "PUT", "/api/apps/v1/manifest", m, nil)
 }
 

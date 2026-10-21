@@ -17,7 +17,7 @@ declare global {
   const z: typeof zod;
 
   // The app around a tool.
-  const ws: SDK.Wakeshift;
+  const wake: SDK.Wakeshift;
   const server: McpServerClass;
   // Inside a tool callback.
   const extra: RequestHandlerExtra<ServerRequest, ServerNotification>;

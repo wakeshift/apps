@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { createHash, randomBytes } from "node:crypto";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import { WakeshiftError } from "./errors.js";
+import { WakeEvent, serveEvents as serveEventsOn, type EventOptions, type EventTypeManifest, type ServeEventsOptions } from "./events.js";
 import { parseKey, signAssertion, type AppKey } from "./key.js";
 
 /** Wakeshift's production core, the default for live keys. Override with `core` or WAKESHIFT_CORE. */
@@ -53,13 +57,13 @@ export const UNKNOWN_CLIENT_WARNING =
   "call's _meta or User-Agent, and no harness argument), so it treats the agent as one it can't wake (its messages are held " +
   "for its next call to the tool). The name comes from the client's initialize request, which a server created per request " +
   "(stateless Streamable HTTP) never sees; Claude Code, Codex, Antigravity, Copilot CLI, opencode and Cursor are recognised " +
-  "without it. Spread ...ws.args into the tool's input and pass args to ws.call, so the agent can say (harness); for " +
+  "without it. Spread ...wake.args into the tool's input and pass args to wake.call, so the agent can say (harness); for " +
   "other clients, keep one McpServer per MCP session (a stateful transport), or pass the name yourself: " +
-  "ws.call(extra, { client }) or ws.callOf({ clientName }).";
+  "wake.call(extra, { client }) or wake.callOf({ clientName }).";
 
 /**
  * Who called one of the app's tools, as Wakeshift needs it. Make one with
- * `ws.call(extra, …)` inside an MCP tool callback, or `ws.callOf(…)`.
+ * `wake.call(extra, …)` inside an MCP tool callback, or `wake.callOf(…)`.
  */
 export interface Call {
   /** The app's own ID for the person (optional). */
@@ -197,6 +201,81 @@ export interface PublishUrl {
   url: string;
 }
 
+/** An event pattern a manifest asks for, and what the person is told it's for. */
+export interface ScopeEvent {
+  pattern: string;
+  description: string;
+}
+
+/**
+ * What the app may do with the agents people sign in with (manifest.agent).
+ * Sign in with Wakeshift needs one: the consent screen shows it.
+ */
+export interface AgentScope {
+  wake: ScopeEvent[];
+  post: ScopeEvent[];
+  /** Days the person's consent lasts. */
+  ttl_days: number;
+  /** Where Wakeshift may return the person after signing in (WakeshiftSignIn's redirectUri). */
+  redirect_uris?: string[];
+  /** At most max wake-ups in any seconds, on top of Wakeshift's own limits. */
+  wake_limits?: { seconds: number; max: number }[];
+  /** What the person should say to their agent once it's connected; at most 120 characters. */
+  start_prompt?: string;
+  groups?: boolean;
+}
+
+/** What the app tells Wakeshift it may do (see wake.publishManifest). */
+export interface Manifest {
+  description?: string;
+  /** Who identifies the app's users: "app" (the default, which topics need) or "wakeshift". */
+  accounts?: "app" | "wakeshift";
+  agent?: AgentScope;
+  workspace?: { publish: ScopeEvent[]; connect_url?: string; ttl_days: number };
+  /** The app's event types: defineEvent fills this in for you. */
+  events?: EventTypeManifest[];
+}
+
+/** A workspace's consent to what the app publishes there (its manifest's workspace scope), when it's live. */
+export interface Connection {
+  workspace: string;
+  grant: string;
+  user: string;
+  workspaceName: string;
+  userEmail: string;
+}
+
+/**
+ * What a Sign in with Wakeshift (or a refresh) gave the app: who signed in,
+ * and the agent they chose, which the app may act for under its grant.
+ */
+export interface SignedIn {
+  /** The person's Wakeshift user ID: the same across sign-ins, devices and agents. */
+  user: string;
+  /** The workspace and agent they signed in as. */
+  workspace: string;
+  agent: string;
+  /** The agent's grant for the app. */
+  grant: string;
+  /** For the app API, acting for that agent, until expiresAt. */
+  accessToken: string;
+  expiresAt: Date;
+  /** Rotates on every refresh: keep the newest, and treat it as a secret. */
+  refreshToken: string;
+  connection?: Connection;
+}
+
+export interface AuthorizeOptions {
+  /** One of the manifest's agent.redirect_uris. */
+  redirectUri: string;
+  /** An unguessable value you check on the way back (CSRF). */
+  state: string;
+  /** The S256 PKCE challenge (wake.pkce()). */
+  challenge: string;
+  /** The agent's MCP client, e.g. "Claude Code", so Wakeshift can suggest the agent; the person decides. */
+  agentHint?: string;
+}
+
 /** The parts of an MCP tool callback's `extra` that Wakeshift reads. */
 export interface ToolExtra {
   _meta?: Record<string, unknown>;
@@ -224,7 +303,7 @@ export interface CallOptions {
   client?: string;
   /** The app's own ID for the person. */
   user?: string;
-  /** The tool's arguments: session_key, harness and conversation_id (ws.args) are read from them. */
+  /** The tool's arguments: session_key, harness and conversation_id (wake.args) are read from them. */
   args?: { [SESSION_ARG]?: string; [HARNESS_ARG]?: string; [CONVERSATION_ARG]?: string } | Record<string, unknown>;
   /** The session key, if you read it yourself. */
   session?: string;
@@ -298,6 +377,11 @@ export class Wakeshift {
   }
 
   /** Reports a warning, once per kind. */
+  /** @internal Reports a problem through onWarning, every time. */
+  warn(message: string): void {
+    this.warnFn(message);
+  }
+
   private warnOnce(kind: string, message: string): void {
     if (this.warned.has(kind)) return;
     this.warned.add(kind);
@@ -307,7 +391,7 @@ export class Wakeshift {
   /**
    * The arguments the agent passes Wakeshift's part of the call in, as a
    * zod shape for your subscribe tool's input (and any other tool whose
-   * results you annotate): `inputSchema: { repo: z.string(), ...ws.args }`.
+   * results you annotate): `inputSchema: { repo: z.string(), ...wake.args }`.
    * session_key (the key a result gives the conversation), harness (the
    * program the agent runs in) and conversation_id (its own ID for the
    * conversation, where its program gives one). Wakeshift adds nothing to
@@ -325,7 +409,7 @@ export class Wakeshift {
   call(extra: ToolExtra | undefined, opts: CallOptions = {}): Call {
     let client = opts.client;
     if (client === undefined) {
-      if (!opts.server) throw new Error("wakeshift: ws.call needs the MCP client's name: pass { server } (your McpServer), or { client }");
+      if (!opts.server) throw new Error("wakeshift: wake.call needs the MCP client's name: pass { server } (your McpServer), or { client }");
       client = clientNameOf(opts.server);
     }
     const args = opts.args as Record<string, unknown> | undefined;
@@ -498,6 +582,209 @@ export class Wakeshift {
     return (await this.request<{ forgotten: boolean }>("POST", "/users/forget", { user })).forgotten;
   }
 
+  /**
+   * Tells Wakeshift what the app may do, replacing what it said before.
+   * The events you defined (defineEvent) are added unless m has events of
+   * its own. Returns the manifest as Wakeshift keeps it.
+   */
+  async publishManifest(m: Manifest): Promise<Manifest> {
+    const body: Manifest = m.events === undefined && this.events.size > 0 ? { ...m, events: [...this.events.values()].map((e) => e.manifest) } : m;
+    const out = await this.request<Manifest>("PUT", "/manifest", body);
+    this.manifestBase = m;
+    this.published = Promise.resolve();
+    return out;
+  }
+
+  // ── Events (MCP Events, natively or bridged) ──────────────────────────
+
+  private readonly events = new Map<string, WakeEvent>();
+  private manifestBase: Manifest = {};
+  private published: Promise<void> | null = null;
+
+  /**
+   * Defines one of the app's event types: what a subscriber picks (args),
+   * what each occurrence carries (payload), and the line an agent reads
+   * first (text). Returns the event, whose emit sends occurrences. Define
+   * every event before serveEvents.
+   *
+   *   const message = wake.defineEvent("chat.message", {
+   *     description: "A new message in a channel",
+   *     args: z.object({ channel: z.string() }),
+   *     payload: z.object({ from: z.string(), text: z.string() }),
+   *     text: (m) => `${m.from}: ${m.text}`,
+   *   })
+   *   await message.emit({ channel: "eng" }, { from: "ada", text: "shipped" })
+   */
+  defineEvent<A extends AnySchema, P extends AnySchema>(name: string, opts: EventOptions<A, P>): WakeEvent<A, P> {
+    if (this.events.has(name)) throw new Error(`wakeshift: event ${name} is defined twice`);
+    const ev = new WakeEvent<A, P>(this, name, opts);
+    this.events.set(name, ev as unknown as WakeEvent);
+    this.published = null; // the manifest changed
+    return ev;
+  }
+
+  /**
+   * Serves the defined events on an MCP server, before you connect it: MCP
+   * Events (events/list, events/subscribe, events/unsubscribe) for clients
+   * that speak it, such as ChatGPT, and the subscribe_events tool for
+   * everyone else, whom Wakeshift wakes its own ways; plus
+   * unsubscribe_events and list_subscriptions for every client, so a person
+   * can always see and stop what they're subscribed to.
+   */
+  serveEvents(server: McpServer, opts: ServeEventsOptions = {}): void {
+    serveEventsOn(this, server, [...this.events.values()], opts);
+  }
+
+  /** @internal Publishes the manifest with the defined events, once (again after a defineEvent). */
+  ensureEvents(): Promise<void> {
+    if (!this.published) {
+      const p = this.publishManifest(this.manifestBase).then(() => undefined);
+      this.published = p;
+      p.catch(() => {
+        if (this.published === p) this.published = null; // try again next time
+      });
+    }
+    return this.published;
+  }
+
+  /** @internal An event's emit. */
+  async emitEvent(e: { name: string; arguments: unknown; payload: unknown; text: string; id?: string; to?: string }): Promise<Published> {
+    await this.ensureEvents();
+    const body: Record<string, unknown> = { name: e.name, arguments: e.arguments, payload: e.payload, text: e.text };
+    if (e.id) body.id = e.id;
+    if (e.to) body.to = e.to;
+    const out = await this.request<Published>("POST", "/events/emit", body);
+    return { matched: out.matched, duplicate: !!out.duplicate };
+  }
+
+  /** @internal A call to the app API (the events machinery's), after the manifest with the defined events is published. */
+  async requestApp<T>(method: string, path: string, body?: unknown): Promise<T> {
+    await this.ensureEvents();
+    return this.request<T>(method, path, body);
+  }
+
+  // ── Guests' workspaces (GuestAuth) ─────────────────────────────────────
+
+  /**
+   * The workspace Wakeshift keeps for one of the app's users (user: the
+   * app's own ID for them, as in wake.call's user), creating it on first use.
+   * Topics keep that user's conversations there too. GuestAuth calls this;
+   * most apps never need to.
+   */
+  async workspace(user: string, name: string): Promise<string> {
+    return (await this.request<{ workspace: string }>("POST", "/workspaces", { external_id: user, name })).workspace;
+  }
+
+  /** Creates an agent in one of the app's workspaces (if new), and its grant for the app's manifest scope. Returns the grant's ID. */
+  async addAgent(workspace: string, agent: string, displayName: string): Promise<string> {
+    return (await this.request<{ grant: string }>("POST", `/workspaces/${encodeURIComponent(workspace)}/agents`, { agent, display_name: displayName })).grant;
+  }
+
+  /**
+   * Checks that one of the app's agents still has a live grant, asking
+   * Wakeshift each time. Throws a WakeshiftError: no_grant once the grant is
+   * revoked, unknown_workspace once the workspace is forgotten.
+   */
+  async checkAgent(workspace: string, agent: string): Promise<void> {
+    await this.request("POST", `/workspaces/${encodeURIComponent(workspace)}/agents/${encodeURIComponent(agent)}/token`);
+  }
+
+  // ── Sign in with Wakeshift (the app's own sign-in) ────────────────────
+
+  /** A new PKCE code verifier and its S256 challenge. */
+  pkce(): { verifier: string; challenge: string } {
+    const verifier = randomBytes(32).toString("base64url");
+    return { verifier, challenge: createHash("sha256").update(verifier).digest("base64url") };
+  }
+
+  /**
+   * Wakeshift's sign-in page for this app (as OAuth client app:<id>): the
+   * person signs in, picks the agent and consents. Wakeshift then redirects
+   * to redirectUri with code, state and iss; check state, and that iss is
+   * wake.core, then call signIn. WakeshiftSignIn does all of that for you.
+   */
+  authorizeUrl(o: AuthorizeOptions): string {
+    const q = new URLSearchParams({
+      response_type: "code",
+      client_id: "app:" + this.appId,
+      redirect_uri: o.redirectUri,
+      state: o.state,
+      code_challenge: o.challenge,
+      code_challenge_method: "S256",
+      agent_hint: o.agentHint ?? "",
+    });
+    return this.core + "/oauth/authorize?" + q.toString();
+  }
+
+  /** Exchanges the code from Wakeshift's redirect for who signed in. */
+  async signIn(o: { code: string; verifier: string; redirectUri: string }): Promise<SignedIn> {
+    return this.tokens({ grant_type: "authorization_code", code: o.code, code_verifier: o.verifier, redirect_uri: o.redirectUri });
+  }
+
+  /**
+   * Renews a sign-in. Wakeshift refuses (WakeshiftError invalid_grant)
+   * once the person revokes the app's access: forget the sign-in then.
+   */
+  async refresh(refreshToken: string): Promise<SignedIn> {
+    return this.tokens({ grant_type: "refresh_token", refresh_token: refreshToken });
+  }
+
+  private async tokens(form: Record<string, string>): Promise<SignedIn> {
+    const body = new URLSearchParams({
+      ...form,
+      client_id: "app:" + this.appId,
+      client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+      client_assertion: signAssertion(this.key, this.core),
+    });
+    let resp: Response;
+    let text: string;
+    try {
+      resp = await this.fetchFn(this.core + "/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      text = await resp.text();
+    } catch (err) {
+      throw this.unreachable(err);
+    }
+    let out: any;
+    try {
+      out = text ? JSON.parse(text) : {};
+    } catch {
+      out = {};
+    }
+    if (!resp.ok) throw new WakeshiftError(resp.status, out?.error ?? "", out?.error_description ?? (text.slice(0, 200) || resp.statusText));
+    if (typeof out?.access_token !== "string" || typeof out?.wakeshift_user !== "string" || !out.wakeshift_user) {
+      throw new WakeshiftError(resp.status, "bad_response", `Wakeshift at ${this.core} answered the sign-in without its tokens`);
+    }
+    const s: SignedIn = {
+      user: out.wakeshift_user,
+      workspace: out.wakeshift_workspace ?? "",
+      agent: out.wakeshift_agent ?? "",
+      grant: out.wakeshift_grant ?? "",
+      accessToken: out.access_token,
+      expiresAt: new Date(Date.now() + (Number(out.expires_in) || 0) * 1000),
+      refreshToken: out.refresh_token ?? "",
+    };
+    if (out.wakeshift_workspace_grant) {
+      s.connection = {
+        workspace: out.wakeshift_workspace ?? "",
+        grant: out.wakeshift_workspace_grant,
+        user: out.wakeshift_user,
+        workspaceName: out.wakeshift_workspace_name ?? "",
+        userEmail: out.wakeshift_user_email ?? "",
+      };
+    }
+    return s;
+  }
+
+  /** @internal The app key's seed: what GuestAuth and WakeshiftSignIn key their signed values from. Never send or log it. */
+  secretSeed(): Buffer {
+    return this.key.seed;
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = { Authorization: "Bearer " + signAssertion(this.key, this.core) };
     if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -522,7 +809,9 @@ export class Wakeshift {
     }
     if (!resp.ok) {
       const e = json?.error ?? {};
-      throw new WakeshiftError(resp.status, e.code ?? "", e.message ?? (text.slice(0, 200) || resp.statusText));
+      throw new WakeshiftError(resp.status, e.code ?? "", e.message ?? (text.slice(0, 200) || resp.statusText), {
+        reason: typeof e.reason === "string" ? e.reason : undefined,
+      });
     }
     // A 2xx that isn't Wakeshift's JSON: a proxy's page, or a wrong core.
     if (json === null || typeof json !== "object") {

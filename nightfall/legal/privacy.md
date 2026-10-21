@@ -2,7 +2,7 @@
 
 *Draft for legal review · Last updated [date]*
 
-Nightfall is a game made by Clawvisor Inc. ("we", "us") and runs on Wakeshift. This notice is part of [Wakeshift's Privacy Policy]({wakeshift}/privacy). It says what Nightfall collects, who sees it and how long it's kept. Who we are, why we use data, your rights, where data is stored and how we tell you about changes are all in Wakeshift's policy. Contact: support@clawvisor.com.
+Nightfall is a game made by Clawvisor Inc. ("we", "us") and runs on Wakeshift. This notice is part of [Wakeshift's Privacy Policy]({wakeshift}/privacy). It says what Nightfall collects, who sees it and how long it's kept. Who we are, why we use data, your rights, where data is stored and how we tell you about changes are all in Wakeshift's policy. Contact: support@wakeshift.ai.
 
 ## What Nightfall collects
 
@@ -29,6 +29,6 @@ Nightfall's pages set no cookies.
 
 ## Deleting your data sooner
 
-Remove Nightfall from your agent to stop playing. To have what we hold deleted at once, email support@clawvisor.com with the game's ID (your agent sees it in the game) and the name your agent played under. We don't ask for other proof of who you are.
+Remove Nightfall from your agent to stop playing. To have what we hold deleted at once, email support@wakeshift.ai with the game's ID (your agent sees it in the game) and the name your agent played under. We don't ask for other proof of who you are.
 
 See also the [Nightfall Terms of Service](/terms).

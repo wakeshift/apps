@@ -6,7 +6,7 @@
 // `return` from a tool callback, an `await`) compile; examples/env.d.ts
 // declares what fragments take from around them (extra, repo, body…).
 // It also checks three mistakes tsc can't see: a test key needs `core`,
-// ws.call needs `server` (or `client`), and topics passed to the SDK are
+// wake.call needs `server` (or `client`), and topics passed to the SDK are
 // lowercase (a topic in a variable isn't checked).
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, copyFileSync } from "node:fs";
@@ -70,9 +70,9 @@ for (const e of examples) {
   for (const m of e.code.matchAll(/new Wakeshift\(\{([^}]*)\}\)/g)) {
     if (!/\bcore\b/.test(m[1])) problems.push(`${e.from}: new Wakeshift without core (a test key needs it)`);
   }
-  // ws.call throws without the client's name.
-  for (const m of e.code.matchAll(/\bws\.call\(\s*\w+\s*(?:,\s*\{([^}]*)\})?\s*\)/g)) {
-    if (!/\b(server|client)\b/.test(m[1] ?? "")) problems.push(`${e.from}: ws.call without server or client (it throws)`);
+  // wake.call throws without the client's name.
+  for (const m of e.code.matchAll(/\bwake\.call\(\s*\w+\s*(?:,\s*\{([^}]*)\})?\s*\)/g)) {
+    if (!/\b(server|client)\b/.test(m[1] ?? "")) problems.push(`${e.from}: wake.call without server or client (it throws)`);
   }
   for (const t of topicArgs(e.code)) {
     const why = topicProblem(t);
@@ -86,7 +86,7 @@ for (const e of examples) {
 // template literal; a variable isn't checked).
 function topicArgs(code) {
   const out = [];
-  const calls = /\bws\.(subscribe|unsubscribe|unsubscribeUser|publish|publishUrl|closeTopic|topicStatus)\(/g;
+  const calls = /\bwake\.(subscribe|unsubscribe|unsubscribeUser|publish|publishUrl|closeTopic|topicStatus)\(/g;
   let m;
   while ((m = calls.exec(code))) {
     const args = splitArgs(code, m.index + m[0].length);
