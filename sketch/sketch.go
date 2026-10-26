@@ -158,6 +158,13 @@ func (a *App) Handler() http.Handler {
 	return mux
 }
 
+// PublicPages are the pages that count visits (apps/analytics): the
+// landing page, the rooms, a game's page, a player's watch link and the
+// leaderboard.
+func (a *App) PublicPages() []string {
+	return append(a.server().PublicPages(), "/games", "/games/{id}", "/watch/{secret}", "/leaderboard")
+}
+
 // adjectives and animals make players' names: "Dashing Pelican".
 var (
 	adjectives = []string{"brave", "bright", "bold", "breezy", "calm", "clever", "cosmic", "curious", "daring", "dashing", "dizzy", "eager",

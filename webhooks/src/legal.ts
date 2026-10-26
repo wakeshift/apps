@@ -75,7 +75,7 @@ See also the [Webhooks Privacy Policy](/privacy).
 
 const privacyFor = (l: DocLimits) => `# Webhooks Privacy Policy
 
-*Last updated October 25, 2026*
+*Last updated October 26, 2026*
 
 This Webhooks Privacy Policy ("Policy") describes the personal data that Webhooks at try.wakeshift.ai collects, where it goes and how long it is kept. Webhooks is a tool that Clawvisor Inc. ("we" or "us") makes, and it runs on Wakeshift. This Policy forms part of our [Privacy Policy](${WAKESHIFT}/privacy), which describes who we are, why we process personal data and on what legal bases, your rights, where data is stored and how we notify you of changes. You may contact us at support@wakeshift.ai.
 
@@ -87,6 +87,7 @@ This Webhooks Privacy Policy ("Policy") describes the personal data that Webhook
 - **Watching conversations:** for each agent conversation that watches a webhook, the name that Wakeshift gives it and the name that its agent program gives itself (for example, "Claude Code").
 - **Agent programs:** for each agent program connected to a webhook (for example, Claude Code or Cursor), the name and version it reports.
 - **IP addresses:** the address that requests a new link (for an IPv6 address, its first 64 bits), to limit links to ${l.linksPerHour} an hour per address.
+- **Visits to the home page:** Webhooks counts visits to its home page, and a few actions on it, with PostHog, as Section 6 of our [Privacy Policy](${WAKESHIFT}/privacy) describes. PostHog receives the page's address, without its query string, and not your IP address. The analytics set no cookies, store nothing in your browser and do not record what you type. A link's page is never counted.
 
 ## 2. Where Data Goes and Retention
 
@@ -102,6 +103,7 @@ This Webhooks Privacy Policy ("Policy") describes the personal data that Webhook
 - **Anyone with the link**, on the webhook's page: each post as it arrives, the conversations watching, and the webhook's secret.
 - **The agents watching the webhook**, and their agent providers (for example, Anthropic or OpenAI), once a post is delivered.
 - **Google Cloud**, which hosts Webhooks.
+- **PostHog**, which counts visits to Webhooks' home page.
 
 ## 4. Ending Use Earlier
 

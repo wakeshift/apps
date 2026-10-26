@@ -113,6 +113,9 @@ func (a *App) Tick(ctx context.Context) (int, error) { return a.server().Tick(ct
 // page, its images and the follow-along page.
 func (a *App) Handler() http.Handler { return a.server().Handler(a.addTools) }
 
+// PublicPages are the pages that count visits (apps/analytics).
+func (a *App) PublicPages() []string { return a.server().PublicPages() }
+
 // find is the calling conversation's game and player.
 func (a *App) find(ctx context.Context, ag *appkit.Agent, session string) (*game, *player, error) {
 	id, key, err := a.srv.Find(ctx, ag.Workspace, ag.ID, session)

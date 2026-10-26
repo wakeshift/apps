@@ -18,6 +18,9 @@
 //	                               workspace has reinstalled.
 //	SLACKLINE_SLACK_CLIENT_ID, SLACKLINE_SLACK_CLIENT_SECRET, SLACKLINE_SLACK_SIGNING_SECRET
 //	                               the Slack app (required)
+//	WAKESHIFT_POSTHOG_KEY, WAKESHIFT_POSTHOG_HOST
+//	                               PostHog's project key and host: visits to the public pages
+//	                               (docs/analytics.md); unset key: off
 //	PORT                           listen port (default 8080)
 package main
 
@@ -35,6 +38,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wakeshift/apps/analytics"
 	"github.com/wakeshift/apps/slackline"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
@@ -133,7 +137,7 @@ func run() error {
 		}
 	}()
 
-	srv := &http.Server{Addr: ":" + cmp.Or(os.Getenv("PORT"), "8080"), Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: ":" + cmp.Or(os.Getenv("PORT"), "8080"), Handler: analytics.Wrap(app.Handler(), analytics.FromEnv(), slackline.PublicPages...), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	slog.Info("slackline: listening", "addr", srv.Addr, "url", public, "app", kit.ID)

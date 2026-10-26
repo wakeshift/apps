@@ -6,6 +6,7 @@ import { isInitializeRequest, type InitializeRequest } from "@modelcontextprotoc
 import { z } from "zod";
 import { speaksEvents, Wakeshift, WakeshiftError } from "@wakeshift/sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Analytics, type AnalyticsConfig } from "./analytics.js";
 import { Unavailable, type Db } from "./db.js";
 import { checkSignature, MAX_BODY, toEvent } from "./events.js";
 import { isCheck, isPasted, Links, MAX_PASTED, type Check, type Link, type PastedCheck } from "./links.js";
@@ -40,6 +41,8 @@ export interface Options {
   capacity?: { requests?: number; streams?: number };
   /** Proxies in front that append to X-Forwarded-For (Google's load balancer: 2). 0: use the socket's address. */
   proxyHops?: number;
+  /** PostHog, for visits to the landing page (analytics.ts, docs/analytics.md). Unset: off. */
+  analytics?: AnalyticsConfig;
   now?: () => number;
   log?: (level: "info" | "warn" | "error", msg: string, attrs?: Record<string, unknown>) => void;
 }
@@ -76,6 +79,9 @@ export function webhookEvent(wake: Wakeshift) {
 /** The topic webhook.received routes a webhook's posts through (the event's topic): what its status reads. */
 export const topicOf = (hook: string) => `ev/webhook.received/${hook}`;
 
+/** The pages that count visits (analytics.ts): the landing page only, never a link's page. */
+export const PUBLIC_PAGES = ["/"];
+
 /** The request can't be served right now; come back in retryAfter seconds. */
 class Busy extends Error {
   constructor(readonly retryAfter: number) {
@@ -96,6 +102,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
   const pageLimits: PageLimits = { perHour: limits.perHour, perDay: limits.perDay, idleDays };
   const linksPerHour = o.limits?.linksPerHour ?? 30;
   const legalDocs = legalDocsFor({ perHour: limits.perHour, perDay: limits.perDay, linksPerHour, idleDays });
+  const analytics = o.analytics ? new Analytics(o.analytics, PUBLIC_PAGES) : undefined;
   const maxRequests = o.capacity?.requests ?? 256;
   const maxStreams = o.capacity?.streams ?? 900;
   const state = new State(o.db, limits, now);
@@ -476,14 +483,17 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
 
   function page(res: ServerResponse, status: number, render: (nonce: string) => string) {
     const nonce = randomBytes(16).toString("base64");
+    let html = render(nonce);
+    let csp = `default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self' 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`;
+    if (analytics && status === 200) ({ html, csp } = analytics.page(new URL(res.req.url ?? "/", "http://x").pathname, html, csp));
     res.writeHead(status, {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff",
-      "Content-Security-Policy": `default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self' 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+      "Content-Security-Policy": csp,
     });
-    res.end(render(nonce));
+    res.end(html);
   }
 
   async function linkFrom(res: ServerResponse, code: string, kind: "page" | "api"): Promise<Link | undefined> {
@@ -643,6 +653,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     const m = req.method ?? "GET";
     let match: RegExpMatchArray | null;
     if (p === "/health") return text(res, 200, "ok\n");
+    if (analytics && (await analytics.handle(req, res))) return;
     if (p === "/" && (m === "GET" || m === "HEAD")) return page(res, 200, (n) => homePage(n, pageLimits));
     if (p === "/links" && m === "POST") return createLink(req, res);
     const doc = Object.hasOwn(legalDocs, p) ? legalDocs[p] : undefined;

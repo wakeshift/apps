@@ -134,7 +134,7 @@ func (a *App) nextRound(tx *gamekit.Tx, g *game) error {
 	g.Phase, g.Word, g.Tier, g.Drawer = drawing, w.Word, w.Tier, drawer.Key()
 	g.RoundStart, g.RoundEnd = tx.Now, tx.Now.Add(a.round())
 	g.Strokes, g.Drawn, g.Hints, g.Announced, g.LastFlush, g.FlushAt, g.Guesses, g.Outcome = nil, false, 0, 0, time.Time{}, time.Time{}, nil, ""
-	g.Shown, g.RoundOver, g.Until = time.Time{}, time.Time{}, time.Time{}
+	g.Shown, g.RoundOver, g.Until, g.Draws, g.HintTimes = time.Time{}, time.Time{}, time.Time{}, nil, nil
 	for _, p := range g.Players {
 		p.Guessed, p.LastGuess = 0, time.Time{}
 	}
@@ -153,7 +153,7 @@ func (a *App) nextRound(tx *gamekit.Tx, g *game) error {
 func (a *App) idle(tx *gamekit.Tx, g *game) error {
 	g.Phase, g.Word, g.Tier, g.Drawer, g.Outcome = waiting, "", "", "", ""
 	g.Strokes, g.Drawn, g.Hints, g.Announced, g.LastFlush, g.FlushAt, g.Guesses = nil, false, 0, 0, time.Time{}, time.Time{}, nil
-	g.Shown, g.RoundOver = time.Time{}, time.Time{}
+	g.Shown, g.RoundOver, g.Draws, g.HintTimes = time.Time{}, time.Time{}, nil, nil
 	a.waitForPlayers(tx, g)
 	g.changed()
 	here := "Nobody is here"
@@ -438,6 +438,7 @@ func (a *App) drawingStep(tx *gamekit.Tx, g *game) error {
 	}
 	for g.Hints < 2 && !now.Before(a.hintAt(g, g.Hints+1)) {
 		g.Hints++
+		g.HintTimes = append(g.HintTimes, now)
 		text := fmt.Sprintf("Hint: the word has %s: %s", g.letterCount(), g.hint())
 		if g.Hints == 2 {
 			text = fmt.Sprintf("Hint: it starts with %q: %s", strings.ToUpper(g.Word[:1]), g.hint())
@@ -452,6 +453,7 @@ func (a *App) drawingStep(tx *gamekit.Tx, g *game) error {
 // the last announcement was long enough ago, else when it will have been.
 func (a *App) drew(tx *gamekit.Tx, g *game, strokes []stroke) {
 	g.Strokes = append(g.Strokes, strokes...)
+	g.Draws = append(g.Draws, drawCallAt{At: tx.Now, Marks: len(strokes)})
 	g.Drawn = true
 	g.changed()
 	if next := g.LastFlush.Add(a.coalesce()); g.LastFlush.IsZero() || !tx.Now.Before(next) {
@@ -525,6 +527,9 @@ func (a *App) endRound(tx *gamekit.Tx, g *game, winner *player, outcome, text st
 		text += fmt.Sprintf(" Next round in %s.", gamekit.Human(a.pause()))
 	}
 	g.Announce(fmt.Sprintf("Round %d over", g.Round), text+" "+scoreLine(g), g.handles())
+	if err := a.archive(tx, g); err != nil {
+		return err
+	}
 	return a.recordBest(tx, g)
 }
 
@@ -539,11 +544,12 @@ func scoreLine(g *game) string {
 	return fmt.Sprintf("Scores (last %d rounds): %s.", scoreWindow, strings.Join(parts, ", "))
 }
 
-// rightGuess is p guessing the word: the word's points each for it and
-// the drawer.
-func (a *App) rightGuess(tx *gamekit.Tx, g *game, p *player, owner bool) error {
+// rightGuess is p guessing the word (with text): the word's points each
+// for it and the drawer.
+func (a *App) rightGuess(tx *gamekit.Tx, g *game, p *player, text string, owner bool) error {
 	d := g.drawer()
-	g.Guesses = append(g.Guesses, guess{By: p.Handle, Right: true, Owner: owner, At: tx.Now})
+	// Its text is kept for the round's archive; nothing shows it.
+	g.Guesses = append(g.Guesses, guess{By: p.Handle, Text: text, Right: true, Owner: owner, At: tx.Now})
 	by := p.Handle
 	if owner {
 		by = p.Handle + " (guessed by its owner)"

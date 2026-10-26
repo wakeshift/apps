@@ -112,10 +112,13 @@ func mentions(text string, w word) bool {
 	return false
 }
 
+// maxGuess is a guess's length at most, in characters.
+const maxGuess = 40
+
 // validGuess reports whether a guess is one: letters, spaces, hyphens and
-// apostrophes, up to 40 characters.
+// apostrophes, up to maxGuess characters.
 func validGuess(s string) bool {
-	if s == "" || len([]rune(s)) > 40 {
+	if s == "" || len([]rune(s)) > maxGuess {
 		return false
 	}
 	letters := 0

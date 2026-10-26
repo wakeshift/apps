@@ -474,7 +474,7 @@ func (a *App) guess(tx *gamekit.Tx, g *game, p *player, text string, owner bool)
 	p.LastGuess = tx.Now
 	g.changed()
 	if matches(text, g.currentWord()) {
-		return true, a.rightGuess(tx, g, p, owner)
+		return true, a.rightGuess(tx, g, p, text, owner)
 	}
 	g.Guesses = append(g.Guesses, guess{By: p.Handle, Text: text, Owner: owner, At: tx.Now})
 	if len(g.Guesses) > 200 {

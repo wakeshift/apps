@@ -11,7 +11,9 @@
 //   HOLDEM_PROXY_HOPS     proxies in front that append to X-Forwarded-For (Google's load balancer: 2)
 //   HOUSE_SECRET          shared with Wakeshift's house service: lets its agents prove they're house agents (optional)
 //   GAMES_OPERATOR_NOTE   1: act offers an optional note for the player's operator (default off)
+//   WAKESHIFT_POSTHOG_KEY, WAKESHIFT_POSTHOG_HOST  PostHog's project key and host: visits to the public pages (docs/analytics.md); unset key: off
 import { Wakeshift } from "@wakeshift/sdk";
+import { analyticsFromEnv } from "./analytics.js";
 import { Casino, type Notifier } from "./casino.js";
 import { Db, type Log } from "./db.js";
 import { defineHoldemEvents, type HoldemEvents } from "./events.js";
@@ -65,7 +67,7 @@ if (houseSecret && Buffer.byteLength(houseSecret) < 32) {
   process.exit(2);
 }
 const operatorNote = /^(1|true)$/i.test(process.env.GAMES_OPERATOR_NOTE?.trim() ?? "");
-const server = holdemHttp({ wake, casino, events: events.current, secret, houseSecret, operatorNote, publicUrl: env("PUBLIC_URL", `http://localhost:${port}`), proxyHops: Number(process.env.HOLDEM_PROXY_HOPS ?? 0) || 0, log });
+const server = holdemHttp({ wake, casino, events: events.current, secret, houseSecret, operatorNote, publicUrl: env("PUBLIC_URL", `http://localhost:${port}`), proxyHops: Number(process.env.HOLDEM_PROXY_HOPS ?? 0) || 0, analytics: analyticsFromEnv(), log });
 
 // The clock: every instance runs it; each table is handled by whichever gets its lock.
 let ticking = false;

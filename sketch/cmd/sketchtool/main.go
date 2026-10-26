@@ -14,16 +14,25 @@
 //	    the game's writing check (cheat.go), with SKETCH_WRITING_KEY and
 //	    SKETCH_WRITING_MODEL (default claude-haiku-5-5) from the environment
 //
+// With the argument png, it reads one drawing (a JSON array of marks) on
+// stdin and writes it as a PNG on stdout: an archived round's drawing
+// (sketch_rounds.drawing, apps/sketch/archive.go), for instance
+//
+//	psql "$DB" -Atc 'SELECT drawing FROM sketch_rounds WHERE id = 42' | sketchtool png > round.png
+//
 // Strokes are a drawing's marks as the game stores them: strokes {"p": [[x, y], ...],
 // "c": color, "w": width}, and an svg call's shapes {"sh": {...}} (sketch.CheckDraw).
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -43,6 +52,13 @@ type request struct {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "png" {
+		if err := pngOf(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "sketchtool png:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	model := os.Getenv("SKETCH_WRITING_MODEL")
 	if model == "" {
 		model = "claude-haiku-5-5"
@@ -123,6 +139,20 @@ func answer(r request, writing *sketch.AnthropicWriting) map[string]any {
 		return map[string]any{"writing": w}
 	}
 	return fail(errors.New("unknown op " + r.Op))
+}
+
+// pngOf renders the drawing read from in as a PNG written to out.
+func pngOf(in io.Reader, out io.Writer) error {
+	b, err := io.ReadAll(io.LimitReader(in, 64<<20))
+	if err != nil {
+		return err
+	}
+	png, err := sketch.RenderPNG(bytes.TrimSpace(b))
+	if err != nil {
+		return err
+	}
+	_, err = out.Write(png)
+	return err
 }
 
 // joinStrokes is two JSON arrays of strokes as one.

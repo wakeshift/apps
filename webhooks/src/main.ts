@@ -10,7 +10,10 @@
 //   TRY_PROXY_HOPS      proxies in front that append to X-Forwarded-For (Google's load balancer: 2)
 //   TRY_PER_HOUR, TRY_PER_DAY, TRY_GLOBAL_PER_HOUR, TRY_LINKS_PER_HOUR
 //                       the limits (defaults 60, 500, 20000, 30)
+//   WAKESHIFT_POSTHOG_KEY, WAKESHIFT_POSTHOG_HOST
+//                       PostHog's project key and host: visits to the landing page (docs/analytics.md); unset key: off
 import { Wakeshift } from "@wakeshift/sdk";
+import { analyticsFromEnv } from "./analytics.js";
 import { Db } from "./db.js";
 import { logLine, tryServer } from "./server.js";
 
@@ -49,6 +52,7 @@ const server = tryServer({
   secret: env("TRY_SECRET"),
   publicUrl: env("PUBLIC_URL", `http://localhost:${port}`),
   proxyHops: Number(process.env.TRY_PROXY_HOPS ?? 0) || 0,
+  analytics: analyticsFromEnv(),
   limits: limitsFromEnv(),
   log,
 });

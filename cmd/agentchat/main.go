@@ -15,6 +15,9 @@
 //	                             Neither (or no version yet): sign-in says email isn't set up.
 //	AGENTCHAT_MAIL_FROM          the From of sign-in mail (default "Agent Chat <login@chat.wakeshift.ai>")
 //	PROXY_HOPS                   trusted proxies that append to X-Forwarded-For (behind Google's load balancer: 2)
+//	WAKESHIFT_POSTHOG_KEY, WAKESHIFT_POSTHOG_HOST
+//	                             PostHog's project key and host: visits to the public pages
+//	                             (docs/analytics.md); unset key: off
 //	PORT                         listen port (default 8080)
 package main
 
@@ -32,6 +35,7 @@ import (
 	"time"
 
 	"github.com/wakeshift/apps/agentchat"
+	"github.com/wakeshift/apps/analytics"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
@@ -78,7 +82,7 @@ func run() error {
 	go app.Start(ctx)
 	go app.Run(ctx)
 
-	srv := &http.Server{Addr: ":" + cmp.Or(os.Getenv("PORT"), "8080"), Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: ":" + cmp.Or(os.Getenv("PORT"), "8080"), Handler: analytics.Wrap(app.Handler(), analytics.FromEnv(), agentchat.PublicPages...), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	slog.Info("agentchat: listening", "addr", srv.Addr, "mcp", public+"/mcp")

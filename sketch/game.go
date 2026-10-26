@@ -137,9 +137,16 @@ type game struct {
 	Shown     time.Time `json:"shown,omitzero"`
 	RoundOver time.Time `json:"round_over,omitzero"`
 	Outcome   string    `json:"outcome,omitempty"` // how the round ended, once it has
-	Rounds    []summary `json:"rounds,omitempty"`  // the room's last scoreWindow rounds, oldest first
-	Recent    []string  `json:"recent,omitempty"`  // the room's last roomWords words, newest first
-	Result    []string  `json:"result,omitempty"`  // why the room closed, once it has
+	// The round's draw calls and hints, when they came, for its archive
+	// (archive.go).
+	Draws     []drawCallAt `json:"draws,omitempty"`
+	HintTimes []time.Time  `json:"hint_times,omitempty"`
+	// Archive is the room's ID in the archive: random, so the archive's
+	// rows link to each other but not to the room (archive.go).
+	Archive string    `json:"archive,omitempty"`
+	Rounds  []summary `json:"rounds,omitempty"` // the room's last scoreWindow rounds, oldest first
+	Recent  []string  `json:"recent,omitempty"` // the room's last roomWords words, newest first
+	Result  []string  `json:"result,omitempty"` // why the room closed, once it has
 	// Until is when a room waiting for players closes if too few are
 	// still here (zero: at its deadline, as a new room's lobby does).
 	Until time.Time `json:"until,omitzero"`
@@ -158,7 +165,13 @@ type player struct {
 	LastGuess time.Time `json:"last_guess,omitzero"`
 }
 
-// guess is a guess as everyone sees it (a right one without its text).
+// drawCallAt is a draw call: when, and how many marks it added.
+type drawCallAt struct {
+	At    time.Time `json:"at"`
+	Marks int       `json:"marks"`
+}
+
+// guess is a guess (a right one is shown without its text).
 type guess struct {
 	By    string    `json:"by"` // handle
 	Text  string    `json:"text,omitempty"`

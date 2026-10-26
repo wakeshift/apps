@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { GuestAuth, type Wakeshift } from "@wakeshift/sdk";
+import { Analytics, type AnalyticsConfig } from "./analytics.js";
 import { AuthorizePage } from "./authorize.js";
 import { pickerAssets } from "./agentpicker/picker.js";
 import type { Casino, Champion } from "./casino.js";
@@ -51,6 +52,8 @@ export interface ServerOptions {
   proxyHops?: number;
   log: Log;
   now?: () => number;
+  /** PostHog, for visits to the public pages (analytics.ts, docs/analytics.md). Unset: off. */
+  analytics?: AnalyticsConfig;
   /** Live-stream tuning (tests). */
   live?: { pollMs?: number; heartbeatMs?: number; maxStreamMs?: number; perAddress?: number; total?: number };
 }
@@ -76,6 +79,9 @@ const STATIC: Record<string, string> = {
 const CSP =
   "default-src 'none'; style-src 'self'; script-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
+/** The pages that count visits (analytics.ts): never sign-in, the legal pages or an API. */
+export const PUBLIC_PAGES = ["/", "/tables", "/tables/{id}", "/watch/{secret}", "/leaderboard"];
+
 export function holdemHttp(o: ServerOptions): Server {
   const base = o.publicUrl.replace(/\/+$/, "");
   const now = o.now ?? Date.now;
@@ -100,12 +106,18 @@ export function holdemHttp(o: ServerOptions): Server {
     return value;
   };
 
+  const analytics = o.analytics ? new Analytics(o.analytics, PUBLIC_PAGES) : undefined;
+  /** A page's HTML and CSP, with the analytics script if it's a public page. */
+  const counted = (res: ServerResponse, status: number, html: string): { html: string; csp: string } =>
+    analytics && status === 200 ? analytics.page(new URL(res.req.url ?? "/", "http://x").pathname, html, CSP) : { html, csp: CSP };
   const send = (res: ServerResponse, status: number, type: string, body: string | Buffer, extra: Record<string, string> = {}) => {
     res.writeHead(status, { "Content-Type": type, "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin", ...extra });
     res.end(body);
   };
-  const page = (res: ServerResponse, status: number, html: string, cache = "no-store") =>
-    send(res, status, "text/html; charset=utf-8", html, { "Content-Security-Policy": CSP, "Cache-Control": cache, "X-Frame-Options": "DENY" });
+  const page = (res: ServerResponse, status: number, html: string, cache = "no-store") => {
+    const p = counted(res, status, html);
+    send(res, status, "text/html; charset=utf-8", p.html, { "Content-Security-Policy": p.csp, "Cache-Control": cache, "X-Frame-Options": "DENY" });
+  };
   const json = (res: ServerResponse, status: number, body: unknown) => send(res, status, "application/json", JSON.stringify(body), { "Cache-Control": "no-store" });
   const notFound = (res: ServerResponse) => page(res, 404, messagePage("Not here", "There's nothing at this address.", "404"));
 
@@ -124,6 +136,7 @@ export function holdemHttp(o: ServerOptions): Server {
   async function route(req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url ?? "/", "http://x");
     const path = url.pathname;
+    if (analytics && (await analytics.handle(req, res))) return;
     if (await authorize.handle(req, res)) return;
     if (await guests.handle(req, res)) return;
     if (path === "/mcp") return mcp(req, res);
@@ -177,9 +190,9 @@ export function holdemHttp(o: ServerOptions): Server {
       const v = await o.casino.spectate(target.table);
       if (!v) return notFound(res);
       const mine = await o.casino.holeCards(target.table, target.player);
-      const html = tablePage(v, { url: `${base}/tables/${v.id}`, recent: await o.casino.hands(v.id, 6), live: `/api/watch/${m[1]}/live`, mine });
-      return send(res, 200, "text/html; charset=utf-8", html, {
-        "Content-Security-Policy": CSP,
+      const p = counted(res, 200, tablePage(v, { url: `${base}/tables/${v.id}`, recent: await o.casino.hands(v.id, 6), live: `/api/watch/${m[1]}/live`, mine }));
+      return send(res, 200, "text/html; charset=utf-8", p.html, {
+        "Content-Security-Policy": p.csp,
         "Cache-Control": "no-store",
         "X-Frame-Options": "DENY",
         // The path is the secret: never sent on as a referrer, never indexed.

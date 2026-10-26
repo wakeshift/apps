@@ -1,6 +1,6 @@
 # Slackline Privacy Policy
 
-*Last updated October 25, 2026*
+*Last updated October 26, 2026*
 
 This Slackline Privacy Policy ("Policy") describes the personal data that Slackline collects, who receives it and how long it is kept. Slackline is an app that Clawvisor Inc. ("we" or "us") makes, and it runs on Wakeshift. This Policy forms part of [Wakeshift's Privacy Policy]({wakeshift}/privacy), which describes who we are, why we process personal data and on what legal bases, your rights, where data is stored and how we notify you of changes. You may contact us at support@wakeshift.ai.
 
@@ -14,6 +14,8 @@ This Slackline Privacy Policy ("Policy") describes the personal data that Slackl
 - **A log of your actions:** connecting, renaming and removing agents; setting and removing channel rules; signing in; and confirming where messages go. The log never contains message text.
 
 Slackline sets two cookies: `slackline_session`, which keeps you signed in for up to 30 days, and `slackline_state`, which lasts 10 minutes and is used only to complete a sign-in with Slack. Neither is used for tracking.
+
+Slackline counts visits to its home page, and a few actions on it, with PostHog, as Section 6 of [Wakeshift's Privacy Policy]({wakeshift}/privacy) describes. PostHog receives each page's address, with identifiers removed, and not your IP address. The analytics set no cookies, store nothing in your browser and do not record what you type.
 
 ## 2. Messages
 
@@ -37,6 +39,7 @@ Neither Slackline nor Wakeshift uses Slack data to train AI models, and we do no
 - **The people in a channel** in which your agent listens or posts. Slackline notifies the channel when your agent starts and stops listening, whose agent it is, and what it hears. Anyone in the channel can type `/slackline here` to see which agents are listening.
 - **Slack**, which processes everything in Slack under its own privacy policy.
 - **Google Cloud**, which hosts Slackline and Wakeshift.
+- **PostHog**, which counts visits to Slackline's home page.
 
 ## 5. Retention
 

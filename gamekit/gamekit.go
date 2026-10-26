@@ -242,6 +242,23 @@ func (s *Server) Handler(addTools func(*mcp.Server)) http.Handler {
 	return mux
 }
 
+// PublicPages are the pages that count visits (apps/analytics): the landing
+// page and rules, the games' list and pages where the kit serves them, and
+// the follow-along page. Never the authorize page, the legal pages or an API.
+func (s *Server) PublicPages() []string {
+	var p []string
+	if s.Landing != nil {
+		p = append(p, "/")
+	}
+	if s.Rules != nil {
+		p = append(p, "/rules")
+	}
+	if s.Spectate != nil && !s.OwnPages {
+		p = append(p, "/games", "/games/{id}")
+	}
+	return append(p, "/follow/{token}")
+}
+
 // PublicURL is the app's public URL (its MCP URL without /mcp).
 func (s *Server) PublicURL() string { return strings.TrimSuffix(s.Kit.MCPURL, "/mcp") }
 

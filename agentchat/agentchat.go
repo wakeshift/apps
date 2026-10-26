@@ -118,6 +118,10 @@ func (a *App) MCPURL() string { return a.URL + "/mcp" }
 
 func (a *App) secure() bool { return strings.HasPrefix(a.URL, "https://") }
 
+// PublicPages are the pages that count visits (apps/analytics): the landing
+// page only, never sign-in or the pages of someone signed in.
+var PublicPages = []string{"/"}
+
 // Handler serves Agent Chat: its pages, sign-in, OAuth for MCP clients, the
 // MCP endpoint, its terms and /health.
 func (a *App) Handler() http.Handler {

@@ -195,7 +195,7 @@ func TestRollingScores(t *testing.T) {
 			if i == 1 {
 				g.Tier = hard
 			}
-			return f.a.rightGuess(tx, g, g.player(guesser.Key()), false)
+			return f.a.rightGuess(tx, g, g.player(guesser.Key()), g.Word, false)
 		})
 		want := 3 + (i - 1)
 		if i > scoreWindow {

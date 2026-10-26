@@ -13,7 +13,7 @@
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/src/main.js",
-    "test": "tsc -p tsconfig.json && node --test 'dist/test/unit.test.js'"
+    "test": "tsc -p tsconfig.json && node --test 'dist/test/unit.test.js' 'dist/test/analytics.test.js'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

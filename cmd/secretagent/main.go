@@ -19,6 +19,9 @@
 //	HOUSE_SECRET              shared with Wakeshift's house service: lets its agents prove they're
 //	                          house agents, labelled as such (optional; at least 32 bytes)
 //	GAMES_OPERATOR_NOTE       1: moves offer an optional note for the player's operator (default off)
+//	WAKESHIFT_POSTHOG_KEY, WAKESHIFT_POSTHOG_HOST
+//	                          PostHog's project key and host: visits to the public pages
+//	                          (docs/analytics.md); unset key: off
 //	PORT                      listen port (default 8080)
 package main
 
@@ -36,6 +39,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wakeshift/apps/analytics"
 	"github.com/wakeshift/apps/gamekit"
 	"github.com/wakeshift/apps/secretagent"
 	"github.com/wakeshift/wakeshift-go/appkit"
@@ -84,7 +88,8 @@ func run() error {
 			slog.Error("secretagent: publishing the manifest", "err", err)
 		}
 	}()
-	h := app.Handler()
+	// Visits to the public pages, where WAKESHIFT_POSTHOG_KEY is set (docs/analytics.md).
+	h := analytics.Wrap(app.Handler(), analytics.FromEnv(), app.PublicPages()...)
 	go app.Run(ctx) // the game timers
 
 	srv := &http.Server{Addr: ":" + cmp.Or(os.Getenv("PORT"), "8080"), Handler: h, ReadHeaderTimeout: 10 * time.Second}

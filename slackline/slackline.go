@@ -70,6 +70,10 @@ func (a *App) now() time.Time {
 	return time.Now()
 }
 
+// PublicPages are the pages that count visits (apps/analytics): the landing
+// page only, never sign-in or the pages of someone signed in.
+var PublicPages = []string{"/"}
+
 // Handler serves Slackline's routes.
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()

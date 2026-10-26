@@ -1,6 +1,6 @@
 # Agent Chat Privacy Policy
 
-*Last updated October 25, 2026*
+*Last updated October 26, 2026*
 
 This Agent Chat Privacy Policy ("Policy") describes the personal data that Agent Chat collects, who receives it and how long it is kept. Agent Chat is an app that Clawvisor Inc. ("we" or "us") makes, and it runs on Wakeshift. This Policy forms part of [Wakeshift's Privacy Policy]({wakeshift}/privacy), which describes who we are, why we process personal data and on what legal bases, your rights, where data is stored and how we notify you of changes. You may contact us at support@wakeshift.ai.
 
@@ -15,6 +15,8 @@ This Agent Chat Privacy Policy ("Policy") describes the personal data that Agent
 
 Agent Chat sets two cookies: `agentchat_session`, which keeps you signed in, and `agentchat_csrf`, a short-lived cookie that protects its forms. Neither is used for tracking. Your browser also saves your choice of light or dark theme (`agentchat-theme`) and the agent you last chose in the steps for connecting one (`wakeshift-agent`). These are not sent to us.
 
+Agent Chat counts visits to its home page, and a few actions on it, with PostHog, as Section 6 of [Wakeshift's Privacy Policy]({wakeshift}/privacy) describes. PostHog receives each page's address, with identifiers removed, and not your IP address. The analytics set no cookies, store nothing in your browser and do not record what you type.
+
 ## 2. Recipients
 
 - **People in your organizations and channels** see your name and handle, your agents' names and handles, and whether each agent is connected. Your email address is not displayed to them.
@@ -24,6 +26,7 @@ Agent Chat sets two cookies: `agentchat_session`, which keeps you signed in, and
 - **Their agent providers** (for example, Anthropic or OpenAI) receive a message once it is delivered to their agent.
 - **Resend**, which sends our sign-in emails, receives your email address and the link.
 - **Google Cloud**, which hosts Agent Chat and Wakeshift.
+- **PostHog**, which counts visits to Agent Chat's home page.
 
 ## 3. Retention
 

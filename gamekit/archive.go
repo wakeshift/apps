@@ -1,0 +1,140 @@
+package gamekit
+
+import (
+	"crypto/rand"
+	"fmt"
+	"regexp"
+	"slices"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
+
+// Archives: what a game keeps of its finished rounds (or games) for good,
+// anonymised. A kept record names no player: each is a role in that round
+// ("drawer", "guesser 1"), with only whether it was a house agent and, for
+// a house agent, its model. No handle, workspace, agent, session, user or
+// guest ID, and no address. Each game keeps its own table; this is the part
+// they share: the roles, and scrubbing players' handles out of the text
+// they wrote.
+
+// ArchivePlayer is a player as an archive keeps it.
+type ArchivePlayer struct {
+	Role  string `json:"role"`
+	House bool   `json:"house,omitempty"`
+	Model string `json:"model,omitempty"` // a house agent's model; never set for anyone else
+}
+
+// Anon gives a record's players their roles. The zero value is ready to
+// use. Players are told apart by their handles in the room (unique there),
+// which never leave it: Role and Scrub turn them into roles.
+type Anon struct {
+	roles   map[string]string // handle → role
+	counts  map[string]int    // kind → players numbered so far
+	players []ArchivePlayer
+}
+
+// As gives p the role label as it is ("drawer"). A player keeps the first
+// role it's given.
+func (a *Anon) As(p Player, label string) string {
+	if r, ok := a.roles[p.Handle]; ok {
+		return r
+	}
+	if a.roles == nil {
+		a.roles = map[string]string{}
+	}
+	a.roles[p.Handle] = label
+	ap := ArchivePlayer{Role: label}
+	if p.House != "" {
+		ap.House, ap.Model = true, p.House
+	}
+	a.players = append(a.players, ap)
+	return label
+}
+
+// Numbered gives p the next role of kind, numbered from 1 in the order
+// players are given one ("guesser 1", "guesser 2").
+func (a *Anon) Numbered(p Player, kind string) string {
+	if r, ok := a.roles[p.Handle]; ok {
+		return r
+	}
+	if a.counts == nil {
+		a.counts = map[string]int{}
+	}
+	a.counts[kind]++
+	return a.As(p, fmt.Sprintf("%s %d", kind, a.counts[kind]))
+}
+
+// Role is the role of the player with handle ("" if it has none).
+func (a *Anon) Role(handle string) string { return a.roles[handle] }
+
+// Players is every player given a role, in the order they were given one.
+func (a *Anon) Players() []ArchivePlayer {
+	if a.players == nil {
+		return []ArchivePlayer{}
+	}
+	return slices.Clone(a.players)
+}
+
+// Scrub is text with every handle of a player given a role replaced by its
+// role, so text a player wrote can't name another (or itself). A handle
+// matches whatever its case and whether its words are joined by hyphens or
+// spaces ("dashing-pelican-2", "Dashing Pelican 2"), as a whole word.
+func (a *Anon) Scrub(text string) string {
+	handles := make([]string, 0, len(a.roles))
+	for h := range a.roles {
+		if strings.TrimSpace(h) != "" {
+			handles = append(handles, h)
+		}
+	}
+	// Longest first, so "dashing-pelican-2" goes before "dashing-pelican".
+	slices.SortFunc(handles, func(x, y string) int {
+		if d := len(y) - len(x); d != 0 {
+			return d
+		}
+		return strings.Compare(x, y)
+	})
+	for _, h := range handles {
+		parts := strings.FieldsFunc(h, func(r rune) bool { return r == '-' || r == ' ' || r == '_' })
+		for i, p := range parts {
+			parts[i] = regexp.QuoteMeta(p)
+		}
+		re := regexp.MustCompile(`(?i)` + strings.Join(parts, `[-_\s]+`))
+		text = replaceWords(text, re, a.roles[h])
+	}
+	return text
+}
+
+// replaceWords is text with every match of re that stands as a whole word
+// (no letter or digit just before or after it) replaced by with.
+func replaceWords(text string, re *regexp.Regexp, with string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range re.FindAllStringIndex(text, -1) {
+		before, _ := utf8.DecodeLastRuneInString(text[:m[0]])
+		after, _ := utf8.DecodeRuneInString(text[m[1]:])
+		if wordRune(before) || wordRune(after) {
+			continue
+		}
+		b.WriteString(text[last:m[0]])
+		b.WriteString(with)
+		last = m[1]
+	}
+	b.WriteString(text[last:])
+	return b.String()
+}
+
+func wordRune(r rune) bool { return r != utf8.RuneError && (unicode.IsLetter(r) || unicode.IsDigit(r)) }
+
+// Truncate is s cut to at most n characters (runes, not bytes).
+func Truncate(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n])
+}
+
+// ArchiveID is a new random ID for a room's archived records: it's kept
+// with the room while it's open, and links its records to each other but
+// to nothing else (not the game's ID, which its seats and results carry).
+func ArchiveID() string { return rand.Text() } // 128 bits; crypto/rand never fails
