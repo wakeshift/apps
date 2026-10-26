@@ -26,9 +26,11 @@ type Slack struct {
 
 // BotScopes: post (as the agents, by name) and post notes only one person
 // sees; read the DM each person has with the app and the channels it's
-// invited to; list channels for the console; the /slackline command.
+// invited to; list channels for the console; the /slackline command; and
+// look people up (users:read: guests and outsiders can't reach agents, and
+// deactivated people's agents end, which user_change announces).
 var BotScopes = []string{"chat:write", "chat:write.customize", "im:history", "im:write", "channels:history", "groups:history",
-	"channels:read", "groups:read", "commands"}
+	"channels:read", "groups:read", "commands", "users:read"}
 
 // SignInScopes are Sign in with Slack's (OpenID Connect).
 var SignInScopes = []string{"openid", "profile"}
@@ -213,6 +215,72 @@ func (s *Slack) userChannels(ctx context.Context, token, user string) (map[strin
 		}
 	}
 	return in, nil
+}
+
+// Person is what Slack says about someone (users.info, user_change).
+type Person struct {
+	ID, TeamID, Name string // Name: their display name, else real name, else username
+	Deleted          bool   // deactivated
+	Guest            bool   // a multi- or single-channel guest
+	Stranger         bool   // from another organisation (Slack Connect)
+}
+
+// slackPerson is users.info's user, and user_change's.
+type slackPerson struct {
+	ID                string `json:"id"`
+	TeamID            string `json:"team_id"`
+	Name              string `json:"name"`
+	RealName          string `json:"real_name"`
+	Deleted           bool   `json:"deleted"`
+	IsRestricted      bool   `json:"is_restricted"`
+	IsUltraRestricted bool   `json:"is_ultra_restricted"`
+	IsStranger        bool   `json:"is_stranger"`
+	Profile           struct {
+		DisplayName string `json:"display_name"`
+		RealName    string `json:"real_name"`
+	} `json:"profile"`
+}
+
+func (p slackPerson) person() Person {
+	name := ""
+	for _, n := range []string{p.Profile.DisplayName, p.Profile.RealName, p.RealName, p.Name} {
+		if name = strings.Join(strings.Fields(n), " "); name != "" {
+			break
+		}
+	}
+	return Person{ID: p.ID, TeamID: p.TeamID, Name: name, Deleted: p.Deleted, Guest: p.IsRestricted || p.IsUltraRestricted, Stranger: p.IsStranger}
+}
+
+// userInfo looks someone up. Slack's user_not_found (someone the workspace
+// can't see) is ErrNotFound.
+func (s *Slack) userInfo(ctx context.Context, token, user string) (Person, error) {
+	var out struct{ User slackPerson }
+	if err := s.call(ctx, token, "users.info", nil, url.Values{"user": {user}}, &out); err != nil {
+		var se *slackError
+		if errors.As(err, &se) && se.Code == "user_not_found" {
+			return Person{}, ErrNotFound
+		}
+		return Person{}, err
+	}
+	if out.User.ID == "" {
+		return Person{}, errors.New("slack users.info: no user")
+	}
+	return out.User.person(), nil
+}
+
+// externallyShared says whether a channel is shared with another
+// organisation (Slack Connect), or about to be.
+func (s *Slack) externallyShared(ctx context.Context, token, channel string) (bool, error) {
+	var out struct {
+		Channel struct {
+			IsExtShared        bool `json:"is_ext_shared"`
+			IsPendingExtShared bool `json:"is_pending_ext_shared"`
+		}
+	}
+	if err := s.call(ctx, token, "conversations.info", nil, url.Values{"channel": {channel}}, &out); err != nil {
+		return false, err
+	}
+	return out.Channel.IsExtShared || out.Channel.IsPendingExtShared, nil
 }
 
 // install is what oauth.v2.access returns for a workspace.

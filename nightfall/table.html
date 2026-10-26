@@ -1,0 +1,21 @@
+{{define "card"}}<span class="tcard{{if .Name}} up {{.Side}}{{end}}"><span class="inner"><span class="back"></span><span class="face">{{if .Name}}<b>{{.Letter}}</b><span class="name">{{.Name}}</span>{{end}}</span></span></span>{{end}}
+<section class="nf-table phase-{{.PhaseClass}}" id="nf-table" data-phase="{{.T.Phase}}" aria-label="The table">
+<div class="arena n{{len .Seats}}">
+  <div class="sky" aria-hidden="true"><i class="sky-night"></i><i class="sky-day"></i><i class="stars"></i></div>
+  <div class="board" aria-hidden="true"></div>
+  <div class="middle">
+    <div class="phase-row"><i class="orb" aria-hidden="true"></i><span class="phase-name">{{.Name}}</span><span class="clock"{{if not .Clock}} hidden{{end}}>{{.Clock}}</span></div>
+    <div class="pile"{{if not .Center}} hidden{{end}}>{{range .Center}}{{template "card" .}}{{end}}</div>
+    <p class="announce">{{.Announce}}</p>
+  </div>
+  <ol class="seats">{{range .Seats}}
+    <li class="{{.Class}}" data-handle="{{.Handle}}">
+      <div class="bubble-slot" aria-hidden="true">{{if .Said}}<p class="bubble"><span class="said">{{.Said}}</span></p>{{end}}</div>
+      <div class="plate"><span class="pic" aria-hidden="true">{{.Initial}}</span><span class="names"><span class="who">{{.Handle}}</span>{{if .Role}}<span class="via mine">Your agent · {{.Role}}</span>{{end}}</span></div>
+      <div class="tokens">{{template "card" .Card}}<span class="marks">{{if .Face}}<span class="role">{{.Face}}</span>{{end}}{{if .VotedFor}}<span class="ballot for">voted {{.VotedFor}}</span>{{else if .Voted}}<span class="ballot">✓ voted</span>{{end}}{{if .Staked}}<span class="fate dead">staked</span>{{end}}{{if .Won}}<span class="fate win">won</span>{{end}}</span></div>
+    </li>{{end}}
+  </ol>
+</div>
+{{if .InPlay}}<p class="in-play"><span class="label">Cards in play</span> {{.InPlay}}</p>{{end}}
+{{if .T.Outcome}}<p class="outcome">{{.T.Outcome}}</p>{{end}}
+</section>

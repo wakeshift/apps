@@ -2,12 +2,15 @@ package secretagent
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"html/template"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"time"
 
+	"github.com/wakeshift/apps/agentpicker"
 	"github.com/wakeshift/apps/gamekit"
 	"github.com/wakeshift/apps/legal"
 )
@@ -47,8 +50,35 @@ func theme(srv *gamekit.Server) *gamekit.Theme {
 	return &gamekit.Theme{
 		Background: "#0f1218", Surface: "#171b23", Text: "#f1ede6", Muted: "#9a9eaa", Line: "#ffffff1a", Accent: "#f28a54",
 		Font: bodyFont, TitleFont: titleFont, HeaderImage: srv.StaticURL("briefing-room.jpg"), CSS: followCSS,
+		PublicCSS: publicCSS, Icon: srv.StaticURL("favicon.svg"),
 	}
 }
+
+// publicCSS is the public pages (the games, and each one's page) in the
+// same look, after followCSS.
+const publicCSS = `
+.top .wrap::before { content: "SECRET AGENT / LIVE"; }
+.top .wrap { padding-top: 28px; }
+.crumbs { margin-bottom: 36px; font: 600 11px var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+.crumbs a { color: #d9d4cc; }
+.top .sub .live-dot { background: var(--accent); box-shadow: 0 0 10px #f28a5499; }
+main.game { grid-template-areas: "result result" "about log" "players log" "x log"; }
+.card.about { grid-area: about; }
+.about .h::before { content: "001 / "; }
+.about .line { border-top: 0; padding: 0; color: #cbc6be; }
+.about .line .value { font: 400 15px/1.55 var(--font); letter-spacing: 0; }
+main.listing { max-width: 1180px; padding: 28px 24px 64px; }
+.listing .card .h::before { content: "00" counter(card) " / "; }
+.listing { counter-reset: card; } .listing .card { counter-increment: card; }
+.games .row { background: #ffffff06; border-radius: 12px; padding: 14px 16px; }
+.g-status { font: 500 17px var(--title-font); }
+.g-watch { font: 600 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+.foot .wrap { max-width: 1180px; padding-left: 24px; padding-right: 24px; }
+@media (max-width: 820px) {
+  main.game { grid-template-areas: "result" "about" "players" "log"; }
+  main.listing { padding: 18px 14px 40px; }
+}
+`
 
 // followCSS is the follow-along page in Secret Agent's look (after the
 // kit's CSS).
@@ -126,19 +156,32 @@ main { max-width: 1180px; padding: 28px 24px 64px; display: grid; grid-template-
 }
 `
 
-// landing is Secret Agent's page at /: the rules, and how to connect.
-func (a *App) landing(w http.ResponseWriter, _ *http.Request) {
+// landing is Secret Agent's page at /: the games on now, the rules, and
+// how to connect.
+func (a *App) landing(w http.ResponseWriter, r *http.Request) {
 	url := a.srv.PublicURL()
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	games, err := a.srv.Listing(ctx)
+	if err != nil {
+		slog.Warn("secret-agent: listing games for the landing page", "err", err)
+	}
 	var b bytes.Buffer
 	if err := landingTmpl.Execute(&b, map[string]any{
-		"MCP": url + "/mcp", "Static": a.srv.StaticURL,
-		"Wakeshift": legal.Wakeshift, // the marketing site, for WAKESHIFT_URL
+		"MCP": url + "/mcp", "Static": a.srv.StaticURL, "Live": games.Live[:min(len(games.Live), 6)],
+		"Wakeshift":  legal.Wakeshift, // the marketing site, for WAKESHIFT_URL
+		"PickerHead": agentpicker.Head(),
+		"Picker": agentpicker.HTML(agentpicker.Options{
+			Name: "secret-agent", URL: url + "/mcp", Ask: "Join a game of Secret Agent.",
+			Each: "each turn", Interactive: true,
+			SignIn: "You don't need an account. When your agent opens a browser window to sign in, click Authorize.",
+		}),
 	}); err != nil {
 		slog.Error("secret-agent: the landing page", "err", err)
 		http.Error(w, "Something went wrong.", http.StatusInternalServerError)
 		return
 	}
-	gamekit.PageHeaders(w, false)
-	w.Header().Set("Cache-Control", "public, max-age=300")
+	gamekit.LandingHeaders(w)
+	w.Header().Set("Cache-Control", "public, max-age=15")
 	w.Write(b.Bytes())
 }

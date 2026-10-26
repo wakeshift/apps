@@ -51,10 +51,20 @@ func (a *App) command(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	if strings.EqualFold(strings.TrimSpace(form.Get("text")), "here") {
+		text, err := a.here(ctx, team, form.Get("channel_id"))
+		if err != nil {
+			slog.Error("slackline: /slackline here failed", "err", err)
+			text = "Something went wrong. Try again."
+		}
+		reply(text)
+		return
+	}
 	connect := "To connect an agent, add Slackline's MCP server to it, `" + a.MCPURL() + "`:\n" +
 		"• Claude Code: `claude mcp add --transport http slackline " + a.MCPURL() + "`\n" +
 		"• Codex: `codex mcp add slackline --url " + a.MCPURL() + "`\n" +
-		"It signs in through your browser (with Slack), then ask it to *watch Slack*. Manage your agents and their channels at " + a.URL + "/home."
+		"It signs in through your browser (with Slack), then ask it to *watch Slack*. Manage your agents and their channels at " + a.URL + "/home.\n" +
+		"`/slackline here` lists the agents listening in a channel."
 	agents, err := a.Store.Agents(ctx, team, user)
 	if err != nil {
 		slog.Error("slackline: /slackline failed", "err", err)
@@ -90,6 +100,7 @@ type payload struct {
 	Challenge string          `json:"challenge"`
 	TeamID    string          `json:"team_id"`
 	EventID   string          `json:"event_id"`
+	EventTime int64           `json:"event_time"`
 	Event     json.RawMessage `json:"event"`
 }
 
@@ -99,6 +110,8 @@ type slackMessage struct {
 	ChannelType string `json:"channel_type"`
 	Channel     string `json:"channel"`
 	User        string `json:"user"`
+	UserTeam    string `json:"user_team"`   // the sender's workspace (Slack Connect)
+	SourceTeam  string `json:"source_team"` // the workspace it was sent from
 	BotID       string `json:"bot_id"`
 	Text        string `json:"text"`
 	TS          string `json:"ts"`
@@ -138,13 +151,24 @@ func (a *App) events(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handle(ctx context.Context, p payload, retry bool) error {
+	var kind struct{ Type string }
+	if err := json.Unmarshal(p.Event, &kind); err != nil {
+		return nil
+	}
+	if kind.Type == "user_change" { // its user is an object, not an ID
+		var uc struct{ User slackPerson }
+		if err := json.Unmarshal(p.Event, &uc); err != nil {
+			return nil
+		}
+		return a.userChanged(ctx, p.TeamID, uc.User)
+	}
 	var ev slackMessage
 	if err := json.Unmarshal(p.Event, &ev); err != nil {
 		return nil
 	}
 	switch ev.Type {
 	case "app_uninstalled":
-		return a.uninstalled(ctx, p.TeamID, "app_uninstalled")
+		return a.uninstalled(ctx, p.TeamID, "app_uninstalled", p.EventTime)
 	case "tokens_revoked":
 		// Sent when any token is revoked, people's sign-in tokens included:
 		// only the bot's means Slackline is gone from the workspace.
@@ -160,7 +184,7 @@ func (a *App) handle(ctx context.Context, p payload, retry bool) error {
 			return err
 		}
 		if slices.Contains(tr.Tokens.Bot, team.BotUserID) {
-			return a.uninstalled(ctx, p.TeamID, "bot token revoked")
+			return a.uninstalled(ctx, p.TeamID, "bot token revoked", p.EventTime)
 		}
 		return nil
 	case "member_left_channel":
@@ -256,9 +280,24 @@ func (a *App) inChannel(ctx context.Context, m incoming) error {
 		return err
 	}
 	byAgent := map[string]ChannelRule{}
+	var insider *bool // looked up once, only if needed
 	for _, r := range rules {
-		if r.Senders != "anyone" && m.ev.User != r.Agent.UserID {
-			continue // from the person only
+		if m.ev.User != r.Agent.UserID {
+			if r.Senders != "anyone" {
+				continue // from the person only
+			}
+			// From anyone: anyone who's a full member of the workspace. Guests
+			// and people from other organisations never reach an agent.
+			if insider == nil {
+				ok, err := a.insider(ctx, m.team, m.ev)
+				if err != nil {
+					return err // Slack retries
+				}
+				insider = &ok
+			}
+			if !*insider {
+				continue
+			}
 		}
 		ok, err := a.isMember(ctx, m.team, r.Agent.UserID, m.ev.Channel)
 		if err != nil {
@@ -369,11 +408,15 @@ func (a *App) leftChannel(ctx context.Context, team, user, channel string) error
 		return nil
 	}
 	a.members.Delete(team + "/" + user)
-	n, err := a.Store.RemoveMemberRules(ctx, team, user, channel, "left the channel")
-	if n > 0 {
-		slog.Info("slackline: removed rules of someone who left a channel", "team", team, "rules", n)
+	ended, err := a.Store.RemoveMemberRules(ctx, team, user, channel, "left the channel")
+	if err != nil {
+		return err
 	}
-	return err
+	if len(ended) > 0 {
+		slog.Info("slackline: removed rules of someone who left a channel", "team", team, "rules", len(ended))
+		a.announceAllStopped(ctx, team, ended, "its person left the channel")
+	}
+	return nil
 }
 
 // ── Channel membership ───────────────────────────────────────────────────
@@ -417,23 +460,18 @@ func (a *App) latest(ctx context.Context, ag Agent) (Listener, error) {
 	return ls[0], nil
 }
 
-// deliver publishes a message to one agent conversation's topic.
+// deliver sends a message to one agent conversation, as slack.message.
 func (a *App) deliver(ctx context.Context, m incoming, ag Agent, l Listener, where, channelName string, fromOwner bool) error {
-	who := "the person who connected you"
-	if !fromOwner {
-		who = "someone else in the channel (<@" + m.ev.User + ">), not the person who connected you"
+	// Only a full member's agent hears anything: never a guest's, even in
+	// their own DM thread.
+	if ok, err := a.fullMember(ctx, m.team, ag.UserID); err != nil || !ok {
+		return err
 	}
-	text := strings.TrimSpace(m.ev.Text)
-	data := map[string]any{"text": truncate(text, 32000), "channel": m.ev.Channel, "thread_ts": m.root(), "ts": m.ev.TS,
-		"from": m.ev.User, "from_owner": fromOwner}
-	if channelName != "" {
-		data["channel_name"] = channelName
-	}
-	pub, err := a.Kit.Publish(ctx, []string{listenerTopic(ag.TeamID, ag.UserID, l.ID)}, appkit.TopicEvent{
-		ID:   "slack:" + m.team.ID + ":" + m.eventID + ":" + l.ID,
-		Text: truncate(where+", from "+who+": "+text, 1000),
-		Data: data,
-	})
+	msg := Message{Where: where, Text: truncate(strings.TrimSpace(m.ev.Text), 32000), Channel: m.ev.Channel, ChannelName: channelName,
+		ThreadTS: m.root(), TS: m.ev.TS, From: m.ev.User, FromOwner: fromOwner}
+	// Personal: only the agent's own person's subscriptions can match.
+	pub, err := a.messages().Emit(ctx, MessageArgs{Listener: l.ID}, msg, appkit.To(wsUser(ag.TeamID, ag.UserID)),
+		appkit.WithID("slack:"+m.team.ID+":"+m.eventID+":"+l.ID))
 	if err != nil {
 		return err
 	}
@@ -476,30 +514,110 @@ func (a *App) helpInDM(ctx context.Context, m incoming) {
 	a.note(ctx, m.team, m.ev.Channel, m.ev.TS, text)
 }
 
-// uninstalled forgets a workspace that removed Slackline: Wakeshift forgets
-// each of its people (their conversations, subscriptions and the messages
-// it held for them), then Slackline deletes its own rows, audited. A
-// failure returns an error so Slack retries; forgetting is idempotent.
-func (a *App) uninstalled(ctx context.Context, team, why string) error {
+// uninstalled takes a workspace removing Slackline: a pending deletion is
+// recorded (and the bot token deleted) before Slack is answered, then the
+// deletion runs; DeletePending retries it until it's done. Only recording
+// it can fail the request (so Slack retries).
+func (a *App) uninstalled(ctx context.Context, team, why string, eventTime int64) error {
+	if !slackID(team) {
+		return nil
+	}
+	var at time.Time // unknown: not stale
+	if eventTime > 0 {
+		at = time.Unix(eventTime, 0)
+	}
+	if err := a.Store.RequestDeletion(ctx, team, why, at); err != nil {
+		return err
+	}
+	for _, m := range []*sync.Map{&a.members, &a.people} {
+		m.Range(func(k, _ any) bool {
+			if strings.HasPrefix(k.(string), team+"/") {
+				m.Delete(k)
+			}
+			return true
+		})
+	}
+	slog.Info("slackline: removed from a workspace; deleting its data", "team", team, "why", why)
+	go a.DeletePending(context.WithoutCancel(ctx))
+	return nil
+}
+
+// deletionError is a failed deletion step: stage names the step.
+type deletionError struct {
+	stage string
+	err   error
+}
+
+func (e *deletionError) Error() string { return e.stage + ": " + e.err.Error() }
+func (e *deletionError) Unwrap() error { return e.err }
+
+// errDeleting is a deletion another worker is running.
+var errDeleting = errors.New("another worker is deleting this workspace")
+
+// DeletePending finishes workspaces' pending deletions (after an
+// uninstall, and every 5 minutes: cmd/slackline). Each is retried until it
+// succeeds.
+func (a *App) DeletePending(ctx context.Context) {
+	teams, err := a.Store.PendingDeletions(ctx, 100)
+	if err != nil {
+		slog.Warn("slackline: listing pending deletions failed", "err", err)
+		return
+	}
+	for _, team := range teams {
+		err := a.deleteTeam(ctx, team)
+		if errors.Is(err, errDeleting) {
+			continue
+		}
+		if err != nil {
+			slog.Warn("slackline: deleting a removed workspace's data failed; will retry", "team", team, "err", err)
+			// Only the stage is stored, never the error's text.
+			stage := "reading Slackline's database"
+			var de *deletionError
+			if errors.As(err, &de) {
+				stage = de.stage
+			}
+			if err := a.Store.DeletionFailed(ctx, team, stage); err != nil {
+				slog.Warn("slackline: recording a failed deletion failed", "err", err)
+			}
+		}
+	}
+}
+
+// deleteTeam deletes everything of a workspace that removed Slackline:
+// Wakeshift forgets each of its people (their conversations, subscriptions,
+// and every message it holds for them, delivered or not), then Slackline
+// deletes its own rows. Both are idempotent. It runs under the workspace's
+// deletion lock, and does nothing if the deletion was already finished.
+func (a *App) deleteTeam(ctx context.Context, team string) error {
+	release, ok, err := a.Store.LockDeletion(ctx, team)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errDeleting
+	}
+	defer release()
+	return a.deleteTeamLocked(ctx, team)
+}
+
+// deleteTeamLocked is deleteTeam, under the lock the caller holds.
+func (a *App) deleteTeamLocked(ctx context.Context, team string) error {
+	if pending, err := a.Store.DeletionPending(ctx, team); err != nil || !pending {
+		return err
+	}
 	users, err := a.Store.TeamUsers(ctx, team)
 	if err != nil {
 		return err
 	}
 	for _, u := range users {
 		if _, err := a.Kit.ForgetUser(ctx, wsUser(team, u)); err != nil {
-			return err
+			return &deletionError{stage: "forgetting people in Wakeshift", err: err}
 		}
 	}
-	if err := a.Store.ForgetTeam(ctx, team, why); err != nil {
-		return err
+	if err := a.Store.ForgetTeam(ctx, team); err != nil {
+		return &deletionError{stage: "deleting Slackline's rows", err: err}
 	}
-	a.members.Range(func(k, _ any) bool {
-		if strings.HasPrefix(k.(string), team+"/") {
-			a.members.Delete(k)
-		}
-		return true
-	})
-	slog.Info("slackline: removed from a workspace", "team", team, "people", len(users), "why", why)
+	slog.Info("slackline: deleted a removed workspace's data", "team", team, "people", len(users))
 	return nil
 }
 
@@ -511,18 +629,19 @@ func Manifest(name, base string) map[string]any {
 	return map[string]any{
 		"display_information": map[string]any{"name": name,
 			"description":      "Chat with your own agents (Claude Code, Codex and others) from Slack.",
-			"long_description": "Slackline connects your agents to Slack through Wakeshift. Each agent gets a thread in your DM with Slackline; your replies there wake it, and it answers in the thread. In Slackline's console you choose channels each agent also listens in, and whether only you or anyone there can reach it."},
+			"long_description": "Slackline connects your agents to Slack through Wakeshift. Each agent gets a thread in your DM with Slackline; your replies there wake it, and it answers in the thread. In Slackline's console you choose channels each agent also listens in, and whether only you or anyone there can reach it. Where messages go. Messages that reach your agent are sent to Wakeshift, then to your own agent and its AI model provider (for example Anthropic or OpenAI). Slackline never uses Slack data to train AI models. Wakeshift deletes each message once your agent receives it."},
 		"features": map[string]any{
 			"app_home": map[string]any{"home_tab_enabled": false, "messages_tab_enabled": true, "messages_tab_read_only_enabled": false},
 			"bot_user": map[string]any{"display_name": "Slackline", "always_online": true},
 			"slash_commands": []any{map[string]any{"command": "/slackline", "url": base + "/slack/commands",
-				"description": "Your agents in Slack, and how to connect one", "should_escape": false}},
+				"description": "Your agents in Slack and how to connect one; with here, the agents listening in this channel",
+				"usage_hint":  "[here]", "should_escape": false}},
 		},
 		"oauth_config": map[string]any{"redirect_urls": []string{base + "/slack/callback", base + "/auth/slack/callback"},
 			"scopes": map[string]any{"bot": BotScopes, "user": SignInScopes}},
 		"settings": map[string]any{
 			"event_subscriptions": map[string]any{"request_url": base + "/slack/events",
-				"bot_events": []string{"message.im", "message.channels", "message.groups", "member_left_channel", "app_uninstalled", "tokens_revoked"}},
+				"bot_events": []string{"message.im", "message.channels", "message.groups", "member_left_channel", "user_change", "app_uninstalled", "tokens_revoked"}},
 			"org_deploy_enabled": false, "socket_mode_enabled": false, "token_rotation_enabled": false,
 		},
 	}

@@ -16,12 +16,18 @@ import { type Casino, type TableView, turnText } from "./casino.js";
 
 const table = z.string().min(1).max(40).describe("The table's ID (from join, or a table's link)");
 
+// A turn event is one of two kinds (the SDK takes one object, so the fields
+// of each are optional and type says which):
+//   turn     your move: the turn's ID, the hand, the street, the deadline,
+//            your own view of the table (view) and a note on table talk.
+//   removed  the last one at a table: your clock ran out, your hand was folded
+//            and you were taken off it (cash_out back in your bankroll, text).
 export const turnPayload = z.object({
-  type: z.literal("turn"),
-  turn: z.string(),
+  type: z.enum(["turn", "removed"]),
   table: z.string(),
-  hand: z.string(),
-  street: z.string(),
+  turn: z.string().optional(),
+  hand: z.string().optional(),
+  street: z.string().optional(),
   deadline: z.string().optional(),
   // The casino's TableView (tableFor). Every field the text line (turnText)
   // reads is checked here; the rest of the view rides along unchecked (it's
@@ -44,8 +50,11 @@ export const turnPayload = z.object({
     }),
     legal: z.looseObject({ toCall: z.number(), choices: z.array(z.string()) }),
     talk: z.array(z.looseObject({ name: z.string(), text: z.string() })),
-  }) as unknown as z.ZodType<TableView>,
-  talk_note: z.string(),
+  }).optional() as unknown as z.ZodOptional<z.ZodType<TableView>>,
+  talk_note: z.string().optional(),
+  cash_out: z.number().optional(),
+  bankroll: z.number().optional(),
+  text: z.string().optional(),
 });
 
 export const resultPayload = z.object({
@@ -69,14 +78,15 @@ export function defineHoldemEvents(wake: Wakeshift, casino: Casino): HoldemEvent
   const turn = wake.defineEvent("holdem.turn", {
     title: "Your move",
     description:
-      "It's your move at your Agent Hold'em table: your cards, the board, every stack, what happened and was said since your last turn, your choices with exact amounts, the deadline and the turn's ID to act with. Only the player to act gets it.",
+      "It's your move at your Agent Hold'em table: your cards, the board, every stack, what happened and was said since your last turn, your choices with exact amounts, the deadline and the turn's ID to act with. Only the player to act gets it. " +
+      "Act before the deadline: out of time, your hand is folded and you're taken off the table (your stack goes back to your bankroll); then you get one last event of type \"removed\" saying so.",
     args: z.object({ table }),
     payload: turnPayload,
     personal: true,
     // Only a sign-in with a player at that table may hear its turns (and,
     // being personal, only its own).
     authorize: async (subscriber, { table }) => !!subscriber.user && (await casino.guestSeatedAt(subscriber.user, table)),
-    text: (p) => turnText(p.view),
+    text: (p) => (p.type === "turn" && p.view ? turnText(p.view) : (p.text ?? "")),
   });
   const handResult = wake.defineEvent("holdem.hand_result", {
     title: "Hand result",

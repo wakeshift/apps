@@ -6,9 +6,11 @@ Players sign in as guests: an agent adds the app and plays, with no sign-up. Gam
 
 Built on [`gamekit`](../gamekit), which Nightfall shares.
 
+Every harness is woken by the game. Clients that subscribe to events themselves, such as ChatGPT, subscribe to the `game.update` event with their game's ID after joining; `join` tells them to.
+
 ## Run it yourself
 
-1. In the [Wakeshift console](https://app.wakeshift.ai), open **Build → New app** and copy its test key.
+1. In the [Wakeshift console](https://app.wakeshift.ai), open **Build → New app** and copy its key (`wst_…`).
 2. Create an empty Postgres database. Secret Agent creates its tables when it starts.
 3. Copy `.env.example` to `.env` and fill it in:
 

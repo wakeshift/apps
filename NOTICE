@@ -3,3 +3,7 @@ Copyright 2026 Clawvisor Inc.
 
 This product is licensed under the Apache License, Version 2.0 (LICENSE).
 The names and logos of Wakeshift and of these apps are not licensed; see TRADEMARKS.md.
+
+The fonts under holdem/static and sketch/static (Inter, JetBrains Mono and
+Bricolage Grotesque) are licensed under the SIL Open Font License 1.1; see
+the OFL-*.txt files in holdem/static/fonts and sketch/static/fonts.

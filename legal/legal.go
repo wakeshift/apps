@@ -1,7 +1,6 @@
 // Package legal serves an app's terms and privacy policy, from Markdown
 // embedded in the app, at /terms (and /tos) and /privacy on the app's own
-// host. The pages are rendered once, styled with the app's colors, and
-// carry a draft banner while the documents are under review.
+// host. The pages are rendered once and styled with the app's colors.
 package legal
 
 import (
@@ -67,12 +66,6 @@ type page struct {
 	etag string
 }
 
-// The banner, until counsel has reviewed the documents.
-const (
-	draftTerms   = "These terms are being reviewed and are not yet in effect."
-	draftPrivacy = "This policy is being reviewed and is not yet in effect."
-)
-
 // New renders the documents.
 func New(c Config) (*Pages, error) {
 	if c.App == "" || len(c.Terms) == 0 || len(c.Privacy) == 0 {
@@ -80,12 +73,12 @@ func New(c Config) (*Pages, error) {
 	}
 	p := &Pages{pages: map[string]page{}}
 	for _, doc := range []struct {
-		src          []byte
-		title, draft string
-		paths        []string
+		src   []byte
+		title string
+		paths []string
 	}{
-		{c.Terms, "Terms of Service", draftTerms, []string{"/terms", "/tos"}},
-		{c.Privacy, "Privacy Policy", draftPrivacy, []string{"/privacy"}},
+		{c.Terms, "Terms of Service", []string{"/terms", "/tos"}},
+		{c.Privacy, "Privacy Policy", []string{"/privacy"}},
 	} {
 		src := bytes.ReplaceAll(doc.src, []byte("{wakeshift}"), []byte(Wakeshift))
 		var body bytes.Buffer
@@ -94,7 +87,7 @@ func New(c Config) (*Pages, error) {
 		}
 		var out bytes.Buffer
 		err := tmpl.Execute(&out, map[string]any{
-			"App": c.App, "Home": c.Home, "Title": doc.title, "Draft": doc.draft, "Style": c.Style, "Wakeshift": Wakeshift,
+			"App": c.App, "Home": c.Home, "Title": doc.title, "Style": c.Style, "Wakeshift": Wakeshift,
 			"Body": template.HTML(body.String()), // the app's own Markdown, from its binary
 		})
 		if err != nil {
@@ -156,7 +149,7 @@ var tmpl = template.Must(template.New("legal").Funcs(template.FuncMap{
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}} · {{.App}}</title>
-<meta name="description" content="{{.App}}'s {{.Title}} (draft).">
+<meta name="description" content="{{.App}}'s {{.Title}}.">
 <style>
 :root { color-scheme: {{if .Style.Dark}}dark{{else}}light{{end}}; --bg: {{css .Style.Background}}; --text: {{css .Style.Text}}; --muted: {{css .Style.Muted}}; --accent: {{css .Style.Accent}}; --line: {{css .Style.Line}}; }
 * { box-sizing: border-box; }
@@ -165,7 +158,6 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.65 {{c
 nav { display: flex; justify-content: space-between; align-items: center; padding-top: 26px; padding-bottom: 10px; font-size: 14px; }
 nav a { color: var(--muted); text-decoration: none; } nav a:hover { color: var(--text); }
 nav .home { color: var(--text); font-weight: 700; font-size: 17px; }
-.draft { margin: 26px 0 0; padding: 12px 16px; border: 1px solid var(--accent); border-radius: 10px; font-size: 14px; }
 article { padding: 8px 0 40px; }
 article h1 { font-size: 34px; line-height: 1.2; margin: 26px 0 6px; }
 article h2 { font-size: 21px; margin: 34px 0 8px; }
@@ -182,7 +174,6 @@ footer a { color: inherit; text-decoration: none; } footer a:hover { color: var(
 <body>
 <nav class="wrap">{{if .Home}}<a class="home" href="{{.Home}}">{{.App}}</a>{{else}}<span class="home">{{.App}}</span>{{end}}<a href="{{.Wakeshift}}">Built on Wakeshift</a></nav>
 <main class="wrap">
-<p class="draft" role="note"><strong>Draft.</strong> {{.Draft}}</p>
 <article>{{.Body}}</article>
 </main>
 <footer class="wrap">{{if .Home}}<a href="{{.Home}}">{{.App}}</a>{{end}}<a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="{{.Wakeshift}}/terms">Wakeshift's terms</a><a href="{{.Wakeshift}}/privacy">Wakeshift's privacy policy</a></footer>

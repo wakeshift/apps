@@ -32,42 +32,42 @@ func learned(p *player) string { return strings.Join(p.Learned, " | ") }
 // Night actions resolve in role order, each seeing the cards as the ones
 // before left them.
 func TestNightResolvesInOrder(t *testing.T) {
-	// p0 seer, p1 robber, p2 troublemaker, p3 drunk, p4 insomniac, p5 werewolf (alone).
-	g := table([]string{seer, robber, troublemaker, drunk, insomniac, werewolf}, [centerSize]string{werewolf, villager, tanner})
-	g.p(0).Action = &action{Players: []string{"p1"}}       // the seer looks at the robber before the robbery
-	g.p(1).Action = &action{Players: []string{"p5"}}       // the robber takes the werewolf
-	g.p(2).Action = &action{Players: []string{"p1", "p4"}} // the troublemaker swaps the robber and the insomniac
-	g.p(3).Action = &action{Center: []int{3}}              // the drunk takes the tanner
-	g.p(5).Action = &action{Center: []int{1}}              // the lone werewolf looks at center 1
+	// p0 lamplighter, p1 changeling, p2 gravedigger, p3 sleepwalker, p4 watchman, p5 vampire (alone).
+	g := table([]string{lamplighter, changeling, gravedigger, sleepwalker, watchman, vampire}, [centerSize]string{vampire, townsperson, martyr})
+	g.p(0).Action = &action{Players: []string{"p1"}}       // the lamplighter looks at the changeling before the swap
+	g.p(1).Action = &action{Players: []string{"p5"}}       // the changeling takes the vampire
+	g.p(2).Action = &action{Players: []string{"p1", "p4"}} // the gravedigger swaps the changeling and the watchman
+	g.p(3).Action = &action{Center: []int{3}}              // the sleepwalker takes the martyr
+	g.p(5).Action = &action{Center: []int{1}}              // the lone vampire looks at center 1
 	g.resolveNight()
 
-	if l := learned(g.p(0)); !strings.Contains(l, "p1's card is the robber") {
-		t.Errorf("seer: %s", l)
+	if l := learned(g.p(0)); !strings.Contains(l, "p1's card is the changeling") {
+		t.Errorf("lamplighter: %s", l)
 	}
-	if l := learned(g.p(1)); !strings.Contains(l, "your card is now the werewolf") {
-		t.Errorf("robber: %s", l)
+	if l := learned(g.p(1)); !strings.Contains(l, "your card is now the vampire") || !strings.Contains(l, "You're in the coven now") || !strings.Contains(l, "Don't say what you took") {
+		t.Errorf("changeling: %s", l)
 	}
-	if l := learned(g.p(5)); !strings.Contains(l, "Center card 1 is the werewolf") {
-		t.Errorf("werewolf: %s", l)
+	if l := learned(g.p(5)); !strings.Contains(l, "Center card 1 is the vampire") {
+		t.Errorf("vampire: %s", l)
 	}
-	// After the robbery p1 held the werewolf and p5 the robber; the
-	// troublemaker then swapped p1 and p4: p4 holds the werewolf.
-	if g.p(4).Card != werewolf || g.p(1).Card != insomniac || g.p(5).Card != robber {
+	// After the swap p1 held the vampire and p5 the changeling; the
+	// gravedigger then swapped p1 and p4: p4 holds the vampire.
+	if g.p(4).Card != vampire || g.p(1).Card != watchman || g.p(5).Card != changeling {
 		t.Errorf("cards: p1 %s, p4 %s, p5 %s", g.p(1).Card, g.p(4).Card, g.p(5).Card)
 	}
-	if l := learned(g.p(4)); !strings.Contains(l, "your card was the werewolf") {
-		t.Errorf("insomniac: %s", l)
+	if l := learned(g.p(4)); !strings.Contains(l, "your card was the vampire") {
+		t.Errorf("watchman: %s", l)
 	}
-	if g.p(3).Card != tanner || g.Center[2] != drunk || strings.Contains(learned(g.p(3)), "tanner") {
-		t.Errorf("drunk: card %s, center %v, learned %s", g.p(3).Card, g.Center, learned(g.p(3)))
+	if g.p(3).Card != martyr || g.Center[2] != sleepwalker || strings.Contains(learned(g.p(3)), "martyr") {
+		t.Errorf("sleepwalker: card %s, center %v, learned %s", g.p(3).Card, g.Center, learned(g.p(3)))
 	}
 }
 
-func TestDrunkMustSwap(t *testing.T) {
-	g := table([]string{drunk, villager, villager}, [centerSize]string{werewolf, werewolf, seer})
+func TestSleepwalkerMustSwap(t *testing.T) {
+	g := table([]string{sleepwalker, townsperson, townsperson}, [centerSize]string{vampire, vampire, lamplighter})
 	g.resolveNight()
-	if g.p(0).Card == drunk || !slices.Contains(g.Center[:], drunk) {
-		t.Fatalf("drunk kept its card: %s, center %v", g.p(0).Card, g.Center)
+	if g.p(0).Card == sleepwalker || !slices.Contains(g.Center[:], sleepwalker) {
+		t.Fatalf("sleepwalker kept its card: %s, center %v", g.p(0).Card, g.Center)
 	}
 }
 
@@ -78,16 +78,16 @@ func TestWhoWins(t *testing.T) {
 		dead    []string
 		winners []string
 	}{
-		"a werewolf dies":        {[]string{werewolf, seer, villager}, []string{"p1", "p0", "p0"}, []string{"p0"}, []string{"p1", "p2"}},
-		"a villager dies":        {[]string{werewolf, seer, villager}, []string{"p1", "p2", "p1"}, []string{"p1"}, []string{"p0"}},
-		"no majority":            {[]string{werewolf, seer, villager}, []string{"p1", "p2", "p0"}, nil, []string{"p0"}},
-		"the tanner dies":        {[]string{werewolf, tanner, villager}, []string{"p1", "p0", "p1"}, []string{"p1"}, []string{"p1"}},
-		"the hunter takes one":   {[]string{werewolf, hunter, villager}, []string{"p1", "p0", "p1"}, []string{"p0", "p1"}, []string{"p1", "p2"}},
-		"no wolves, nobody dies": {[]string{seer, villager, villager}, []string{"p1", "p2", "p0"}, nil, []string{"p0", "p1", "p2"}},
-		"no wolves, one dies":    {[]string{minion, villager, villager}, []string{"p1", "p0", "p1"}, []string{"p1"}, []string{"p0"}},
+		"a vampire dies":           {[]string{vampire, lamplighter, townsperson}, []string{"p1", "p0", "p0"}, []string{"p0"}, []string{"p1", "p2"}},
+		"a townsperson dies":       {[]string{vampire, lamplighter, townsperson}, []string{"p1", "p2", "p1"}, []string{"p1"}, []string{"p0"}},
+		"no majority":              {[]string{vampire, lamplighter, townsperson}, []string{"p1", "p2", "p0"}, nil, []string{"p0"}},
+		"the martyr dies":          {[]string{vampire, martyr, townsperson}, []string{"p1", "p0", "p1"}, []string{"p1"}, []string{"p1"}},
+		"the avenger takes one":    {[]string{vampire, avenger, townsperson}, []string{"p1", "p0", "p1"}, []string{"p0", "p1"}, []string{"p1", "p2"}},
+		"no vampires, nobody dies": {[]string{lamplighter, townsperson, townsperson}, []string{"p1", "p2", "p0"}, nil, []string{"p0", "p1", "p2"}},
+		"no vampires, one dies":    {[]string{thrall, townsperson, townsperson}, []string{"p1", "p0", "p1"}, []string{"p1"}, []string{"p0"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			g := table(c.cards, [centerSize]string{werewolf, robber, troublemaker})
+			g := table(c.cards, [centerSize]string{vampire, changeling, gravedigger})
 			for i, v := range c.votes {
 				g.p(i).Vote = v
 			}
@@ -116,14 +116,14 @@ func TestDeck(t *testing.T) {
 	for n := minPlayers; n <= maxPlayers; n++ {
 		for range 20 {
 			d := deck(n)
-			wolves := 0
+			vampires := 0
 			for _, c := range d {
-				if c == werewolf {
-					wolves++
+				if c == vampire {
+					vampires++
 				}
 			}
-			small := n == minPlayers && (wolves != 1 || slices.Contains(d, minion) || slices.Contains(d, tanner))
-			if len(d) != n+centerSize || !slices.Contains(d, seer) || wolves == 0 || small || n >= 4 && wolves != 2 {
+			small := n == minPlayers && (vampires != 1 || slices.Contains(d, thrall) || slices.Contains(d, martyr))
+			if len(d) != n+centerSize || !slices.Contains(d, lamplighter) || vampires == 0 || small || n >= 4 && vampires != 2 {
 				t.Fatalf("%d players: %v", n, d)
 			}
 		}

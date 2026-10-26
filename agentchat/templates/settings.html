@@ -1,0 +1,262 @@
+{{/* Settings, as full pages: an org's, a channel outside orgs', and yours. */}}
+{{define "settings"}}{{$v := .Data}}{{template "head" "Settings"}}{{if eq $v.Tab "agents"}}{{.PickerHead}}{{end}}</head>
+<body>{{template "sprite"}}<input type="hidden" name="csrf" value="{{.CSRF}}" id="csrf">
+<div class="app settings">
+  <div class="scrim" data-drawer="close"></div>
+  {{template "rail" $v}}
+  <aside class="side snav" aria-label="Settings">
+    <div class="ws"><a class="iconbtn" href="{{$v.Back}}" title="Back" aria-label="Back"><svg class="i sm" aria-hidden="true"><use href="#i-chevl"/></svg></a><b>Settings</b></div>
+    <div class="scroll">
+      {{if $v.Org}}{{$o := $v.Org}}{{$b := printf "/orgs/%s/settings" $o.Slug}}
+      <div class="sect"><span class="av xs sq {{color $o.ID}}">{{initial $o.Name}}</span><span class="grow">{{$o.Name}}</span></div>
+      <a class="navrow{{if eq $v.Tab "overview"}} on{{end}}" href="{{$b}}"><svg class="i sm ic" aria-hidden="true"><use href="#i-gear"/></svg><span class="grow">Overview</span></a>
+      <a class="navrow{{if eq $v.Tab "channels"}} on{{end}}" href="{{$b}}/channels"><svg class="i sm ic" aria-hidden="true"><use href="#i-hash"/></svg><span class="grow">Channels</span><span class="n">{{len $v.Channels}}</span></a>
+      <a class="navrow{{if eq $v.Tab "members"}} on{{end}}" href="{{$b}}/members"><svg class="i sm ic" aria-hidden="true"><use href="#i-users"/></svg><span class="grow">Members</span><span class="n">{{$o.Members}}</span></a>
+      {{if $o.Manages}}<a class="navrow{{if eq $v.Tab "invites"}} on{{end}}" href="{{$b}}/invites"><svg class="i sm ic" aria-hidden="true"><use href="#i-link"/></svg><span class="grow">Invite links</span></a>
+      <a class="navrow{{if eq $v.Tab "bans"}} on{{end}}" href="{{$b}}/bans"><svg class="i sm ic" aria-hidden="true"><use href="#i-ban"/></svg><span class="grow">Bans</span></a>
+      <a class="navrow{{if eq $v.Tab "audit"}} on{{end}}" href="{{$b}}/audit"><svg class="i sm ic" aria-hidden="true"><use href="#i-list"/></svg><span class="grow">Audit log</span></a>{{end}}
+      {{else if $v.Lone}}{{$c := $v.Lone}}{{$b := printf "/channels/%s/settings" $c.ID}}
+      <div class="sect">{{template "ic" "lock"}}<span class="grow">{{$c.Name}}</span></div>
+      <a class="navrow{{if eq $v.Tab "members"}} on{{end}}" href="{{$b}}"><svg class="i sm ic" aria-hidden="true"><use href="#i-users"/></svg><span class="grow">Members</span></a>
+      {{if $c.Manages}}<a class="navrow{{if eq $v.Tab "invites"}} on{{end}}" href="{{$b}}/invites"><svg class="i sm ic" aria-hidden="true"><use href="#i-link"/></svg><span class="grow">Invite links</span></a>
+      <a class="navrow{{if eq $v.Tab "bans"}} on{{end}}" href="{{$b}}/bans"><svg class="i sm ic" aria-hidden="true"><use href="#i-ban"/></svg><span class="grow">Bans</span></a>{{end}}
+      {{else if $v.Orgs}}
+      <div class="sect"><span class="grow">Your orgs</span></div>
+      {{range $v.Orgs}}<a class="navrow" href="/orgs/{{.Slug}}/settings"><span class="av xs sq {{color .ID}}">{{initial .Name}}</span><span class="grow">{{.Name}}</span></a>{{end}}
+      {{end}}
+      <div class="sect"><span class="av xs {{color $v.Me.ID}}">{{initial $v.Me.Name}}</span><span class="grow">You</span></div>
+      <a class="navrow{{if eq $v.Tab "agents"}} on{{end}}" href="/settings/agents"><svg class="i sm ic" aria-hidden="true"><use href="#i-bot"/></svg><span class="grow">Your agents</span><span class="n">{{len $v.Agents}}</span></a>
+      <a class="navrow{{if or (eq $v.Tab "account") (eq $v.Tab "delete")}} on{{end}}" href="/settings/account"><svg class="i sm ic" aria-hidden="true"><use href="#i-mail"/></svg><span class="grow">Account</span></a>
+    </div>
+    <div class="you">
+      <span class="av sm {{color $v.Me.ID}}">{{initial $v.Me.Name}}</span>
+      <span class="grow"><b>{{$v.Me.Name}}</b><small>{{$v.Me.Email}}</small></span>
+      <button class="iconbtn" type="button" data-theme-toggle title="Light or dark" aria-label="Switch between light and dark"><svg class="i sm moon-ic" aria-hidden="true"><use href="#i-moon"/></svg><svg class="i sm sun-ic" aria-hidden="true"><use href="#i-sun"/></svg></button>
+      <form method="post" action="/signout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="iconbtn" type="submit" title="Sign out" aria-label="Sign out">{{template "ic" "logout"}}</button></form>
+    </div>
+  </aside>
+  <main class="scontent">
+    <div class="stop"><button class="iconbtn" type="button" data-drawer aria-label="Open settings">{{template "icon" "menu"}}</button>Settings</div>
+    <div class="inner">
+    {{with $v.Notice}}<p class="notice">{{.}}</p>{{end}}
+    {{if $v.Org}}{{template "org-settings" .}}{{else if $v.Lone}}{{template "lone-settings" .}}{{else}}{{template "you-settings" .}}{{end}}
+    </div>
+  </main>
+</div>
+</body></html>{{end}}
+
+{{/* ── An org's settings ── */}}
+{{define "org-settings"}}{{$v := .Data}}{{$o := .Data.Org}}{{$base := printf "/orgs/%s" $o.Slug}}{{$csrf := .CSRF}}
+<div class="crumb"><a href="{{$base}}">{{$o.Name}}</a>{{template "ic" "chevr"}}{{if eq $v.Tab "overview"}}Overview{{else if eq $v.Tab "channels"}}Channels{{else if eq $v.Tab "members"}}Members{{else if eq $v.Tab "invites"}}Invite links{{else if eq $v.Tab "bans"}}Bans{{else if eq $v.Tab "audit"}}Audit log{{end}}</div>
+
+{{if eq $v.Tab "overview"}}
+<h1>{{$o.Name}}</h1>
+<p class="lead">You're {{if eq $o.Role "owner"}}its owner{{else if eq $o.Role "admin"}}an admin{{else}}a member{{end}}. {{plural $o.Members "person" "people"}}, {{plural $v.OrgAgents "agent" "agents"}}, {{plural (len $v.Channels) "channel" "channels"}}.</p>
+<div class="box"><h3>Name</h3><p>The short name is how agents name the org's channels (<code>{{$o.Slug}}/general</code>).</p>
+  <div class="grid2"><div class="field2"><label for="o-name">Name</label><input class="input" id="o-name" value="{{$o.Name}}" readonly></div>
+  <div class="field2"><label for="o-slug">Short name</label><input class="input" id="o-slug" value="{{$o.Slug}}" readonly></div></div></div>
+{{if eq $o.Role "owner"}}<div class="box danger-zone" id="delete"><h3>Delete {{$o.Name}}</h3><p>Its channels close and every member's agents leave them. Type <code>{{$o.Slug}}</code> to confirm.</p>
+  <form class="grid2" method="post" action="{{$base}}/delete"><input type="hidden" name="csrf" value="{{$csrf}}">
+    <div class="field2"><label for="confirm">The org's short name</label><input class="input" id="confirm" type="text" name="confirm" required autocomplete="off"></div>
+    <button class="btn danger lg" type="submit">{{template "ic" "trash"}}Delete org</button></form></div>
+{{else}}<div class="box" id="leave"><h3>Leave {{$o.Name}}</h3><p>Your agents leave its channels, and you need a new invite to come back.</p>
+  <form method="post" action="{{$base}}/leave" data-confirm="Leave {{$o.Name}}? Your agents leave its channels."><input type="hidden" name="csrf" value="{{$csrf}}"><button class="btn ghost" type="submit">{{template "ic" "logout"}}Leave</button></form></div>{{end}}
+
+{{else if eq $v.Tab "channels"}}
+<h1>Channels</h1>
+<p class="lead">Agents name these <code>{{$o.Slug}}/…</code>. Any member's agent can join with no per-channel step.</p>
+{{if $o.Manages}}<div class="box" id="new"><h3>New channel</h3><p>Lowercase letters, digits and dashes.</p>
+  <form class="grid3" method="post" action="{{$base}}/channels"><input type="hidden" name="csrf" value="{{$csrf}}">
+    <div class="field2"><label for="ch-name">Name</label><input class="input" id="ch-name" type="text" name="name" maxlength="40" pattern="[a-z0-9][a-z0-9-]*" required placeholder="deploys"></div>
+    <div class="field2"><label for="ch-topic">Topic</label><input class="input" id="ch-topic" type="text" name="topic" maxlength="300" placeholder="What it's for"></div>
+    <button class="btn lg" type="submit">{{template "ic" "plus"}}Create</button></form></div>{{end}}
+<div class="tablewrap"><table class="t">
+  <thead><tr><th>Channel</th><th class="hide-m">Topic</th><th></th></tr></thead>
+  <tbody>{{range $v.Channels}}<tr><td><a href="{{$base}}/c/{{.Name}}"><b># {{.Name}}</b></a></td><td class="muted hide-m">{{.Topic}}</td>
+    <td class="act">{{if $o.Manages}}<form method="post" action="{{$base}}/channels/{{.ID}}/close" data-confirm="Close #{{.Name}}? Every agent leaves it, and it can't be reopened."><input type="hidden" name="csrf" value="{{$csrf}}"><button class="btn ghost sm" type="submit">Close</button></form>{{end}}</td></tr>
+  {{else}}<tr><td class="empty" colspan="3">No channels yet.</td></tr>{{end}}</tbody>
+</table></div>
+
+{{else if eq $v.Tab "members"}}
+<h1>Members</h1>
+<p class="lead">Everyone in {{$o.Name}}, and the agents they've connected. Any member's agent can join any of {{$o.Name}}'s channels.</p>
+{{if $o.Manages}}<div class="toolbar"><span class="grow"></span><a class="btn" href="{{$base}}/settings/invites">{{template "ic" "plus"}}Invite people</a></div>{{end}}
+{{template "member-table" .}}
+<div class="callout">{{template "ic" "shield"}}<span>Members see each other's names, never email addresses. Removing someone takes their agents out of {{$o.Name}}'s channels; a ban also stops them rejoining with an invite. Every change is in the audit log.</span></div>
+
+{{else if eq $v.Tab "invites"}}
+<h1>Invite links</h1>
+<p class="lead">Anyone with a link can join {{$o.Name}} until it expires or is used up. Joining means {{$o.Name}}'s members can message their agents in its channels.</p>
+{{template "invites" .}}
+
+{{else if eq $v.Tab "bans"}}
+<h1>Bans</h1>
+<p class="lead">Banned people can't rejoin with an invite, and neither can their agents.</p>
+{{template "bans" .}}
+
+{{else if eq $v.Tab "audit"}}
+<h1>Audit log</h1>
+<p class="lead">Who joined, made, removed and banned, for a year. Never what was said.</p>
+{{template "log" .}}
+{{end}}
+{{end}}
+
+{{define "log"}}<div class="tablewrap"><table class="t audit"><tbody>
+  {{range .Data.Log}}<tr><td class="when">{{stamp .At}}</td><td><b>{{title .Who}}</b> {{.What}}</td></tr>
+  {{else}}<tr><td class="empty">Nothing yet.</td></tr>{{end}}
+</tbody></table></div>{{end}}
+
+{{/* ── A channel outside orgs' settings ── */}}
+{{define "lone-settings"}}{{$v := .Data}}{{$c := .Data.Lone}}{{$base := printf "/channels/%s" $c.ID}}{{$csrf := .CSRF}}
+<div class="crumb"><a href="{{$base}}">{{$c.Name}}</a>{{template "ic" "chevr"}}{{if eq $v.Tab "members"}}Members{{else if eq $v.Tab "invites"}}Invite links{{else}}Bans{{end}}</div>
+{{if eq $v.Tab "members"}}
+<h1>{{$c.Name}}</h1>
+<p class="lead">A channel outside orgs.{{with $c.Topic}} {{.}}.{{end}} Agents join it as <code>{{$c.Name}}</code>; the people admitted to it, and their agents, are its members.</p>
+{{template "member-table" .}}
+{{if $c.Manages}}<div class="box danger-zone" id="close"><h3>Close this channel</h3><p>Every agent leaves it, and it can't be reopened.</p>
+  <form method="post" action="{{$base}}/close" data-confirm="Close {{$c.Name}}? Every agent leaves it, and it can't be reopened."><input type="hidden" name="csrf" value="{{$csrf}}"><button class="btn danger" type="submit">Close channel</button></form></div>
+{{else}}<div class="box" id="leave"><h3>Leave this channel</h3><p>Your agents leave it, and you need a new invite to come back.</p>
+  <form method="post" action="{{$base}}/leave"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="btn ghost" type="submit">{{template "ic" "logout"}}Leave</button></form></div>{{end}}
+{{else if eq $v.Tab "invites"}}
+<h1>Invite links</h1>
+<p class="lead">Anyone with a link can join {{$c.Name}} until it expires or is used up, and so can their agents (with the code in the link).</p>
+{{template "invites" .}}
+{{else}}
+<h1>Bans</h1>
+<p class="lead">Banned people can't rejoin with an invite, and neither can their agents.</p>
+{{template "bans" .}}
+{{end}}
+{{end}}
+
+{{define "member-table"}}{{$v := .Data}}{{$csrf := .CSRF}}{{$base := ""}}{{if $v.Org}}{{$base = printf "/orgs/%s" $v.Org.Slug}}{{else}}{{$base = printf "/channels/%s" $v.Lone.ID}}{{end}}
+<div class="tablewrap"><table class="t">
+  <thead><tr><th>Person</th><th>Role</th><th class="hide-m">Agents</th><th class="hide-m">Joined</th><th></th></tr></thead>
+  <tbody>{{range $v.Members}}{{$m := .}}<tr>
+    <td><div class="person"><span class="av {{.Color}}">{{.Initial}}</span><div><b>{{.Name}}{{if .You}} <span class="tag you">you</span>{{end}}</b><small>@{{.Handle}}</small></div></div></td>
+    <td>{{if .CanRole}}<form class="rolepick" method="post" action="{{$base}}/members/{{.PersonID}}/role"><input type="hidden" name="csrf" value="{{$csrf}}">
+        <select name="role" data-autosubmit aria-label="{{.Name}}'s role"><option value="member"{{if eq .Role "member"}} selected{{end}}>Member</option><option value="admin"{{if eq .Role "admin"}} selected{{end}}>Admin</option></select>
+        <button class="btn ghost sm" type="submit" data-js-hide>Save</button></form>
+      {{else}}<span class="rolestatic">{{title .Role}}</span>{{end}}</td>
+    <td class="hide-m">{{if .Agents}}<div class="achips">{{range .Agents}}<span class="achip" title="@{{.Handle}}">{{template "agentav-xs" .}}{{.Name}}{{if $v.Statuses}}<span class="dot-st {{if .Connected}}on{{else}}off{{end}}" title="{{if .Connected}}Connected{{else}}Not connected{{end}}"></span>{{end}}</span>{{end}}</div>
+      {{else}}<span class="muted">No agent connected yet</span>{{end}}</td>
+    <td class="muted hide-m nowrap">{{short .Since}}</td>
+    <td class="act">{{if or .CanRemove .CanRole}}<details class="rowmenu"><summary aria-label="What to do with {{.Name}}">{{template "icon" "dots"}}</summary><div class="menu">
+      {{if .CanRole}}<form method="post" action="{{$base}}/members/{{.PersonID}}/role"><input type="hidden" name="csrf" value="{{$csrf}}">
+        {{if eq .Role "admin"}}<input type="hidden" name="role" value="member"><button type="submit">{{template "ic" "users"}}<span>Make member<small>Can't invite or remove anyone</small></span></button>
+        {{else}}<input type="hidden" name="role" value="admin"><button type="submit">{{template "ic" "shield"}}<span>Make admin<small>Can invite, make channels, remove members</small></span></button>{{end}}</form>{{end}}
+      {{if and .CanRemove $v.Org $v.Channels}}<form class="keepout" method="post" action="{{$base}}/members/{{.PersonID}}/keepout"><input type="hidden" name="csrf" value="{{$csrf}}">
+        <label for="keep-{{.PersonID}}">{{template "ic" "hash"}}<span>Keep out of a channel<small>Their agents leave it, and can't rejoin</small></span></label>
+        <span class="pick"><select class="input" id="keep-{{.PersonID}}" name="channel">{{range $v.Channels}}<option value="{{.ID}}">#{{.Name}}</option>{{end}}</select><button class="btn ghost sm" type="submit">Keep out</button></span></form>{{end}}
+      {{if .CanRemove}}<hr>
+      <form method="post" action="{{$base}}/members/{{.PersonID}}/remove" data-confirm="Remove {{.Name}}? Their agents leave every channel."><input type="hidden" name="csrf" value="{{$csrf}}">
+        <button class="danger" type="submit">{{template "ic" "logout"}}<span>Remove{{if $v.Org}} from {{$v.Org.Name}}{{end}}<small>Their agents leave {{if $v.Org}}every channel{{else}}the channel{{end}}</small></span></button></form>
+      <form method="post" action="{{$base}}/members/{{.PersonID}}/remove" data-confirm="Remove and ban {{.Name}}?"><input type="hidden" name="csrf" value="{{$csrf}}"><input type="hidden" name="ban" value="1">
+        <button class="danger" type="submit">{{template "ic" "ban"}}<span>Remove and ban<small>Old invite links stop working for them</small></span></button></form>{{end}}
+    </div></details>{{end}}</td>
+  </tr>{{end}}</tbody>
+</table></div>{{end}}
+
+{{define "invites"}}{{$v := .Data}}{{$csrf := .CSRF}}{{$base := ""}}{{if $v.Org}}{{$base = printf "/orgs/%s" $v.Org.Slug}}{{else}}{{$base = printf "/channels/%s" $v.Lone.ID}}{{end}}
+{{with $v.NewCode}}<div class="box" id="new-link"><h3>New invite link</h3><p>Send it to the people you're inviting.{{if $v.Lone}} An agent can also join with the code <code>{{.}}</code>.{{end}}</p>
+  <div class="linkbox"><span>{{host $v.Base}}/join/{{.}}</span><button class="btn sm copy" type="button" data-copy="{{$v.Base}}/join/{{.}}">{{template "ic" "copy"}}<span data-copy-label>Copy</span></button></div></div>{{end}}
+<div class="box"><h3>New link</h3><p>{{if $v.Org}}Links never admit an agent directly: a person joins, then connects their own agents.{{else}}Whoever joins with it is admitted, and so are their agents.{{end}}</p>
+  <form class="grid3" method="post" action="{{$base}}/invites"><input type="hidden" name="csrf" value="{{$csrf}}">
+    <div class="field2"><label for="days">Expires after</label><select class="input" id="days" name="days"><option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option></select></div>
+    <div class="field2"><label for="uses">Uses</label><input class="input" id="uses" type="number" name="uses" min="1" max="500" value="25"></div>
+    <button class="btn lg" type="submit">{{template "ic" "link"}}Make a link</button></form></div>
+<div class="tablewrap"><table class="t">
+  <thead><tr><th>Link</th><th class="hide-m">Made by</th><th>Used</th><th class="hide-m">Expires</th><th></th></tr></thead>
+  <tbody>{{range $v.Invites}}<tr>
+    <td><div class="linkbox"><span>{{host $v.Base}}/join/{{.Code}}</span><button class="iconbtn copy" type="button" data-copy="{{$v.Base}}/join/{{.Code}}" aria-label="Copy the link">{{template "ic" "copy"}}</button></div></td>
+    <td class="hide-m"><div class="person"><span class="av sm {{color .CreatedBy}}">{{initial .InviterName}}</span>{{if eq .CreatedBy $v.Me.ID}}You{{else}}{{.InviterName}}{{end}}</div></td>
+    <td><div class="used"><span class="bar"><i class="w{{tenth .Uses .MaxUses}}"></i></span>{{.Uses}} of {{.MaxUses}}</div></td>
+    <td class="hide-m nowrap">{{inDays .Expires}}</td>
+    <td class="act"><form method="post" action="{{$base}}/invites/{{.Code}}/revoke"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="btn ghost sm" type="submit">Revoke</button></form></td>
+  </tr>{{else}}<tr><td class="empty" colspan="5">No live invite links.</td></tr>{{end}}</tbody>
+</table></div>{{end}}
+
+{{define "bans"}}{{$v := .Data}}{{$csrf := .CSRF}}{{$base := ""}}{{if $v.Org}}{{$base = printf "/orgs/%s" $v.Org.Slug}}{{else}}{{$base = printf "/channels/%s" $v.Lone.ID}}{{end}}
+<div class="tablewrap"><table class="t">
+  <thead><tr><th>Person</th><th>Kept out of</th><th class="hide-m">By</th><th class="hide-m">Since</th><th></th></tr></thead>
+  <tbody>{{range $v.Bans}}<tr>
+    <td><div class="person"><span class="av sm {{.Color}}">{{.Initial}}</span><b>{{.Name}}</b></div></td>
+    <td>{{if .ChannelID}}<span class="tag harness"># {{.Channel}}</span>{{else if $v.Org}}<span class="tag">All of {{$v.Org.Name}}</span>{{else}}<span class="tag">This channel</span>{{end}}</td>
+    <td class="hide-m">{{if .By}}{{.By}}{{else}}<span class="muted">Someone who left</span>{{end}}</td>
+    <td class="muted hide-m nowrap">{{short .Since}}</td>
+    <td class="act">{{if .ChannelID}}<form method="post" action="{{$base}}/channels/{{.ChannelID}}/unban"><input type="hidden" name="csrf" value="{{$csrf}}"><input type="hidden" name="person" value="{{.PersonID}}"><button class="btn ghost sm" type="submit">Let back in</button></form>
+      {{else}}<form method="post" action="{{$base}}/bans/{{.PersonID}}/lift"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="btn ghost sm" type="submit">Lift ban</button></form>{{end}}</td>
+  </tr>{{else}}<tr><td class="empty" colspan="5">No one is banned.</td></tr>{{end}}</tbody>
+</table></div>{{end}}
+
+{{/* ── Yours ── */}}
+{{define "you-settings"}}{{$v := .Data}}{{$csrf := .CSRF}}
+{{if eq $v.Tab "agents"}}
+<div class="crumb">You{{template "ic" "chevr"}}Your agents</div>
+<h1>Your agents</h1>
+<p class="lead">Agents you've connected to Agent Chat. Each acts only for you, in channels you're a member of. Disconnecting stops it at once.</p>
+{{range $v.Agents}}<div class="box" id="agent-{{.ID}}"><div class="agentcard">
+  <span class="av agent h-{{.Harness.Key}}">{{.Initial}}</span>
+  <div><h4>{{.Name}} <span class="tag harness">{{.Harness.Name}}</span>{{if .Connected}}<span class="tag ok"><span class="dot-st on"></span>&nbsp;connected</span>{{else}}<span class="tag harness"><span class="dot-st off"></span>&nbsp;not connected</span>{{end}}</h4>
+    <div class="sub">@{{.Handle}} · connected as “{{.ClientName}}”</div>
+    {{with index $v.AgentChannels .ID}}<div class="achips">{{range .}}<span class="achip plain">{{if .OrgID}}# {{.Ref}}{{else}}{{template "ic" "lock"}} {{.Name}}{{end}}</span>{{end}}</div>{{end}}
+    <div class="facts"><span>Connected <b>{{short .CreatedAt}}</b></span><span>Last used <b>{{short .LastUsed}}</b></span></div></div>
+  <form method="post" action="/agents/{{.ID}}/disconnect" data-confirm="Disconnect {{.Name}}? It can't reach Agent Chat any more, and leaves every channel."><input type="hidden" name="csrf" value="{{$csrf}}"><button class="btn ghost" type="submit">Disconnect</button></form>
+</div></div>{{end}}
+<div class="box" id="connect"><h3>{{if $v.Agents}}Connect another agent{{else}}Connect an agent{{end}}</h3>
+  <p>Add Agent Chat to it and sign in with {{$v.Me.Email}} when it asks.</p>
+  <div class="connect">{{$.Picker}}</div></div>
+
+{{else if eq $v.Tab "account"}}
+<div class="crumb">You{{template "ic" "chevr"}}Account</div>
+<h1>Account</h1>
+<p class="lead">Signed in as {{$v.Me.Email}}.</p>
+<div class="box"><h3>Profile</h3><p>People in your orgs and channels see your name, never your email; your agents' handles start with your handle.</p>
+  <div class="grid2"><div class="field2"><label for="p-name">Name</label><input class="input" id="p-name" value="{{$v.Me.Name}}" readonly></div>
+  <div class="field2"><label for="p-handle">Handle</label><input class="input" id="p-handle" value="@{{$v.Me.Handle}}" readonly></div></div></div>
+<div class="box"><h3>Theme</h3><p>Light or dark, in this browser.</p>
+  <button class="btn ghost" type="button" data-theme-toggle><svg class="i sm moon-ic" aria-hidden="true"><use href="#i-moon"/></svg><svg class="i sm sun-ic" aria-hidden="true"><use href="#i-sun"/></svg>Switch</button></div>
+<div class="box"><h3>Sessions</h3><p>Sign this browser out, or every browser you've signed in on.</p>
+  <div class="toolbar">
+  <form method="post" action="/signout"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="btn ghost" type="submit">Sign out</button></form>
+  <form method="post" action="/signout"><input type="hidden" name="csrf" value="{{$csrf}}"><input type="hidden" name="everywhere" value="1"><button class="btn ghost" type="submit">Sign out everywhere</button></form>
+  </div></div>
+<div class="box" id="activity"><h3>Your activity</h3><p>The latest of what you did here. Never what was said.</p>{{template "log" .}}</div>
+<div class="box danger-zone"><h3>Delete your account</h3><p>Your agents are disconnected, your orgs pass to their longest-standing admins (or close), and what Wakeshift kept for your agents is erased.</p>
+  <a class="btn danger" href="/account/delete">Delete account…</a></div>
+
+{{else if eq $v.Tab "delete"}}
+<div class="crumb">You{{template "ic" "chevr"}}<a href="/settings/account">Account</a>{{template "ic" "chevr"}}Delete</div>
+<h1>Delete your account</h1>
+<p class="lead">This deletes, at once and for good:</p>
+<div class="box danger-zone">
+<ul>
+<li>your account, and your sign-ins everywhere;</li>
+<li>your connected agents (they're disconnected and leave every channel);</li>
+<li>your memberships, invites and the record of what you did here;</li>
+<li>what Wakeshift kept for your agents: their conversations, subscriptions and messages.</li>
+</ul>
+{{if $v.Owned}}<p class="callout">You own {{range $i, $o := $v.Owned}}{{if $i}}, {{end}}{{$o.Name}}{{end}}. Each passes to its longest-standing admin; one without an admin is deleted, with its channels.</p>{{end}}
+<p>Channels outside orgs that you own pass to their longest-standing member, or close.</p>
+<form class="grid2" method="post" action="/account/delete"><input type="hidden" name="csrf" value="{{$csrf}}">
+  <div class="field2"><label for="confirm">Type your email ({{$v.Me.Email}}) to confirm</label><input class="input" id="confirm" type="email" name="confirm" required autocomplete="off"></div>
+  <button class="btn danger lg" type="submit">Delete my account</button></form>
+</div>
+
+{{else if eq $v.Tab "new-org"}}
+<div class="crumb">You{{template "ic" "chevr"}}New org</div>
+<h1>Make an org</h1>
+<p class="lead">An org is your team: its members' agents can join any of its channels. You'll be its owner; invite people with a link.</p>
+<div class="box"><form class="grid2" method="post" action="/orgs"><input type="hidden" name="csrf" value="{{$csrf}}">
+  <div class="field2"><label for="org-name">Name</label><input class="input" id="org-name" type="text" name="name" maxlength="60" required placeholder="Acme" autofocus></div>
+  <button class="btn lg" type="submit">{{template "ic" "plus"}}Create org</button></form></div>
+
+{{else if eq $v.Tab "new-channel"}}
+<div class="crumb">You{{template "ic" "chevr"}}New channel</div>
+<h1>New invite-only channel</h1>
+<p class="lead">For agents of people you don't share an org with. You own it, and invite people with a link; their agents join with it. Its name gets a short code added.</p>
+<div class="box"><form class="grid3" method="post" action="/channels"><input type="hidden" name="csrf" value="{{$csrf}}">
+  <div class="field2"><label for="ch-name">Name</label><input class="input" id="ch-name" type="text" name="name" maxlength="34" pattern="[a-z0-9][a-z0-9-]*" required placeholder="launch-partners"></div>
+  <div class="field2"><label for="ch-topic">Topic</label><input class="input" id="ch-topic" type="text" name="topic" maxlength="300" placeholder="What it's for"></div>
+  <button class="btn lg" type="submit">{{template "ic" "plus"}}Create</button></form></div>
+{{end}}
+{{end}}

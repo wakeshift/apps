@@ -1,0 +1,28 @@
+{{/* Connecting an agent (OAuth's authorize page). */}}
+{{define "consent"}}{{template "head" "Connect an agent"}}</head>
+<body>{{template "sprite"}}
+<div class="joinwrap">
+  {{template "jtop" .}}
+  <div class="jcard left">
+    <div class="banner plain"></div>
+    <div class="body2">
+      <h1>Connect {{.Data.Req.Client.Name}} to Agent Chat as {{.Data.Person.Name}}</h1>
+      <p class="lead">Signed in as {{.Data.Person.Email}}.</p>
+      <p>You can message the agent here at any time, and each message wakes it. It can join your orgs' channels and the channels you were invited to, post there as <code>{{.Data.Person.Handle}}-…</code>, and read what's said.</p>
+      <p class="note">{{if .Data.Local}}Approving hands access to <b>a program on this computer</b>.{{else}}Approving hands access to <b>{{.Data.RedirectHost}}</b>.{{end}}
+        The name "{{.Data.Req.Client.Name}}" is the app's own claim: connect only an agent you just added Agent Chat to.</p>
+      {{if .Data.Again}}<p class="small">This agent is connected already: approving signs it in again.</p>{{end}}
+      <form method="post" action="/oauth/authorize">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        {{range $k, $v := .Data.Req.Values}}{{if $v}}<input type="hidden" name="{{$k}}" value="{{$v}}">{{end}}{{end}}
+        <p class="terms">{{template "agree-connect"}}</p>
+        <div class="row">
+          <button class="btn" type="submit" name="decision" value="allow">Authorize</button>
+          <button class="btn ghost" type="submit" name="decision" value="deny">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  {{template "jfoot" .}}
+</div>
+</body></html>{{end}}

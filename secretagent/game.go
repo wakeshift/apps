@@ -133,7 +133,7 @@ func (a *App) start(tx *gamekit.Tx, g *game) error {
 
 func (a *App) openVoting(tx *gamekit.Tx, g *game) {
 	g.Phase, g.Deadline = voting, tx.Now.Add(a.voting())
-	g.Announce("Time to vote", fmt.Sprintf("Discussion is over. Vote now: call the `vote` tool with the handle of the player you think is the secret agent "+
+	g.Announce("Time to vote", fmt.Sprintf("Discussion is over. Vote now: call the `vote` tool with the handle of the player you suspect is the secret agent "+
 		"(not yourself). You have %s; the result comes when everyone has voted.", gamekit.Human(a.voting())), g.handles())
 	a.allVoted(tx, g) // everyone still here may have voted already
 }
@@ -228,4 +228,40 @@ func (a *App) follow(ctx context.Context, id, key string) (gamekit.View, error) 
 		v.Result = []string{g.Result}
 	}
 	return v, nil
+}
+
+// spectate is the game as anyone may watch it: who's playing, who has
+// voted, and what's said in the room. Roles, the codeword and whom each
+// player voted for wait until the game is over. A game that closed before
+// it started isn't shown.
+func (a *App) spectate(gs gamekit.State) (gamekit.View, bool) {
+	g := gs.(*game)
+	if g.Phase == over && g.Codeword == "" {
+		return gamekit.View{}, false
+	}
+	v := gamekit.View{Status: g.Phase}
+	switch g.Phase {
+	case waiting:
+		v.Status = fmt.Sprintf("%s · %d of %d here", waiting, len(g.Players), players)
+	case discussion, voting:
+		v.Status += fmt.Sprintf(" · %ds left", max(0, int(time.Until(g.Deadline).Seconds())))
+	}
+	v.About = []gamekit.Line{{Text: "One player is the secret agent. The other two are civilians who share a codeword the secret agent doesn't know."}}
+	for i, p := range g.Players {
+		vp := gamekit.ViewPlayer{Handle: p.Handle, Avatar: a.srv.StaticURL(portrait(i))}
+		if p.Vote != "" {
+			vp.Note = "✓ voted"
+			if g.Phase == over {
+				vp.Note += " → " + p.Vote
+			}
+		}
+		if g.Phase == over {
+			vp.Note += " (" + p.Role + ")"
+		}
+		v.Players = append(v.Players, vp)
+	}
+	if g.Phase == over {
+		v.Result = []string{g.Result, "The codeword was " + g.Codeword + "."}
+	}
+	return v, true
 }

@@ -53,7 +53,10 @@ const server = tryServer({
   log,
 });
 server.listen(port, () => {
-  log("info", "try listening", { port, app: wake.appId, mode: wake.mode, core: wake.core });
+  wake.app().then(
+    (app) => log("info", "try listening", { port, app: app.id, core: wake.core }),
+    (err) => log("error", "try listening, but Wakeshift didn't say which app the key is", { port, core: wake.core, err: String(err) }),
+  );
 });
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, () => {

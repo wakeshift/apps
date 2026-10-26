@@ -1,0 +1,76 @@
+/* The public pages (spectate.go): the follow-along page's parts, in the
+   kit's plain look. A game's Theme comes after this, then its PublicCSS. */
+:root { --bg: #f6f6f4; --surface: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3df; --accent: #1d1d1b;
+  --font: system-ui, sans-serif; --title-font: inherit; }
+* { box-sizing: border-box; }
+body { font: 15px/1.5 var(--font); margin: 0; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
+a { color: inherit; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.top .wrap { max-width: 720px; margin: 0 auto; padding: 24px 16px 0; }
+main { max-width: 720px; width: 100%; margin: 0 auto; padding: 0 16px 48px; flex: 1 0 auto; }
+h1 { font-size: 20px; margin: 0 0 4px; font-family: var(--title-font); overflow-wrap: anywhere; }
+.sub { color: var(--muted); margin: 0 0 20px; overflow-wrap: anywhere; }
+.crumbs { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 14px; font-size: 13px; }
+.crumbs a { color: var(--muted); text-decoration: none; }
+.crumbs a:hover { color: var(--text); }
+.live-dot { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: #e5383b; vertical-align: 1px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; min-width: 0; }
+.card[hidden] { display: none; }
+.card .h { font-weight: 600; margin: 0 0 8px; }
+.good { color: #067647; font-weight: 600; } .bad { color: #b42318; font-weight: 600; }
+.line { overflow-wrap: anywhere; }
+.line .label { margin-right: .3em; } .line .label::after { content: ":"; }
+.avatar { display: none; }
+.players .list { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.players .player { display: inline-block; max-width: 100%; padding: 2px 8px; border-radius: 999px; background: #efefec; overflow-wrap: anywhere; }
+.players .note { margin-left: .3em; }
+.log .entry { padding: 6px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; } .log .h + .entry { border-top: 0; }
+.from { font-weight: 600; margin-right: 6px; } .mod .from, .mod .text { color: var(--muted); } .mod .from { font-style: italic; }
+.time { color: var(--muted); font-size: 12px; margin-left: 6px; white-space: nowrap; }
+.result div:first-child { font-size: 17px; font-weight: 600; }
+.gone { color: var(--muted); margin: 0; }
+
+.secret { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.secret .value { filter: blur(6px); transition: filter .15s; }
+.secret:hover .value, .secret:focus-visible .value, .secret.shown .value { filter: none; }
+.secret .hint { color: var(--muted); font-size: 12px; margin-left: 8px; }
+.secret:hover .hint, .secret.shown .hint { display: none; }
+.log .mine .from { color: var(--accent); }
+.log .thought { padding-left: 14px; font-size: 13px; } .log .thought .from, .log .thought .text { color: var(--muted); font-style: italic; font-weight: normal; }
+
+/* A game drawn as a table (Server.Table): the table, then its result, with
+   the transcript beside them on a wide screen (as tall as they are, and
+   scrolling in its own box), below them on a narrow one. */
+body.tabled .top .wrap, main.game.tabled { max-width: 1440px; }
+main.game.tabled { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "you" "stage" "result" "log"; column-gap: 20px; align-items: start; }
+.tabled .you { grid-area: you; }
+.tabled .stage { grid-area: stage; min-width: 0; margin-bottom: 14px; }
+.tabled .result { grid-area: result; }
+.tabled .log { grid-area: log; max-height: min(70vh, 640px); overflow-y: auto; overscroll-behavior: contain; }
+@media (min-width: 1180px) {
+  main.game.tabled { grid-template-columns: minmax(0, 1fr) 360px; grid-template-areas: "you log" "stage log" "result log"; }
+  .tabled .log { align-self: stretch; contain: size; min-height: 420px; max-height: none; }
+}
+
+/* The listing. */
+body.public main.listing { display: block; max-width: 900px; }
+.games { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.games[hidden] { display: none; }
+.games .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "top watch" "players watch"; gap: 4px 16px; align-items: center;
+  padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; text-decoration: none; }
+.games .row:hover { border-color: var(--accent); }
+.g-top { grid-area: top; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+.g-status { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.g-players { grid-area: players; color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
+.g-player { color: var(--text); }
+.g-watch { grid-area: watch; white-space: nowrap; font-weight: 600; color: var(--accent); }
+.gone-card p { margin: 0 0 8px; overflow-wrap: anywhere; }
+
+.foot { border-top: 1px solid var(--line); }
+.foot .wrap { max-width: 900px; margin: 0 auto; padding: 18px 16px 28px; display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; color: var(--muted); font-size: 13px; }
+.foot .links { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.foot a { text-decoration: none; } .foot a:hover { color: var(--text); }
+
+@media (max-width: 560px) {
+  .games .row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "players" "watch"; }
+}

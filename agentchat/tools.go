@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -15,42 +14,54 @@ import (
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
+// Agents' tools. Every channel is a Wakeshift group; Agent Chat's database
+// says who may be in it (an org's members, or the people admitted to a
+// channel outside orgs, less anyone banned), and each tool checks that
+// before it acts.
+
 type empty struct{}
 
-type channelIn struct {
-	Channel string `json:"channel" jsonschema:"Channel name, e.g. general or pr-482"`
-}
-
 type leaveIn struct {
-	Channel string `json:"channel" jsonschema:"Channel name"`
+	Channel string `json:"channel" jsonschema:"The channel (org/name, or its name)"`
 	Session string `json:"session,omitempty" jsonschema:"Your session's handle (e.g. claude-code#2): leave as this conversation only"`
 }
 
 type createIn struct {
 	Name    string `json:"name" jsonschema:"Channel name: lowercase letters, digits and dashes"`
 	Topic   string `json:"topic" jsonschema:"What the channel is for"`
-	Shared  bool   `json:"shared,omitempty" jsonschema:"Share it with agents of other people: you'll own it, and invite them with the invite tool. Its name gets a code added."`
+	Org     string `json:"org,omitempty" jsonschema:"An org you manage (its short name, as list_channels shows it), for an org channel. Without it, the channel is outside orgs: you own it, and invite others with the invite tool. Its name gets a code added."`
+	Wake    string `json:"wake,omitempty" jsonschema:"all (default): woken by every message in the channel; mentions: woken only when @-mentioned"`
 	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool (e.g. claude-code#2), so this conversation is the one woken"`
 }
 
 type joinIn struct {
-	Channel string `json:"channel,omitempty" jsonschema:"Channel name (not needed with an invite)"`
-	Invite  string `json:"invite,omitempty" jsonschema:"An invite code to someone else's shared channel"`
-	Wake    string `json:"wake,omitempty" jsonschema:"mentions (default): woken only when @-mentioned; all: woken by every message"`
+	Channel string `json:"channel,omitempty" jsonschema:"The channel (org/name, or its name; not needed with an invite)"`
+	Invite  string `json:"invite,omitempty" jsonschema:"An invite code (or link) to a channel outside orgs"`
+	Wake    string `json:"wake,omitempty" jsonschema:"all (default): woken by every message in the channel; mentions: woken only when @-mentioned"`
 	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool (e.g. claude-code#2), so this conversation is the one woken"`
 }
 
 type postIn struct {
-	Channel  string   `json:"channel" jsonschema:"Channel name"`
-	Text     string   `json:"text" jsonschema:"The message. @-mention agents (e.g. @codex) to wake them."`
-	Mentions []string `json:"mentions,omitempty" jsonschema:"Agents to wake, besides @-mentions in the text"`
-	ReplyTo  string   `json:"reply_to,omitempty" jsonschema:"The id of a message delivered to you, to reply in its thread"`
+	Channel  string   `json:"channel" jsonschema:"The channel (org/name, or its name)"`
+	Text     string   `json:"text" jsonschema:"The message. @-mention agents by their handle (e.g. @ada-codex) to wake them."`
+	Mentions []string `json:"mentions,omitempty" jsonschema:"Handles to wake, besides @-mentions in the text"`
+	ReplyTo  string   `json:"reply_to,omitempty" jsonschema:"The id of the message you are answering (one delivered to you, or your own): the post goes in its thread"`
 	Session  string   `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool (e.g. claude-code#2): your own post won't wake you"`
 }
 
 type historyIn struct {
-	Channel string `json:"channel" jsonschema:"Channel name"`
+	Channel string `json:"channel" jsonschema:"The channel (org/name, or its name)"`
 	Limit   int    `json:"limit,omitempty" jsonschema:"How many recent messages (default 20, at most 100)"`
+}
+
+type inviteIn struct {
+	Channel string `json:"channel" jsonschema:"A channel outside orgs that you own"`
+}
+
+type removeIn struct {
+	Channel string `json:"channel" jsonschema:"The channel (org/name, or its name)"`
+	Member  string `json:"member" jsonschema:"A member's handle, as list_channels shows it (e.g. bob-codex)"`
+	Ban     bool   `json:"ban,omitempty" jsonschema:"Keep that member's person out of a channel outside orgs (org channels always do)"`
 }
 
 type unwatchIn struct {
@@ -63,21 +74,27 @@ type watchIn struct {
 	Label   string `json:"label,omitempty" jsonschema:"Name a new session (e.g. pipe gives claude-code@pipe); default numbered"`
 }
 
+type memberOut struct {
+	Handle string `json:"handle"`
+	Person string `json:"person,omitempty"` // whose agent it is
+	You    bool   `json:"you,omitempty"`
+}
+
 type channelOut struct {
-	Name    string          `json:"name"`
-	Topic   string          `json:"topic"`
-	Members []appkit.Member `json:"members"`
-	// A shared channel's members are by their handles there (claude-code-2
-	// if another person's claude-code joined first), and say whose they are.
-	Shared bool     `json:"shared,omitempty"`
-	Owner  string   `json:"owner,omitempty"` // the member who owns it
-	You    string   `json:"you,omitempty"`   // your handle there
-	Others []string `json:"other_peoples_agents,omitempty"`
+	Channel string      `json:"channel"`
+	Org     string      `json:"org,omitempty"`
+	Topic   string      `json:"topic"`
+	Joined  bool        `json:"joined"`
+	Members []memberOut `json:"members,omitempty"`
+	Owner   bool        `json:"you_manage,omitempty"`
 }
 
 type message struct {
-	ID       string   `json:"id"`
-	From     string   `json:"from"`
+	ID   string `json:"id"`
+	From string `json:"from"`
+	// Person is set when a person wrote it, on Agent Chat's site: their
+	// name (From is their handle).
+	Person   string   `json:"person,omitempty"`
 	Text     string   `json:"text"`
 	Mentions []string `json:"mentions,omitempty"`
 	ReplyTo  string   `json:"reply_to,omitempty"`
@@ -87,6 +104,14 @@ type message struct {
 type data struct {
 	Text    string `json:"text,omitempty"` // left out when too long for data; readers fall back to the body (the same text)
 	Channel string `json:"channel"`
+	// On a person's posts from the site: their name, and whether a reply
+	// was also sent to the channel.
+	Name        string `json:"name,omitempty"`
+	AlsoChannel bool   `json:"also_channel,omitempty"`
+	// Mentions are the handles it @-mentioned (the text's and any named
+	// besides), for the site to say whom it mentioned: each workspace's
+	// copy of a post names only that workspace's own.
+	Mentions []string `json:"mentions,omitempty"`
 }
 
 // Wakeshift's limits, in bytes (internal/appapi/agent.go).
@@ -98,9 +123,17 @@ const (
 // postData is a message's data: the text again, unless encoding it (JSON
 // escapes <, > and & as six bytes each) would go over Wakeshift's limit.
 func postData(text, channel string) data {
-	d := data{Text: text, Channel: channel}
+	return data{Text: text, Channel: channel}.fit()
+}
+
+// fit is d within Wakeshift's limit for data: without its text (readers
+// fall back to the body), then without its mentions, if it's over.
+func (d data) fit() data {
 	if b, _ := json.Marshal(d); len(b) > maxData {
 		d.Text = ""
+	}
+	if b, _ := json.Marshal(d); len(b) > maxData {
+		d.Mentions = nil
 	}
 	return d
 }
@@ -119,351 +152,103 @@ func truncate(s string, n int) string {
 	return s[:cut] + more
 }
 
-func (a *App) addTools(srv *mcp.Server) {
-	a.addSharedTools(srv)
-	mcp.AddTool(srv, &mcp.Tool{Name: "list_channels", Description: "List channels with their topics and members (and whether each is woken by all messages or only mentions)."},
-		func(ctx context.Context, req *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, map[string]any, error) {
-			ag, err := a.agent(ctx, req)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			types, err := ag.EventTypes(ctx, channelPrefix(a.Kit.ID))
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			out := []channelOut{}
-			for _, t := range types {
-				out = append(out, channelOut{Name: name(t.Type), Topic: t.Description, Members: t.Members})
-			}
-			rooms, err := ag.Groups(ctx)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			for _, g := range rooms {
-				out = append(out, sharedOut(ag, g, ""))
-			}
-			return nil, map[string]any{"channels": out}, nil
-		})
-
-	mcp.AddTool(srv, &mcp.Tool{Name: "create_channel", Description: "Create a channel and join it as this conversation (pass session, from the watch tool; woken when @-mentioned)."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in createIn) (*mcp.CallToolResult, map[string]any, error) {
-			if in.Shared {
-				return a.createShared(ctx, req, in)
-			}
-			typ, err := a.channelType(in.Name)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			ag, err := a.agent(ctx, req)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			session, delivery, err := a.joinSession(ctx, ag, req, in.Session)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			created, err := ag.DeclareEventType(ctx, typ, in.Topic)
-			if err == nil {
-				err = ag.SubscribeAs(ctx, appkit.Subscription{Type: typ, Wake: "mentions", Reason: "Member of #" + name(typ) + " in Agent Chat", Session: session})
-			}
-			if err != nil {
-				return nil, nil, friendly(err, name(typ))
-			}
-			return nil, withDelivery(map[string]any{"channel": name(typ), "created": created, "joined": true, "wake": "mentions"}, delivery), nil
-		})
-
-	mcp.AddTool(srv, &mcp.Tool{Name: "join", Description: "Join a channel as this conversation (pass session). With wake=mentions (default) you're woken only when @-mentioned; with wake=all, by every message. " +
-		"Each of your conversations that joins is woken by @-mentions of you; @you#2 reaches just that one. To join someone else's shared channel, pass the invite code they gave you."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in joinIn) (*mcp.CallToolResult, map[string]any, error) {
-			typ := ""
-			if in.Invite == "" {
-				var err error
-				if typ, err = a.channelType(in.Channel); err != nil {
-					return nil, nil, friendly(err, "")
-				}
-			}
-			if in.Wake == "" {
-				in.Wake = "mentions"
-			}
-			if in.Wake != "mentions" && in.Wake != "all" {
-				return nil, nil, errors.New(`wake is "mentions" or "all"`)
-			}
-			ag, err := a.agent(ctx, req)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			if in.Invite != "" {
-				room, err := a.readInvite(ctx, in.Invite)
-				if err != nil {
-					return nil, nil, err
-				}
-				typ = room
-			} else if t, room, err := a.channel(ctx, ag, in.Channel); err != nil {
-				return nil, nil, friendly(err, in.Channel)
-			} else if room != nil {
-				typ = t // already a member: e.g. another of its conversations joining
-			} else if _, err := a.Kit.Group(ctx, roomPrefix(a.Kit.ID)+name(typ)); err == nil {
-				return nil, nil, fmt.Errorf("#%s is a shared channel: joining it needs an invite from its owner (invite)", name(typ))
-			}
-			session, delivery, err := a.joinSession(ctx, ag, req, in.Session)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			if err := ag.SubscribeAs(ctx, appkit.Subscription{Type: typ, Wake: in.Wake, Reason: "Member of #" + name(typ) + " in Agent Chat",
-				Session: session}); err != nil {
-				return nil, nil, friendly(err, name(typ))
-			}
-			return nil, withDelivery(map[string]any{"channel": name(typ), "joined": true, "wake": in.Wake}, delivery), nil
-		})
-
-	mcp.AddTool(srv, &mcp.Tool{Name: "leave", Description: "Leave a channel (this session's membership; without a session, every one of yours)."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in leaveIn) (*mcp.CallToolResult, map[string]any, error) {
-			typ, err := a.channelType(in.Channel)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			ag, err := a.agent(ctx, req)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			if t, _, err := a.channel(ctx, ag, in.Channel); err != nil {
-				return nil, nil, friendly(err, in.Channel)
-			} else {
-				typ = t
-			}
-			session, _, err := a.session(ctx, ag, req, in.Session)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			if session != "" {
-				err = ag.UnsubscribeSession(ctx, typ, session)
-			} else {
-				err = ag.Unsubscribe(ctx, typ)
-			}
-			if err != nil {
-				return nil, nil, friendly(err, name(typ))
-			}
-			return nil, map[string]any{"channel": name(typ), "left": true, "session": session}, nil
-		})
-
-	mcp.AddTool(srv, &mcp.Tool{Name: "post", Description: "Post to a channel you've joined. @-mention agents to wake them. To reply in a thread, set reply_to to the id of a message delivered to you."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in postIn) (*mcp.CallToolResult, map[string]any, error) {
-			typ, err := a.channelType(in.Channel)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			text := strings.TrimSpace(in.Text)
-			if text == "" || len(text) > 8000 {
-				return nil, nil, errors.New("text is required (at most 8000 characters)")
-			}
-			ag, err := a.agent(ctx, req)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			session, delivery, err := a.session(ctx, ag, req, in.Session)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			// In a shared channel, you're this conversation's handle there
-			// (claude-code-2).
-			self := ag.ID
-			if t, room, err := a.channel(ctx, ag, in.Channel); err != nil {
-				return nil, nil, friendly(err, in.Channel)
-			} else if typ = t; room != nil {
-				self = sharedOut(ag, *room, session).You
-			}
-			posted, err := ag.Publish(ctx, appkit.Post{Type: typ, Subject: truncate(text, maxSubject), Body: text, Data: postData(text, name(typ)),
-				Mentions: mentions(text, in.Mentions, self), ParentID: in.ReplyTo, Session: session})
-			if err != nil {
-				return nil, nil, friendly(err, name(typ))
-			}
-			return nil, withDelivery(map[string]any{"id": posted.ID, "channel": name(typ), "thread": posted.TraceID, "not_agents": posted.IgnoredMentions}, delivery), nil
-		})
-
-	mcp.AddTool(srv, &mcp.Tool{Name: "history", Description: "Read recent messages in a channel you've joined, oldest first."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in historyIn) (*mcp.CallToolResult, map[string]any, error) {
-			typ, err := a.channelType(in.Channel)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			ag, err := a.agent(ctx, req)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			// Members only (of a shared channel: it's one of the agent's).
-			t, room, err := a.channel(ctx, ag, in.Channel)
-			if err != nil {
-				return nil, nil, friendly(err, in.Channel)
-			}
-			typ, member := t, room != nil
-			if room == nil {
-				types, err := ag.EventTypes(ctx, typ)
-				if err != nil {
-					return nil, nil, friendly(err, "")
-				}
-				member = slices.ContainsFunc(types, func(t appkit.EventType) bool {
-					return t.Type == typ && slices.ContainsFunc(t.Members, func(m appkit.Member) bool { return m.Agent == ag.ID })
-				})
-			}
-			if !member {
-				return nil, nil, friendly(errNotMember, name(typ))
-			}
-			limit := in.Limit
-			if limit <= 0 || limit > 100 {
-				limit = 20
-			}
-			events, err := ag.History(ctx, typ, limit)
-			if err != nil {
-				return nil, nil, friendly(err, name(typ))
-			}
-			out := []message{}
-			for _, e := range events {
-				var d data
-				json.Unmarshal(e.Data, &d)
-				text := d.Text
-				if text == "" {
-					text = e.Body
-				}
-				from := e.From.ID
-				if e.FromHandle != "" {
-					from = e.FromHandle
-				}
-				out = append(out, message{ID: e.ID, From: from, Text: text, Mentions: e.Mentions, ReplyTo: e.ParentID, At: e.OccurredAt.Format(time.RFC3339)})
-			}
-			return nil, map[string]any{"channel": name(typ), "messages": out}, nil
-		})
-
-	mcp.AddTool(srv, &mcp.Tool{Name: "unwatch", Description: "Stop new messages waking this conversation (the opposite of watch). In Claude Code, pass session (from watch); a Codex thread needs nothing."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in unwatchIn) (*mcp.CallToolResult, map[string]any, error) {
-			ag, err := a.agent(ctx, req)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			session, _, err := a.session(ctx, ag, req, in.Session)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			if session == "" {
-				return nil, nil, errors.New("pass session: the handle watch gave you")
-			}
-			if err := ag.Unwatch(ctx, session); appkit.IsCode(err, "unknown_session") {
-				return nil, nil, fmt.Errorf("you have no session %s", session)
-			} else if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			return nil, map[string]any{"session": session, "note": appkit.UnwatchNote}, nil
-		})
-
-	mcp.AddTool(srv, &mcp.Tool{Name: "watch", Description: "Start (or resume) your session and get a stream of the messages that wake it. In Claude Code, run the result's monitor command with the Monitor tool (persistent); other clients can read url as a WebSocket. " +
-		"Each conversation should have its own session: pass session (its handle) to the join and post tools. " +
-		`On the WebSocket each message is JSON: {"type":"event","delivery_id","event":{"id","type","from","from_handle","subject","data":{"text","channel"},"mentions",…}}; with the monitor command each line is the same event, flattened: {"type":"event","id","from","subject","data",…} (cut to fit if "truncated" is set; read the rest with the history tool). Reply with the post tool, reply_to = the event's id. ` +
-		`The link rotates: before it expires a {"type":"hub.rotate","url":…} line arrives with the next one; watch that URL from then on (your place is kept; with the monitor command, run curl -sN on it again). If the connection drops, reconnect to the current URL.`},
-		func(ctx context.Context, req *mcp.CallToolRequest, in watchIn) (*mcp.CallToolResult, map[string]any, error) {
-			ag, err := a.agent(ctx, req)
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			// A Codex thread can't hold a stream: Wakeshift's connector for
-			// Codex holds it, started by its hook from the beacon in _meta.
-			if thread := codexThread(req); thread != "" {
-				s, err := ag.ConversationSession(ctx, thread)
-				if err != nil {
-					return nil, nil, friendly(err, "")
-				}
-				w, err := ag.Watch(ctx, s.Handle)
-				if err != nil {
-					return nil, nil, friendly(err, "")
-				}
-				install := ""
-				if s.Connector != nil && s.Connector.Install != nil {
-					install = s.Connector.Install.Command
-				}
-				return &mcp.CallToolResult{Meta: appkit.ConnectorMeta(w.Beacon)},
-					map[string]any{"agent": ag.ID, "session": s.Handle, "note": appkit.CodexWatchNote(s.Handle, install) + " Join channels and post from here. When a message wakes you, answer it in its channel with the post tool (reply_to its id), and say here in one line what you did."}, nil
-			}
-			link, err := ag.SessionLink(ctx, appkit.LinkRequest{Ack: in.Ack, Session: in.Session, Label: in.Label})
-			if appkit.IsCode(err, "unknown_session") {
-				return nil, nil, fmt.Errorf("you have no session %s; call the watch tool without session to start one", in.Session)
-			}
-			if err != nil {
-				return nil, nil, friendly(err, "")
-			}
-			return nil, map[string]any{"url": link.URL, "monitor": "curl -sN '" + link.LinesURL() + "'", "expires_at": link.ExpiresAt.Format(time.RFC3339), "agent": ag.ID, "session": link.Session,
-				"note": "You're " + link.Session + ": pass session=" + link.Session + " to the join and post tools. Others can mention @" + link.Session + " to reach this conversation."}, nil
-		})
+// resolve is the channel a person means by raw: org/name, or a name that's
+// theirs in one place only.
+func (a *App) resolve(ctx context.Context, person, raw string) (Channel, error) {
+	ref := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "#")
+	ref = strings.Replace(ref, ".", "/", 1) // acme.general, as chat.message names it (channel names have no dots)
+	if ref == "" {
+		return Channel{}, errors.New("name a channel (org/name, or its name)")
+	}
+	_, name, _ := strings.Cut(ref, "/")
+	if !strings.Contains(ref, "/") {
+		name = ref
+	}
+	chans, err := a.Store.ChannelsNamed(ctx, person, name)
+	if err != nil {
+		return Channel{}, err
+	}
+	var match []Channel
+	for _, c := range chans {
+		if c.Ref() == ref {
+			return c, nil
+		}
+		if c.Name == ref {
+			match = append(match, c)
+		}
+	}
+	switch len(match) {
+	case 1:
+		return match[0], nil
+	case 0:
+		return Channel{}, fmt.Errorf("there's no channel %s you can use; list_channels shows the ones you can", ref)
+	}
+	var refs []string
+	for _, c := range match {
+		refs = append(refs, c.Ref())
+	}
+	return Channel{}, fmt.Errorf("several channels are called %s: say which (%s)", ref, strings.Join(refs, ", "))
 }
 
-// createShared creates a shared channel (a group) owned by the calling
-// agent, and joins it.
-func (a *App) createShared(ctx context.Context, req *mcp.CallToolRequest, in createIn) (*mcp.CallToolResult, map[string]any, error) {
-	base, err := sharedBase(in.Name)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(in.Topic) > 300 {
-		return nil, nil, errors.New("the topic is at most 300 characters")
-	}
-	ag, err := a.agent(ctx, req)
-	if err != nil {
-		return nil, nil, friendly(err, "")
-	}
-	session, delivery, err := a.joinSession(ctx, ag, req, in.Session)
-	if err != nil {
-		return nil, nil, friendly(err, "")
-	}
-	var d roomData
-	d.Owner.Workspace, d.Owner.Agent = ag.Workspace, ag.ID
-	// A new name each try: creating a group that exists would update it
-	// (handing someone's room to this agent), so a taken name is skipped.
-	var full, typ string
-	for try := 0; ; try++ {
-		if try == 3 {
-			return nil, nil, errors.New("couldn't find a free name for the shared channel; try again")
-		}
-		full = base + "-" + roomCode()
-		typ = roomPrefix(a.Kit.ID) + full
-		if _, err := a.Kit.Group(ctx, typ); err == nil {
-			continue
-		} else if !appkit.IsCode(err, "unknown_group") {
-			return nil, nil, friendly(err, full)
-		}
-		_, created, err := a.Kit.CreateGroup(ctx, typ, in.Topic, d)
-		if err != nil {
-			return nil, nil, friendly(err, full)
-		}
-		if created {
-			break
+// groupOf is the agent's view of a channel's group, if it's in it.
+func groupOf(groups []appkit.Group, typ string) *appkit.Group {
+	for i := range groups {
+		if groups[i].Type == typ {
+			return &groups[i]
 		}
 	}
-	if err := ag.SubscribeAs(ctx, appkit.Subscription{Type: typ, Wake: "mentions", Reason: "Owner of shared #" + full + " in Agent Chat", Session: session}); err != nil {
-		a.Kit.CloseGroup(context.WithoutCancel(ctx), typ) // not joined (e.g. no consent to shared channels): no orphan room
-		return nil, nil, friendly(err, full)
-	}
-	return nil, withDelivery(map[string]any{"channel": full, "created": true, "joined": true, "wake": "mentions", "shared": true,
-		"note": "You own #" + full + ". Invite another person's agent with the invite tool; it joins with the code."}, delivery), nil
+	return nil
 }
 
-// sharedOut is a shared channel as list_channels shows it. Each of an
-// agent's conversations in it is a member with its own handle; you is the
-// calling conversation's (session), else the agent's first.
-func sharedOut(ag *appkit.Agent, g appkit.Group, session string) channelOut {
-	out := channelOut{Name: name(g.Type), Topic: g.Description, Members: []appkit.Member{}, Shared: true}
-	d := roomOf(&g)
-	for _, m := range g.Members {
-		out.Members = append(out.Members, appkit.Member{Agent: m.Handle, Session: m.Session})
-		switch {
-		case m.Workspace == ag.Workspace && m.Agent == ag.ID:
-			if out.You == "" || session != "" && m.Session == session {
-				out.You = m.Handle
+// selfHandle is the calling conversation's handle in a group (else the
+// agent's first there, else its usual handle).
+func selfHandle(g *appkit.Group, ag *appkit.Agent, session, fallback string) string {
+	out := ""
+	if g != nil {
+		for _, m := range g.Members {
+			if m.Workspace == ag.Workspace && m.Agent == ag.ID && (out == "" || session != "" && m.Session == session) {
+				out = m.Handle
 			}
-		case m.Workspace != ag.Workspace:
-			out.Others = append(out.Others, m.Handle)
 		}
-		if out.Owner == "" && m.Workspace == d.Owner.Workspace && m.Agent == d.Owner.Agent {
-			out.Owner = m.Handle
-		}
+	}
+	if out == "" {
+		return fallback
 	}
 	return out
+}
+
+func (a *App) addTools(srv *mcp.Server) {
+	a.addChannelTools(srv)
+	a.addMessageTools(srv)
+	a.addModerationTools(srv)
+	a.addSessionTools(srv)
+}
+
+// channelOrGroup is a channel to leave: one the person may use, or, if
+// they no longer may (removed, the channel closed), a group the agent is
+// still in by that name.
+func (a *App) channelOrGroup(ctx context.Context, me Agent, ag *appkit.Agent, raw string) (typ, ref string, err error) {
+	c, err := a.findFor(ctx, me, raw)
+	if err == nil {
+		return c.GroupType, c.Ref(), nil
+	}
+	groups, gerr := ag.Groups(ctx)
+	if gerr != nil {
+		return "", "", friendly(gerr, "")
+	}
+	// A group's description is its channel's ref (org/name, or name), as
+	// made: only an exact match, and only one.
+	want := strings.Replace(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "#"), ".", "/", 1)
+	var found []appkit.Group
+	for _, g := range groups {
+		if g.Description == want {
+			found = append(found, g)
+		}
+	}
+	if len(found) == 1 {
+		return found[0].Type, want, nil
+	}
+	return "", "", err
 }
 
 // withDelivery adds, while this conversation's connector isn't running,
@@ -474,8 +259,6 @@ func withDelivery(out map[string]any, note string) map[string]any {
 	}
 	return out
 }
-
-var errNotMember = &appkit.APIError{Status: 403, Code: "not_subscribed"}
 
 // chatMessage is a delivered message as wait_for_messages shows it.
 func chatMessage(d appkit.Delivery) any {
@@ -490,11 +273,10 @@ func chatMessage(d appkit.Delivery) any {
 	if e.FromHandle != "" {
 		from = e.FromHandle
 	}
-	channel := dd.Channel
-	if channel == "" {
-		channel = name(e.Type)
+	m := map[string]any{"id": e.ID, "channel": dd.Channel, "from": from, "text": text, "at": e.OccurredAt.Format(time.RFC3339)}
+	if e.From.Kind == "person" {
+		m["person"] = personName(dd, from)
 	}
-	m := map[string]any{"id": e.ID, "channel": channel, "from": from, "text": text, "at": e.OccurredAt.Format(time.RFC3339)}
 	if len(e.Mentions) > 0 {
 		m["mentions"] = e.Mentions
 	}
@@ -505,4 +287,13 @@ func chatMessage(d appkit.Delivery) any {
 		m["redelivered"] = true
 	}
 	return m
+}
+
+// personName is the name of the person who wrote a post on the site (its
+// data's, else their handle).
+func personName(d data, handle string) string {
+	if n := cleanText(d.Name, maxName); n != "" {
+		return n
+	}
+	return handle
 }

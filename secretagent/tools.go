@@ -20,17 +20,20 @@ type sessionIn struct {
 }
 
 type sayIn struct {
-	Text    string `json:"text" jsonschema:"What you say to the other players"`
+	Text    string `json:"text" jsonschema:"Public: said aloud to every other player in the game and to every spectator."`
 	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool"`
+	Note    string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type voteIn struct {
-	Player  string `json:"player" jsonschema:"The handle of the player you think is the secret agent"`
+	Player  string `json:"player" jsonschema:"The handle of the player you suspect is the secret agent"`
 	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool"`
+	Note    string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type playerOut struct {
 	Handle string `json:"handle"`
+	House  string `json:"house,omitempty"` // "House · Haiku 5.5": a house agent
 	Voted  bool   `json:"voted,omitempty"`
 }
 
@@ -39,7 +42,7 @@ type playerOut struct {
 func (a *App) view(g *game, me *player) map[string]any {
 	var ps []playerOut
 	for _, p := range g.Players {
-		ps = append(ps, playerOut{Handle: p.Handle, Voted: p.Vote != ""})
+		ps = append(ps, playerOut{Handle: p.Handle, House: p.HouseLabel(), Voted: p.Vote != ""})
 	}
 	out := map[string]any{"game": g.ID, "phase": g.Phase, "you": me.Handle, "players": ps,
 		"follow_along_url":  a.srv.FollowURL(g.ID, me.Player),
@@ -100,7 +103,8 @@ func (a *App) addTools(srv *mcp.Server) {
 				return nil, nil, err
 			}
 			g := gs.(*game)
-			return nil, a.view(g, g.player(gamekit.PlayerKey(ag.Workspace, ag.ID, session))), nil
+			key := gamekit.PlayerKey(ag.Workspace, ag.ID, session)
+			return nil, a.srv.Joined(ctx, req, g.ID, key, a.view(g, g.player(key))), nil
 		})
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "game", Description: "Your current game: the phase, the players, and your secret role (with the codeword, if you're a civilian). " +
@@ -151,10 +155,11 @@ func (a *App) addTools(srv *mcp.Server) {
 			if err := a.srv.Say(ctx, ag, g.ID, me.Player, text); err != nil {
 				return nil, nil, err
 			}
+			a.srv.ThinkAfterSay(ctx, g.ID, me.Key(), "say", in.Note)
 			return nil, map[string]any{"said": true}, nil
 		})
 
-	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "vote", Description: "Vote for the player you think is the secret agent (any time once the game has started). You can change your vote until " +
+	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "vote", Description: "Vote for the player you suspect is the secret agent (any time once the game has started). You can change your vote until " +
 		"everyone has voted; the game ends as soon as everyone has."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in voteIn) (*mcp.CallToolResult, map[string]any, error) {
 			ag, err := a.srv.Agent(ctx, req)
@@ -190,7 +195,7 @@ func (a *App) addTools(srv *mcp.Server) {
 				}
 				me.Vote = target
 				a.allVoted(tx, g)
-				return nil
+				return tx.Think(id, key, "vote", in.Note)
 			})
 			if err != nil {
 				return nil, nil, err

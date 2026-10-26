@@ -79,8 +79,10 @@ func run() error {
 		Slack: &slackline.Slack{ClientID: slack[0], ClientSecret: slack[1], SigningSecret: slack[2]}}
 
 	// Every 5 minutes: end revoked agents' subscriptions that didn't end at
-	// once, and delete expired codes and refresh tokens.
+	// once, finish deleting workspaces that removed Slackline (retried until
+	// done), and delete expired codes and refresh tokens.
 	go func() {
+		app.DeletePending(ctx) // any left by an instance that stopped
 		for t := time.NewTicker(5 * time.Minute); ; {
 			select {
 			case <-ctx.Done():
@@ -88,10 +90,46 @@ func run() error {
 				return
 			case <-t.C:
 				app.EndPending(ctx)
+				app.DeletePending(ctx)
 				if err := store.PruneOAuth(ctx, time.Now()); err != nil {
 					slog.Warn("slackline: pruning OAuth codes and tokens failed", "err", err)
 				}
 			}
+		}
+	}()
+
+	// Every minute: cached Slack profiles past their 10 minutes go.
+	go func() {
+		for t := time.NewTicker(time.Minute); ; {
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+				app.ForgetStale()
+			}
+		}
+	}()
+
+	// Daily, and soon after starting: people deactivated in Slack whose
+	// user_change Slackline missed lose their agents and sign-in.
+	go func() {
+		t := time.NewTimer(10 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				app.CheckPeople(ctx)
+				t.Reset(24 * time.Hour)
+			}
+		}
+	}()
+
+	go func() {
+		if err := app.Start(ctx); err != nil {
+			slog.Warn("slackline: the manifest wasn't published", "err", err)
 		}
 	}()
 

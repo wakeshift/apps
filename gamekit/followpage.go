@@ -1,6 +1,7 @@
 package gamekit
 
-// followPage renders a View; it fetches it every two seconds. All text is
+// followPage renders a View; it fetches it every two seconds. The
+// player's own reasoning (View.Thinking) shows as muted lines in the log. All text is
 // set with textContent: what players say is never markup. (The title and
 // the theme are the app's own.) Without a theme it's the kit's plain look;
 // a theme's CSS comes after the kit's, and the body has the class "themed".
@@ -29,6 +30,7 @@ const followPage = `<!doctype html>
   .players .note { margin-left: .3em; }
   .log .entry { padding: 6px 0; border-top: 1px solid #f0f0ed; } .log .h + .entry { border-top: 0; } .log > .h { display: none; }
   .from { font-weight: 600; margin-right: 6px; } .mod .from, .mod .text { color: var(--muted); } .mod .from { font-style: italic; }
+  .thought { padding-left: 14px !important; font-size: 13px; } .thought .from, .thought .text { color: var(--muted); font-style: italic; font-weight: normal; }
   .time { color: #9a9a94; font-size: 12px; margin-left: 6px; }
   .result div:first-child { font-size: 17px; font-weight: 600; }
   .gone { color: var(--muted); }
@@ -50,6 +52,15 @@ const url = location.pathname.replace(/\/$/, '') + '/state';
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const avatar = (src, cls) => { const i = el('img', 'avatar' + (cls ? ' ' + cls : '')); i.src = src; i.alt = ''; return i; };
 let seen = '', revealed = false;
+// Your agent's private reasoning (only on this page), in time order with what was said.
+const withThinking = (log, thinking) => [...log, ...thinking.map(t => ({ ...t, thought: true }))]
+  .map((m, i) => [m, i]).sort((a, b) => (new Date(a[0].at) - new Date(b[0].at)) || (a[1] - b[1])).map(x => x[0]);
+const thoughtLine = (t) => {
+  const d = el('div', 'entry thought');
+  d.append(el('span', 'from', 'Thinking' + (t.tool && t.tool !== 'say' ? ' (' + t.tool + ')' : '')), el('span', 'text', t.text));
+  d.append(el('span', 'time', new Date(t.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })));
+  return d;
+};
 function render(s) {
   document.getElementById('sub').textContent = 'Game ' + s.game + ' · ' + s.status;
   const players = s.players || [];
@@ -88,14 +99,16 @@ function render(s) {
   res.hidden = !(s.result && s.result.length);
   if (!res.hidden) res.replaceChildren(...s.result.map(t => el('div', null, t)));
 
-  const key = s.log.length + '|' + Object.keys(pics).length;
+  const thinking = s.thinking || [];
+  const key = s.log.length + '|' + (s.log.length ? s.log[s.log.length - 1].at : '') + '|' + thinking.length + '|' + (thinking.length ? thinking[thinking.length - 1].at : '') + '|' + Object.keys(pics).length;
   if (key !== seen) {
     const atEnd = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
     const first = seen === '';
     seen = key;
     const log = document.getElementById('log'); log.replaceChildren(el('div', 'h', 'Transcript'));
-    if (!s.log.length) log.append(el('div', 'gone', 'Nothing said yet.'));
-    for (const m of s.log) {
+    if (!s.log.length && !thinking.length) log.append(el('div', 'gone', 'Nothing said yet.'));
+    for (const m of withThinking(s.log, thinking)) {
+      if (m.thought) { log.append(thoughtLine(m)); continue; }
       const d = el('div', 'entry' + (m.from ? '' : ' mod') + (me && m.from === me.handle ? ' mine' : ''));
       if (pics[m.from]) d.append(avatar(pics[m.from]));
       d.append(el('span', 'from', m.from || 'Moderator'));

@@ -118,14 +118,16 @@ func (s *Server) tickers() int {
 }
 
 // forget deletes what players have had lately (recent) once they haven't
-// played for recentFor. It runs about once an hour per instance.
+// played for recentFor, and reasoning older than a day (thinking.go). It runs about once an hour per instance.
 func (s *Server) forget(ctx context.Context, now time.Time) error {
 	last := s.forgotAt.Load()
 	if last != 0 && now.Sub(time.Unix(0, last)) < time.Hour || !s.forgotAt.CompareAndSwap(last, now.UnixNano()) {
 		return nil
 	}
-	_, err := s.Store.Pool.Exec(ctx, `DELETE FROM recent WHERE updated_at < $1`, now.Add(-recentFor))
-	return err
+	if _, err := s.Store.Pool.Exec(ctx, `DELETE FROM recent WHERE updated_at < $1`, now.Add(-recentFor)); err != nil {
+		return err
+	}
+	return s.forgetThinking(ctx, now)
 }
 
 // advance runs game id's due step, if it's still due (a player's move may
@@ -380,7 +382,10 @@ func GoogleTickAuth(audience, account string) func(*http.Request) error {
 		mu.Unlock()
 		if p == nil {
 			var err error
-			if p, err = oidc.NewProvider(context.WithoutCancel(r.Context()), "https://accounts.google.com"); err != nil {
+			// Kept for later key fetches, so not the request's context; a
+			// client with a timeout, so a hung Google doesn't hang /tick.
+			ctx := oidc.ClientContext(context.WithoutCancel(r.Context()), &http.Client{Timeout: 10 * time.Second})
+			if p, err = oidc.NewProvider(ctx, "https://accounts.google.com"); err != nil {
 				return err
 			}
 			mu.Lock()

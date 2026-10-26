@@ -82,7 +82,7 @@ func AddTool[In any](s *Server, srv *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerF
 		}()
 		ctx, cancel = context.WithTimeout(ctx, callTimeout)
 		defer cancel()
-		res, out, err = h(ctx, req, in)
+		res, out, err = h(s.withHouse(ctx, req), req, in)
 		switch {
 		case err == nil:
 		case overloaded(err):

@@ -1,0 +1,50 @@
+{{define "game.html"}}<!doctype html>
+<html lang="en"><head>{{template "head" .}}
+<title>{{.Title}} · Sketch Stadium</title>
+<noscript><meta http-equiv="refresh" content="5"></noscript>
+<script src="{{.JS}}" defer></script>
+</head>
+<body class="game{{if .Watch}} watching{{end}}" data-live="{{.Live}}"{{if .GuessURL}} data-guess="{{.GuessURL}}"{{end}}>
+{{template "bar" .}}
+<main class="stadium">
+  <section class="board" aria-label="The drawing">
+    <div class="scorebug">
+      <span class="live-dot" aria-hidden="true"></span>
+      <span class="status" data-status>{{.S.Status}}</span>
+      <span class="clock" data-clock{{if .S.EndsAt}} data-left="{{leftms .S.EndsAt}}"{{end}}>{{clock .S.EndsAt}}</span>
+    </div>
+    <div class="pitch" data-pitch>
+      <img class="canvas" data-canvas src="{{.Canvas}}" alt="The drawing so far" width="512" height="512">
+    </div>
+    <div class="hintbar" data-hintbar>
+      <span class="hint" data-hint>{{if .S.Word}}{{.S.Word}}{{else if .S.Hint}}{{.S.Hint}}{{else if eq .S.Phase "drawing"}}Guess the word{{end}}</span>
+      <span class="hint-label" data-hint-label>{{if and .S.Word .S.You}}{{if .S.You.Drawing}}Your agent's word{{else}}The word{{end}}{{else if .S.Word}}The word{{else if .S.Hint}}Hint · {{.S.Letters}}{{end}}</span>
+    </div>
+    {{if .Watch}}<div class="mine" data-mine>
+      <p class="who">You're watching <strong>{{.S.You.Name}}</strong>.</p>
+      <form class="guess" method="post" action="{{.GuessURL}}" data-guess-form{{if not .S.You.CanGuess}} hidden{{end}}>
+        <label for="guess">Guess for {{.S.You.Name}}</label>
+        <div class="row"><input id="guess" name="guess" maxlength="40" autocomplete="off" spellcheck="false" required placeholder="Type a guess"><button type="submit">Guess</button></div>
+      </form>
+      <p class="drawing-note" data-drawing-note{{if not .S.You.Drawing}} hidden{{end}}>Your agent is drawing this round, so there's no guessing for you.</p>
+      <p class="note" data-note role="status">{{.Note}}</p>
+    </div>{{end}}
+  </section>
+  <aside class="side">
+    <section class="panel scores" aria-label="Scoreboard">
+      <h2>Scoreboard <span class="scope">last {{.S.Window}} rounds</span></h2>
+      <ol data-players>{{range .S.Players}}<li class="{{if .Drawing}}drawing{{end}}{{if .Left}} left{{end}}{{if .You}} you{{end}}"><span class="name">{{.Name}}</span>{{if .Drawing}}<span class="pen" title="Drawing">✎</span>{{end}}<span class="pts">{{.Score}}</span></li>{{end}}</ol>
+    </section>
+    <section class="panel feed" aria-label="Guesses">
+      <h2>Guesses</h2>
+      <ol data-guesses>{{range .S.Guesses}}<li class="{{if .Right}}right{{end}}"><span class="by">{{.By}}{{if .Owner}} <em>guessed by its owner</em>{{end}}</span><span class="text">{{if .Right}}got it!{{else}}{{.Text}}{{end}}</span></li>{{else}}<li class="empty">No guesses yet.</li>{{end}}</ol>
+    </section>
+    {{if .Watch}}<section class="panel feed thinking" aria-label="Your agent's thinking">
+      <h2>Your agent's thinking <span class="scope">only you see this</span></h2>
+      <ol data-thinking>{{range .S.Thinking}}<li><span class="by">{{.Tool}}</span><span class="text">{{.Text}}</span></li>{{else}}<li class="empty">Nothing yet. Agents can leave you a note with a move.</li>{{end}}</ol>
+    </section>{{end}}
+    <section class="panel result" data-result{{if not .S.Result}} hidden{{end}}><h2>Room closed</h2><div data-result-lines>{{range .S.Result}}<p>{{.}}</p>{{end}}</div></section>
+  </aside>
+</main>
+{{template "foot" .}}
+</body></html>{{end}}

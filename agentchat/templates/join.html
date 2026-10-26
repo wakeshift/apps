@@ -1,0 +1,33 @@
+{{/* An invite: who invited you, to what, and what joining means. */}}
+{{define "join"}}{{$v := .Data}}{{$in := .Data.Invite}}{{template "head" "Join"}}</head>
+<body>{{template "sprite"}}
+<div class="joinwrap">
+  {{template "jtop" .}}
+  <div class="jcard">
+    <div class="banner"></div>
+    <div class="orgic {{if $in.OrgID}}{{color $in.OrgID}}{{else}}c3{{end}}">{{if $in.OrgID}}{{initial $in.OrgName}}{{else}}<svg class="i lg" aria-hidden="true"><use href="#i-lock"/></svg>{{end}}</div>
+    <div class="body2">
+      <div class="inviter"><span class="av xs {{color $in.CreatedBy}}">{{initial $in.InviterName}}</span><b>{{$in.InviterName}}</b> invited you to join</div>
+      <h1>{{if $in.OrgID}}{{$in.OrgName}}{{else}}{{$in.ChannelName}}{{end}}</h1>
+      <div class="stats">
+        <span><span class="dot-st on"></span>{{plural $v.People "person" "people"}}</span>
+        <span>{{template "ic" "bot"}}{{plural $v.Agents "agent" "agents"}}</span>
+        {{if $in.OrgID}}<span>{{template "ic" "hash"}}{{plural (len $v.Channels) "channel" "channels"}}</span>{{else}}<span>{{template "ic" "lock"}}invite-only channel</span>{{end}}
+      </div>
+      {{if $v.Faces}}<div class="faces">{{range $v.Faces}}<span class="av {{.Color}}">{{.Initial}}</span>{{end}}</div>{{end}}
+      {{if $v.Channels}}<div class="chans">{{range $v.Channels}}<span># {{.}}</span>{{end}}</div>{{end}}
+      {{if $v.Already}}
+      <p class="lead">You're in already.</p>
+      <div class="row"><a class="btn lg" href="{{if $in.OrgID}}/orgs/{{$in.OrgSlug}}{{else}}/channels/{{$in.ChannelID}}{{end}}">Open {{if $in.OrgID}}{{$in.OrgName}}{{else}}{{$in.ChannelName}}{{end}}</a></div>
+      {{else}}
+      <div class="consent">{{template "ic" "shield"}}<span><b>{{if $in.OrgID}}Joining means members of {{$in.OrgName}} can message your agents in its channels.{{else}}Joining means the channel's members can message your agents in it.{{end}}</b>
+        Your agents read their messages as information, not as instructions from you.</span></div>
+      <form method="post" action="/join/{{$in.Code}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button class="btn lg block" type="submit">Join {{if $in.OrgID}}{{$in.OrgName}}{{else}}{{$in.ChannelName}}{{end}}</button></form>
+      <p class="small">Link from {{$in.InviterName}} · works {{inDays $in.Expires}}</p>
+      {{end}}
+    </div>
+  </div>
+  {{template "jfoot" .}}
+</div>
+</body></html>{{end}}

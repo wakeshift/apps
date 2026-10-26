@@ -1,33 +1,58 @@
 # Slackline Privacy Policy
 
-*Draft for legal review · Last updated [date]*
+*Last updated October 25, 2026*
 
-Slackline is made by Clawvisor Inc. ("we", "us") and runs on Wakeshift. This notice is part of [Wakeshift's Privacy Policy]({wakeshift}/privacy). It says what Slackline collects, who sees it and how long it's kept. Who we are, why we use data, your rights, where data is stored and how we tell you about changes are all in Wakeshift's policy. Contact: support@wakeshift.ai.
+This Slackline Privacy Policy ("Policy") describes the personal data that Slackline collects, who receives it and how long it is kept. Slackline is an app that Clawvisor Inc. ("we" or "us") makes, and it runs on Wakeshift. This Policy forms part of [Wakeshift's Privacy Policy]({wakeshift}/privacy), which describes who we are, why we process personal data and on what legal bases, your rights, where data is stored and how we notify you of changes. You may contact us at support@wakeshift.ai.
 
-## What Slackline collects
+## 1. Data Collected
 
-- **Your Slack workspace:** its ID and name, who added Slackline and when, and the token Slack gives Slackline to read and post, stored encrypted.
-- **You, when you sign in with Slack:** your Slack user ID and name, your workspace's name, your direct message channel with Slackline, and when you signed in.
-- **Your agents:** the name you gave each one, the name its program gives itself (for example "Claude Code"), when you approved it and whether you removed it. The keys that let it connect are stored only as hashes.
-- **Where each agent listens:** its thread in your direct messages, the channels you chose (their IDs and names, whether it's woken by every message or only by mentions, and whether only you or anyone there can reach it), and the threads it posted in.
-- **A log of what you did:** connecting, renaming and removing agents, setting and removing channel rules, and signing in. It never holds message text.
+- **Your Slack workspace:** its ID and name, who added Slackline and when, and the token that Slack gives Slackline to read and post, stored encrypted.
+- **Your sign-in:** when you sign in with Slack, your Slack user ID and name, your Slack workspace's name, your direct message channel with Slackline, when you signed in, and when you confirmed that you understand where your agents' messages go.
+- **Your agents:** the name you gave each agent, the name its agent program gives itself (for example, "Claude Code"), when you approved it and whether you removed it. The keys that allow it to connect are stored only as hashes.
+- **Where each agent listens:** its thread in your direct messages; the channels you chose (their IDs and names, whether every message or only mentions reach the agent, and whether only you or anyone in the channel can reach it); and the threads in which it posted.
+- **Slack profiles, briefly:** to determine who can reach an agent and to identify whose agent is posting, Slackline looks up people in Slack: their name, and whether they are a guest, from another organization or deactivated. Slackline keeps this information in memory for no more than 10 minutes and never stores it.
+- **A log of your actions:** connecting, renaming and removing agents; setting and removing channel rules; signing in; and confirming where messages go. The log never contains message text.
 
-**Messages.** Slack sends Slackline the messages in your direct messages with Slackline and in the channels Slackline has been added to. Slackline doesn't store them. It passes each message an agent is allowed to receive to Wakeshift, which holds it until the agent receives it, and drops the rest. When your agent replies, Slackline posts the reply to Slack and doesn't keep it.
+Slackline sets two cookies: `slackline_session`, which keeps you signed in for up to 30 days, and `slackline_state`, which lasts 10 minutes and is used only to complete a sign-in with Slack. Neither is used for tracking.
 
-Slackline sets two cookies: `slackline_session` keeps you signed in to your Slackline page, and `slackline_state` completes signing in or adding Slackline to Slack, for 10 minutes.
+## 2. Messages
 
-## Who sees it
+2.1 Slack sends Slackline the messages in your direct messages with Slackline and in the channels to which Slackline has been added. Slackline never stores message text. It passes each message that one of your agents is permitted to receive to Wakeshift, and discards the rest. Messages from guests and from people outside your organization never reach an agent.
 
-- **Your agents, and their providers** (for example Anthropic or OpenAI), for the messages delivered to them.
-- **The people in a channel** where your agent posts.
-- **Slack**, which handles everything in Slack under its own privacy policy.
-- **Google Cloud**, which hosts Slackline.
+2.2 The text of a message delivered to your agent goes to:
 
-## How long it's kept
+- **Wakeshift**, which holds it until your agent receives it, and then deletes it.
+- **Your own agent**, which runs wherever you run it: on your computer, or wherever you have set it up. Your agent may keep the message in its own history, such as a local transcript. That copy is yours and remains under your control.
+- **Your agent provider** (Anthropic, OpenAI or whichever provider you use), which processes it under its own terms and retains it as those terms provide.
 
-- **Messages** delivered to your agent stay on Wakeshift until Slackline is removed from your Slack workspace. Removing it has Wakeshift forget each person there, which deletes everything it holds for them, their agents' messages included.
+2.3 When your agent replies, Slackline posts the reply to Slack and does not keep it.
+
+## 3. No Training and No Sale
+
+Neither Slackline nor Wakeshift uses Slack data to train AI models, and we do not permit anyone else to do so. We do not sell Slack data, and we do not share it with anyone beyond delivering it to the agent you chose and the providers that operate Slackline (listed in Section 4). The Slackline Terms of Service require you to keep model training turned off with your agent provider.
+
+## 4. Recipients
+
+- **Your agents and their agent providers**, for the messages delivered to them.
+- **The people in a channel** in which your agent listens or posts. Slackline notifies the channel when your agent starts and stops listening, whose agent it is, and what it hears. Anyone in the channel can type `/slackline here` to see which agents are listening.
+- **Slack**, which processes everything in Slack under its own privacy policy.
+- **Google Cloud**, which hosts Slackline and Wakeshift.
+
+## 5. Retention
+
+- **Messages** are deleted from Wakeshift as soon as your agent receives them. For an agent that does not confirm receipt of a message, that occurs within approximately 10 minutes, so that a message lost in transit can be sent again. A message that your agent never receives is deleted 30 days after Wakeshift stops attempting to deliver it: when delivery fails, or when the conversation for which it was intended stops listening.
 - **An agent's keys and channel rules** are deleted when you remove the agent.
-- **Everything else**, including the log of what you did, is kept while Slackline is in your Slack workspace. We may delete it sooner. Removing Slackline from Slack deletes all of it, and has Wakeshift delete what it holds for that workspace's people.
-- **Logs** of requests (never message text or tokens) are kept 30 days.
+- **All other data**, including the log of your actions, is kept while Slackline remains in your Slack workspace.
+- **Request logs** (which never contain message text or tokens) are kept for 30 days.
+
+## 6. Deactivated Slack Accounts
+
+When a person's Slack account is deactivated, Slackline removes their agents, ends their channel rules, signs them out of Slackline and notifies the channels in which their agents listened. Their Wakeshift subscriptions also end. Slack notifies Slackline when an account is deactivated, and Slackline also checks daily. The person's account record and log remain until Slackline is removed from the Slack workspace.
+
+## 7. Removal of Slackline from Your Slack Workspace
+
+7.1 When Slackline is removed from your Slack workspace, or its access is revoked, Slackline deletes its token for the Slack workspace immediately and stops every agent there. It then deletes everything it keeps for the Slack workspace: its people, their agents, channel rules, threads and the log of their actions. Wakeshift deletes everything it holds for those people, including messages not yet delivered. If a step fails, Slackline retries until the deletion is complete, and completes it within 14 days. Afterwards, Slackline keeps a single record that it was removed from the Slack workspace, with the Slack workspace's ID, the date and the reason, and nothing about its people.
+
+7.2 Copies that your agent or your agent provider already holds are not affected. You may delete those where you run your agent and in your agent provider's settings.
 
 See also the [Slackline Terms of Service](/terms).

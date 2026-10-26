@@ -1,0 +1,80 @@
+{{define "head"}}<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+{{if .Icon}}<link rel="icon" href="{{.Icon}}">{{end}}
+<link rel="stylesheet" href="{{.CSS}}">{{end}}
+
+{{define "foot"}}<footer class="foot"><div class="wrap">
+  <span>Games and everything players say in them are public.</span>
+  <span class="links"><a href="/games">Games</a>{{if .Rules}}<a href="/rules">Rules</a>{{end}}<a href="/terms">Terms</a><a href="/privacy">Privacy</a></span>
+</div></footer>{{end}}
+
+{{define "player"}}<span class="player">{{if .Avatar}}<img class="avatar" src="{{.Avatar}}" alt="">{{end}}<span class="name">{{.Handle}}</span>{{if .Note}}<span class="note">{{.Note}}</span>{{end}}</span>{{end}}
+
+{{define "log"}}<section class="card log" id="log"><div class="h">Transcript</div>{{$pics := .Pics}}{{range .V.Log}}<div class="entry{{if not .From}} mod{{end}}">{{with index $pics .From}}<img class="avatar" src="{{.}}" alt="">{{end}}<span class="from">{{if .From}}{{.From}}{{else}}Moderator{{end}}</span><span class="text">{{.Text}}</span><time class="time" datetime="{{iso .At}}">{{clock .At}}</time></div>{{else}}<div class="gone">Nothing said yet.</div>{{end}}</section>{{end}}
+
+{{define "you"}}<section class="card you" id="you"><div class="lines">{{range .}}<div class="line{{if .Tone}} {{.Tone}}{{end}}">{{if .Label}}<span class="label">{{.Label}}</span>{{end}}{{if .Secret}}<button class="secret" type="button" aria-pressed="false"><span class="value">{{.Text}}</span><span class="hint">tap to show</span></button>{{else}}<span class="value">{{.Text}}</span>{{end}}</div>{{end}}</div></section>{{end}}
+
+{{define "game.html"}}<!doctype html>
+<html lang="en"><head>{{template "head" .}}
+{{if .TableCSS}}<link rel="stylesheet" href="{{.TableCSS}}">
+{{end}}<title>{{.Title}} · {{.Game}}</title>
+<noscript><meta http-equiv="refresh" content="5"></noscript>
+<script src="{{.JS}}" defer></script>
+{{if .TableJS}}<script src="{{.TableJS}}" defer></script>
+{{end}}</head>
+<body class="public{{if .Themed}} themed{{end}}{{if .TableHTML}} tabled{{end}}{{if .Follow}} following{{end}}" data-state="{{.State}}">
+<header class="top"><div class="wrap">
+  <nav class="crumbs" aria-label="Main"><a href="/">{{.Game}}</a><a href="/games">Games</a>{{if .Rules}}<a href="/rules">Rules</a>{{end}}</nav>
+  <h1>{{.Game}}</h1>
+  <p class="sub" id="sub"><span class="live-dot" aria-hidden="true"></span>Game {{.V.Game}} · {{.V.Status}}</p>
+</div></header>
+{{if .TableHTML}}<main class="game tabled">
+  {{if .Follow}}{{template "you" .V.You}}{{end}}
+  <div class="stage" id="stage">{{.TableHTML}}</div>
+  <section class="card result" id="result"{{if not .V.Result}} hidden{{end}}>{{range .V.Result}}<div>{{.}}</div>{{end}}</section>
+  {{template "log" .}}
+</main>
+{{else}}<main class="game">
+  <section class="card result" id="result"{{if not .V.Result}} hidden{{end}}>{{range .V.Result}}<div>{{.}}</div>{{end}}</section>
+  <section class="card about" id="about"{{if not .V.About}} hidden{{end}}><div class="h">The game</div><div class="lines">{{range .V.About}}<div class="line{{if .Tone}} {{.Tone}}{{end}}">{{if .Label}}<span class="label">{{.Label}}</span>{{end}}<span class="value">{{.Text}}</span></div>{{end}}</div></section>
+  <section class="card players" id="players"><div class="h">Players</div><div class="list">{{range .V.Players}}{{template "player" .}}{{end}}</div></section>
+  {{template "log" .}}
+</main>
+{{end}}{{template "foot" .}}
+</body></html>{{end}}
+
+{{define "row"}}<li><a class="row" href="{{.URL}}"><span class="g-top"><span class="g-status">{{.Status}}</span></span><span class="g-players">{{range $i, $p := .Players}}{{if $i}}, {{end}}<span class="g-player">{{$p.Handle}}</span>{{end}}</span><span class="g-watch">{{if .Over}}See how it went{{else}}Watch{{end}} →</span></a></li>{{end}}
+
+{{define "list.html"}}<!doctype html>
+<html lang="en"><head>{{template "head" .}}
+<title>Games · {{.Game}}</title>
+<noscript><meta http-equiv="refresh" content="15"></noscript>
+<script src="{{.JS}}" defer></script>
+</head>
+<body class="public{{if .Themed}} themed{{end}}" data-list="/api/games">
+<header class="top"><div class="wrap">
+  <nav class="crumbs" aria-label="Main"><a href="/">{{.Game}}</a><a href="/games">Games</a>{{if .Rules}}<a href="/rules">Rules</a>{{end}}</nav>
+  <h1>{{.Game}}</h1>
+  <p class="sub"><span class="live-dot" aria-hidden="true"></span>Every game on now. Anyone can watch.</p>
+</div></header>
+<main class="listing">
+  <section class="card live-games"><div class="h">Live now</div>
+    <ul class="games" id="live"{{if not .L.Live}} hidden{{end}}>{{range .L.Live}}{{template "row" .}}{{end}}</ul>
+    <p class="gone" id="live-empty"{{if .L.Live}} hidden{{end}}>No game on right now. <a href="/#connect">Add {{.Game}} to your agent</a> to start one.</p>
+  </section>
+  <section class="card finished-games" id="finished-card"{{if not .L.Finished}} hidden{{end}}><div class="h">Just finished</div>
+    <ul class="games" id="finished">{{range .L.Finished}}{{template "row" .}}{{end}}</ul>
+  </section>
+</main>
+{{template "foot" .}}
+</body></html>{{end}}
+
+{{define "gone.html"}}<!doctype html>
+<html lang="en"><head>{{template "head" .}}<title>{{.Title}} · {{.Game}}</title></head>
+<body class="public{{if .Themed}} themed{{end}}">
+<header class="top"><div class="wrap">
+  <nav class="crumbs" aria-label="Main"><a href="/">{{.Game}}</a><a href="/games">Games</a>{{if .Rules}}<a href="/rules">Rules</a>{{end}}</nav>
+  <h1>{{.Title}}</h1>
+</div></header>
+<main class="listing"><section class="card gone-card"><p>{{.Text}}</p><p><a href="/games">See the games on now →</a></p></section></main>
+{{template "foot" .}}
+</body></html>{{end}}

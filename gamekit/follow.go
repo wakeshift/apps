@@ -28,6 +28,15 @@ type View struct {
 	Players []ViewPlayer `json:"players"`
 	Result  []string     `json:"result,omitempty"` // once it's over
 	Log     []Entry      `json:"log"`
+	// About is what the public page says of the game (spectate.go): the
+	// cards in play, say. Everyone in the room knows it.
+	About []Line `json:"about,omitempty"`
+	// Table is the game's own picture of the table (Server.Table), for
+	// its script: on the public page, only what About may say.
+	Table any `json:"table,omitempty"`
+	// Thinking is the player's own private reasoning (thinking.go): set by
+	// the kit on the follow-along page only, never on a public one.
+	Thinking []Thought `json:"thinking,omitempty"`
 }
 
 // Line is one thing the player knows; Tone colors it ("good", "bad").
@@ -43,21 +52,23 @@ type Line struct {
 // ViewPlayer is a player as the page lists it.
 type ViewPlayer struct {
 	Handle string `json:"handle"`
-	Note   string `json:"note,omitempty"` // "voted", "→ codex", "(werewolf)"
+	Note   string `json:"note,omitempty"` // "voted", "→ codex", "(vampire)"
 	You    bool   `json:"you,omitempty"`
 	// Avatar is the URL of the player's picture, if the game has them; the
 	// page shows it by the player and by what it says.
 	Avatar string `json:"avatar,omitempty"`
 }
 
-// Theme is a game's look for the follow-along page: colors and fonts (CSS
-// values; empty ones keep the kit's), an image behind the page's header,
-// and more CSS of its own, after the kit's.
+// Theme is a game's look for the follow-along page and the public pages:
+// colors and fonts (CSS values; empty ones keep the kit's), an image behind
+// the page's header, and more CSS of its own, after the kit's (PublicCSS
+// for the public pages only, after CSS).
 type Theme struct {
 	Background, Surface, Text, Muted, Line, Accent string
 	Font, TitleFont                                string // font stacks
 	HeaderImage                                    string // a URL (StaticURL)
-	CSS                                            string
+	CSS, PublicCSS                                 string
+	Icon                                           string // the public pages' icon (a URL), if any
 }
 
 func (t *Theme) css() string {
@@ -112,8 +123,13 @@ func (s *Server) readFollow(token string) (followToken, bool) {
 
 func (s *Server) followRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /follow/{token}", func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := s.readFollow(r.PathValue("token")); !ok {
+		t, ok := s.readFollow(r.PathValue("token"))
+		if !ok {
 			http.Error(w, "This link isn't valid, or it has expired. Ask your agent for a new one (its game tool has it).", http.StatusNotFound)
+			return
+		}
+		if s.Table != nil {
+			s.followTable(w, r, t)
 			return
 		}
 		PageHeaders(w, true)
@@ -153,8 +169,71 @@ func (s *Server) followRoutes(mux *http.ServeMux) {
 		if v.Log == nil {
 			v.Log = []Entry{}
 		}
+		s.addThinking(ctx, &v, t)
 		json.NewEncoder(w).Encode(v)
 	})
+}
+
+// followTable is the follow-along page of a game with a table: drawn like
+// its public page (spectate.go), with what the player knows above it.
+func (s *Server) followTable(w http.ResponseWriter, r *http.Request, t followToken) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	w.Header().Set("Cache-Control", "no-store")
+	if s.Follow == nil {
+		s.renderSpectate(w, http.StatusNotFound, "gone.html", map[string]any{"Title": "No such game", "Text": "This game is no longer available."})
+		return
+	}
+	v, err := s.Follow(ctx, t.Game, t.Player)
+	var stopped *StoppedError
+	switch {
+	case errors.Is(err, ErrNoGame):
+		s.renderSpectate(w, http.StatusNotFound, "gone.html", map[string]any{"Title": "No such game", "Text": "This game is no longer available."})
+		return
+	case errors.As(err, &stopped):
+		s.renderSpectate(w, http.StatusNotFound, "gone.html", map[string]any{"Title": "This game had to stop", "Text": stopped.Reason})
+		return
+	case err != nil:
+		slog.Warn(s.Name+": the follow-along page", "err", err)
+		w.Header().Set("Retry-After", "5")
+		s.renderSpectate(w, http.StatusServiceUnavailable, "gone.html", map[string]any{"Title": "Busy right now", "Text": "Reload the page in a moment."})
+		return
+	}
+	if v.Log == nil {
+		v.Log = []Entry{}
+	}
+	s.addThinking(ctx, &v, t)
+	pics := map[string]string{}
+	for _, p := range v.Players {
+		if p.Avatar != "" {
+			pics[p.Handle] = p.Avatar
+		}
+	}
+	data := map[string]any{"V": v, "Pics": pics, "Title": "Game " + v.Game, "Follow": true, "State": r.URL.Path + "/state"}
+	if err := s.table(data, v); err != nil {
+		slog.Error(s.Name+": a game's table", "err", err)
+		http.Error(w, "Something went wrong.", http.StatusInternalServerError)
+		return
+	}
+	s.renderSpectate(w, http.StatusOK, "game.html", data)
+}
+
+// addThinking adds the player's own reasoning to its follow-along view: t
+// is a link readFollow verified (signed by the app for this one game and
+// player, unexpired). It's read for every request, never cached (the
+// follow cache holds only the game and its log, never a View), and set on
+// this request's own View. Without it (the database is busy), the page
+// shows the rest.
+func (s *Server) addThinking(ctx context.Context, v *View, t followToken) {
+	if s.Store == nil {
+		return
+	}
+	th, err := s.Thinking(ctx, t.Game, t.Player)
+	if err != nil {
+		slog.Warn(s.Name+": a player's reasoning for its follow-along page", "err", err)
+		return
+	}
+	v.Thinking = th
 }
 
 // followCache keeps what the follow-along page reads of a game for a

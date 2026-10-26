@@ -429,7 +429,11 @@ func (s *Server) reserve(ctx context.Context, workspace, agent, session string) 
 	if err != nil {
 		return r, err
 	}
-	r.name = pickName(names)
+	if s.PlayerName != nil {
+		r.name = s.PlayerName(key)
+	} else {
+		r.name = pickName(names)
+	}
 	// One statement, to keep the matchmaking lock briefly: drop the game's
 	// abandoned reservations, note the name, reserve the seat.
 	if _, err := tx.Exec(ctx, `WITH stale AS (

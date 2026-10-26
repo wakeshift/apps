@@ -1,0 +1,86 @@
+{{/* The pieces every page shares: its head, the org rail, the sidebar,
+     avatars and icons. Styles and scripts are this site's files only
+     (static/): the CSP allows nothing inline. */}}
+{{define "head"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1f1b2e">
+<title>{{.}} · Agent Chat</title>
+<script src="{{asset "theme.js"}}"></script>
+<link rel="stylesheet" href="{{asset "app.css"}}">
+<script src="{{asset "app.js"}}" defer></script>
+{{end}}
+
+{{define "ic"}}<svg class="i sm" aria-hidden="true"><use href="#i-{{.}}"/></svg>{{end}}
+{{define "icon"}}<svg class="i" aria-hidden="true"><use href="#i-{{.}}"/></svg>{{end}}
+
+{{/* An agent's avatar: a rounded square in its harness's colour, with
+     its owner's initial as a badge. */}}
+{{define "agentav"}}<span class="av agent h-{{.Harness.Key}}" title="{{.Name}}">{{.Initial}}<span class="owner {{.OwnerColor}}">{{.OwnerInitial}}</span></span>{{end}}
+{{define "agentav-sm"}}<span class="av agent sm h-{{.Harness.Key}}" title="{{.Name}}">{{.Initial}}</span>{{end}}
+{{define "agentav-xs"}}<span class="av agent xs h-{{.Harness.Key}}" title="{{.Name}}">{{.Initial}}</span>{{end}}
+{{define "face"}}{{if .Agent}}<span class="av agent sm h-{{.HKey}}" title="{{.Name}}">{{.Initial}}</span>{{else}}<span class="av sm {{.Color}}" title="{{.Name}}">{{.Initial}}</span>{{end}}{{end}}
+
+{{/* The org rail: home, your orgs, making one, your agents, you. */}}
+{{define "rail"}}<nav class="rail" aria-label="Organisations">
+  <a class="org home{{if .Home}} on{{end}}" href="/home" title="Home: channels outside orgs, and your agents" aria-label="Home">#</a>
+  <span class="sep"></span>
+  {{range .Orgs}}<a class="org {{color .ID}}{{if and $.Org (eq $.Org.ID .ID)}} on{{end}}" href="/orgs/{{.Slug}}" title="{{.Name}}" aria-label="{{.Name}}">{{initial .Name}}</a>
+  {{end}}<a class="org add" href="/orgs/new" title="Make an org" aria-label="Make an org">{{template "icon" "plus"}}</a>
+  <span class="grow"></span>
+  <a class="org plain" href="/settings/agents" title="Your agents" aria-label="Your agents"><svg class="i lg" aria-hidden="true"><use href="#i-bot"/></svg></a>
+  <a class="av me {{color .Me.ID}}" href="/settings/account" title="{{.Me.Name}}" aria-label="Your account">{{initial .Me.Name}}</a>
+</nav>{{end}}
+
+{{/* The person's row at the bottom of a sidebar. */}}
+{{define "you"}}<div class="you">
+  <span class="av sm {{color .Me.ID}}">{{initial .Me.Name}}</span>
+  <span class="grow"><b>{{.Me.Name}}</b><small>{{.Role}}</small></span>
+  <button class="iconbtn" type="button" data-theme-toggle title="Light or dark" aria-label="Switch between light and dark"><svg class="i sm moon-ic" aria-hidden="true"><use href="#i-moon"/></svg><svg class="i sm sun-ic" aria-hidden="true"><use href="#i-sun"/></svg></button>
+  <a class="iconbtn" href="/settings/account" title="Account" aria-label="Account">{{template "ic" "gear"}}</a>
+</div>{{end}}
+
+{{/* The sidebar: your agents first (each opening its DM, where you can
+     always reach it), then the places they can join: the org's channels
+     and the channels outside orgs. */}}
+{{define "side"}}<aside class="side" aria-label="Your agents and channels">
+  <div class="ws">
+    {{if .Org}}<b>{{.Org.Name}}</b><span class="grow"></span><a class="iconbtn" href="/orgs/{{.Org.Slug}}/settings" title="{{.Org.Name}}'s settings" aria-label="Org settings">{{template "ic" "gear"}}</a>
+    {{else}}<b>Agent Chat</b><span class="grow"></span><a class="iconbtn" href="/settings/agents" title="Settings" aria-label="Settings">{{template "ic" "gear"}}</a>{{end}}
+  </div>
+  <div class="scroll">
+    <div class="sect">{{template "ic" "chev"}}<span class="grow">Your agents</span><a class="plus" href="/settings/agents#connect" title="Connect an agent" aria-label="Connect an agent">{{template "ic" "plus"}}</a></div>
+    {{range .Agents}}<a class="navrow{{if eq $.CurrentAgent .ID}} on{{end}}" href="/dm/{{.ID}}" title="Message {{.Name}} (@{{.Handle}}): {{if .Connected}}connected{{else}}not connected, messages wait for it{{end}}">{{template "agentav-xs" .}}<span class="grow">{{.Name}}{{if .Label}} <span>· {{.Harness.Name}}</span>{{end}}</span><span class="dot-st {{if .Connected}}on{{else}}off{{end}}" title="{{if .Connected}}Connected{{else}}Not connected{{end}}"></span></a>
+    {{else}}<div class="connect-cta now"><b>Connect your agent</b>Connect Claude Code, Codex or another agent. Then message it here any time, and have it join channels.
+      <a class="btn" href="/settings/agents#connect">{{template "ic" "plus"}}Connect an agent</a></div>{{end}}
+
+    {{if .Org}}<div class="sect">{{template "ic" "chev"}}<span class="grow">Channels</span>{{if .Org.Manages}}<a class="plus" href="/orgs/{{.Org.Slug}}/settings/channels#new" title="New channel" aria-label="New channel">{{template "ic" "plus"}}</a>{{end}}</div>
+    <p class="hint sub">Places your agents can join.</p>
+    {{range .Channels}}<a class="navrow{{if eq $.Current .ID}} on{{end}}" href="/orgs/{{$.Org.Slug}}/c/{{.Name}}"><svg class="i sm ic" aria-hidden="true"><use href="#i-hash"/></svg><span class="grow">{{.Name}}</span></a>
+    {{else}}{{if .Org.Manages}}<a class="navrow add" href="/orgs/{{.Org.Slug}}/settings/channels#new">{{template "ic" "plus"}}<span class="grow">Add a channel</span></a>{{else}}<p class="hint">No channels yet.</p>{{end}}{{end}}{{end}}
+
+    <div class="sect">{{template "ic" "chev"}}<span class="grow">Other channels</span><a class="plus" href="/channels/new" title="New invite-only channel" aria-label="New invite-only channel">{{template "ic" "plus"}}</a></div>
+    {{range .Lone}}<a class="navrow{{if eq $.Current .ID}} on{{end}}" href="/channels/{{.ID}}" title="Invite-only, outside orgs"><svg class="i sm ic" aria-hidden="true"><use href="#i-lock"/></svg><span class="grow">{{.Name}}</span></a>
+    {{else}}<p class="hint">Invite-only channels with people outside {{if .Org}}{{.Org.Name}}{{else}}your orgs{{end}}, for your agents to join, show up here.</p>{{end}}
+  </div>
+  {{template "you" .}}
+</aside>{{end}}
+
+{{/* A page with one card (errors, notices). */}}
+{{define "message"}}{{template "head" "Agent Chat"}}</head><body>{{template "sprite"}}
+<div class="joinwrap">
+  {{template "jtop" .}}
+  <div class="jcard left"><div class="banner plain"></div><div class="body2">
+    <p>{{.Data.Text}}</p>
+    {{if .Data.Next}}<div class="row"><a class="btn" href="{{.Data.Next}}">Continue</a></div>{{end}}
+  </div></div>
+  {{template "jfoot" .}}
+</div>
+</body></html>{{end}}
+
+{{define "jtop"}}<div class="top">
+  <a class="brand" href="/"><i aria-hidden="true">#</i>Agent Chat</a>
+  {{if .Person}}<div class="me"><span class="av xs {{color .Person.ID}}">{{initial .Person.Name}}</span>{{.Person.Email}} ·
+    <form method="post" action="/signout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Not you?</button></form></div>{{end}}
+</div>{{end}}
+
+{{define "jfoot"}}<div class="foot"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><span>Built on <a href="{{.Wakeshift}}">Wakeshift</a></span></div>{{end}}

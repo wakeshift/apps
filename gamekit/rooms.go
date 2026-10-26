@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -25,6 +26,9 @@ type Player struct {
 	Agent     string `json:"agent"`
 	Session   string `json:"session,omitempty"`
 	Handle    string `json:"handle"` // in the room
+	// House is a house agent's model as shown ("Haiku 4.5"), from its
+	// verified claim (house.go); empty for everyone else.
+	House string `json:"house,omitempty"`
 }
 
 // Key identifies the player across games: workspace/agent/session.
@@ -68,6 +72,12 @@ func pickName(used []string) string {
 // room is a game's group in Wakeshift.
 func (s *Server) room(id string) string { return s.Prefix + id }
 
+// roomWake is how a player's membership of its game's room wakes it: by
+// everything said there. A client that speaks MCP Events (ChatGPT, house
+// agents) hears it by webhook once it subscribes to game.update
+// (events.go), not in its conversation.
+const roomWake = "all"
+
 // Join seats the calling conversation in the next game with a free seat (a
 // new one if there's none) and returns it: matchmaking reserves the seat,
 // the conversation joins the game's room in Wakeshift under the name the
@@ -96,6 +106,9 @@ func (s *Server) Join(ctx context.Context, ag *appkit.Agent, session string, sea
 			s.unreserve(ctx, r.game, key)
 			return nil, Player{}, err
 		}
+		if c, ok := HouseOf(ctx); ok {
+			p.House = c.Model
+		}
 		taken := true
 		g, err := s.Update(ctx, r.game, nil, func(tx *Tx, g State) error {
 			if !g.base().Open {
@@ -103,8 +116,8 @@ func (s *Server) Join(ctx context.Context, ag *appkit.Agent, session string, sea
 				_, err := tx.Exec(tx.Ctx, `DELETE FROM seats WHERE game_id = $1 AND player = $2`, r.game, key)
 				return err
 			}
-			tag, err := tx.Exec(tx.Ctx, `UPDATE seats SET handle = $3, seated_at = $4 WHERE game_id = $1 AND player = $2`,
-				r.game, key, p.Handle, tx.Now)
+			tag, err := tx.Exec(tx.Ctx, `UPDATE seats SET handle = $3, seated_at = $4, house = $5 WHERE game_id = $1 AND player = $2`,
+				r.game, key, p.Handle, tx.Now, p.House != "")
 			if err != nil {
 				return err
 			}
@@ -142,7 +155,7 @@ func (s *Server) seat(ctx context.Context, ag *appkit.Agent, r reservation, sess
 			return Player{}, err
 		}
 	}
-	if err := ag.SubscribeAs(ctx, appkit.Subscription{Type: typ, Wake: "all", Reason: "Playing " + s.Title + " game " + r.game, Session: session,
+	if err := ag.SubscribeAs(ctx, appkit.Subscription{Type: typ, Wake: roomWake, Reason: "Playing " + s.Title + " game " + r.game, Session: session,
 		Handle: r.name}); err != nil {
 		if appkit.IsCode(err, "outside_scope") {
 			return Player{}, fmt.Errorf("this agent's consent for %s doesn't cover games; sign in to %s again", s.Title, s.Title)
@@ -244,6 +257,37 @@ func (s *Server) Away(ctx context.Context, game string) map[string]bool {
 			away[m.Handle] = true
 		}
 	}
+	// A native seat (events.go) hears the room by game.update's webhook,
+	// not a stream: it's present while that subscription lives.
+	native, err := s.nativePlayers(ctx, game)
+	if err != nil {
+		slog.Warn(s.Name+": checking native subscribers", "game", game, "err", err)
+	}
+	// Each native player's subscription, looked up at once.
+	live := map[string]bool{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for user := range native {
+		wg.Go(func() {
+			ok := s.subscribedTo(ctx, game, user)
+			mu.Lock()
+			live[user] = ok
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+	for user, handles := range native {
+		live := live[user]
+		for _, h := range handles {
+			// Present while its game.update subscription is live; away
+			// before it subscribes and once it ends, like a dropped stream.
+			if live {
+				delete(away, h)
+			} else {
+				away[h] = true
+			}
+		}
+	}
 	return away
 }
 
@@ -264,7 +308,7 @@ func (s *Server) reseat(ctx context.Context, ag *appkit.Agent, game, session, ha
 	if slices.ContainsFunc(g.Members, isPlayer) {
 		return nil
 	}
-	if err := ag.SubscribeAs(ctx, appkit.Subscription{Type: typ, Wake: "all", Reason: "Playing " + s.Title + " game " + game, Session: session,
+	if err := ag.SubscribeAs(ctx, appkit.Subscription{Type: typ, Wake: roomWake, Reason: "Playing " + s.Title + " game " + game, Session: session,
 		Handle: handle}); err != nil {
 		return err
 	}

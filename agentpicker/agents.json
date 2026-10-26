@@ -1,0 +1,206 @@
+[
+  {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "group": "main",
+    "steps": [
+      {
+        "kind": "run",
+        "label": "Run",
+        "text": "claude mcp add --transport http {name} {url}"
+      }
+    ],
+    "signIn": "If it doesn't open a browser to sign in, type /mcp in Claude Code, choose {name}, then Authenticate.",
+    "wakes": [
+      "Claude Code asks you to approve a background monitor. Approve it, and {each} wakes the agent within seconds, even when it's idle.",
+      "Nothing to install. If the agent offers to install Wakeshift's hooks, they're optional."
+    ]
+  },
+  {
+    "id": "codex",
+    "name": "Codex",
+    "group": "main",
+    "steps": [
+      {
+        "kind": "run",
+        "label": "Run",
+        "text": "codex mcp add {name} --url {url}"
+      }
+    ],
+    "signIn": "If it asks you to sign in, run codex mcp login {name}.",
+    "wakes": [
+      "The first time, the agent offers a one-time install of Wakeshift's connector for Codex. Say yes, then type /hooks in Codex and press t to trust it.",
+      "After that, {each} wakes the agent within seconds, even when it's idle."
+    ]
+  },
+  {
+    "id": "claude-cowork",
+    "name": "Claude Cowork",
+    "group": "main",
+    "steps": [
+      {
+        "kind": "note",
+        "text": "In the Claude app, open Settings, then Connectors, choose Add custom connector, and paste this URL."
+      },
+      {
+        "kind": "url",
+        "label": "Connector URL",
+        "text": "{url}"
+      },
+      {
+        "kind": "note",
+        "text": "Then choose Connect."
+      }
+    ],
+    "wakes": [
+      "{Each} wakes the agent within seconds while Cowork is open, even when it's idle. Nothing to install."
+    ]
+  },
+  {
+    "id": "cursor",
+    "name": "Cursor",
+    "group": "main",
+    "steps": [
+      {
+        "kind": "cursor",
+        "text": "Add to Cursor"
+      },
+      {
+        "kind": "file",
+        "label": "Or add it to ~/.cursor/mcp.json (the IDE and cursor-agent both read it)",
+        "text": "{\n  \"mcpServers\": {\n    \"{name}\": {\n      \"url\": \"{url}\"\n    }\n  }\n}"
+      }
+    ],
+    "wakes": [
+      "The agent starts a background command that waits (Cursor may ask you to allow it). {Each} wakes the agent within seconds, even when it's idle. Nothing to install.",
+      "Cursor's cloud agents aren't woken: they see what's new on their next tool call."
+    ]
+  },
+  {
+    "id": "opencode",
+    "name": "opencode",
+    "group": "main",
+    "steps": [
+      {
+        "kind": "run",
+        "label": "Run",
+        "text": "opencode mcp add {name} --url {url}"
+      }
+    ],
+    "wakes": [
+      "The agent offers a one-time install of Wakeshift's plugin for opencode. Say yes, and restart opencode.",
+      "After that, {each} wakes the agent, even when it's idle."
+    ]
+  },
+  {
+    "id": "antigravity",
+    "name": "Antigravity",
+    "group": "more",
+    "steps": [
+      {
+        "kind": "run",
+        "label": "Run",
+        "text": "agy mcp add {name} {url}"
+      }
+    ],
+    "wakes": [
+      "The agent starts a background command that waits (agy may ask you to allow it). {Each} wakes the agent within seconds, even when it's idle. Nothing to install."
+    ]
+  },
+  {
+    "id": "chatgpt",
+    "name": "ChatGPT",
+    "group": "more",
+    "steps": [
+      {
+        "kind": "note",
+        "text": "In ChatGPT, open Settings, then Apps & Connectors, then Advanced settings, and turn on Developer mode. Back in Apps & Connectors, choose Create and paste this URL."
+      },
+      {
+        "kind": "url",
+        "label": "Connector URL",
+        "text": "{url}"
+      },
+      {
+        "kind": "note",
+        "text": "For authentication, choose {auth}."
+      }
+    ],
+    "wakes": [
+      "Open a Work chat (ChatGPT Business or Enterprise; on desktop, choose Cloud), turn on the connector, and ask ChatGPT to subscribe.",
+      "{Each} then starts a new ChatGPT run. A run takes longer to start than other agents' wakes.",
+      "In personal chats ChatGPT isn't woken: it sees what's new the next time it uses the app's tools."
+    ]
+  },
+  {
+    "id": "hermes",
+    "name": "Hermes Agent",
+    "group": "more",
+    "steps": [
+      {
+        "kind": "file",
+        "label": "Add to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it's set)",
+        "text": "mcp_servers:\n  {name}:\n    url: {url}"
+      },
+      {
+        "kind": "note",
+        "text": "Or run hermes mcp add {name} --url {url} where Hermes runs. In a running chat, /reload-mcp picks it up."
+      }
+    ],
+    "wakes": [
+      "The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once), then send any reply so the plugin starts.",
+      "After that, {each} wakes the agent within a second, even when it's idle, as long as Hermes runs."
+    ]
+  },
+  {
+    "id": "openclaw",
+    "name": "OpenClaw",
+    "group": "more",
+    "steps": [
+      {
+        "kind": "run",
+        "label": "Run",
+        "text": "openclaw mcp add {name} --url {url} --transport streamable-http"
+      },
+      {
+        "kind": "note",
+        "text": "Run it where the OpenClaw gateway runs (in Docker, inside its container). New MCP servers are used from the next turn."
+      }
+    ],
+    "wakes": [
+      "The agent offers a one-time install of Wakeshift's plugin for OpenClaw. Say yes, then send any reply so the plugin starts. If your gateway listens beyond this machine, it asks you to confirm first.",
+      "After that, {each} wakes the agent within seconds, even when it's idle, as long as the gateway runs."
+    ]
+  },
+  {
+    "id": "copilot",
+    "name": "Copilot CLI",
+    "group": "more",
+    "steps": [
+      {
+        "kind": "run",
+        "label": "Run",
+        "text": "copilot mcp add --transport http {name} {url}"
+      }
+    ],
+    "wakes": [
+      "The agent starts a background command that waits. {Each} wakes the agent within seconds, even when it's idle. Nothing to install.",
+      "Copilot asks you to approve that command each time the agent goes back to waiting, so each wake needs one \"Yes\". To skip that, run copilot with --allow-all-tools, which approves every tool, not just this one."
+    ]
+  },
+  {
+    "id": "other",
+    "name": "Any other MCP client",
+    "group": "more",
+    "steps": [
+      {
+        "kind": "url",
+        "label": "MCP URL (Streamable HTTP)",
+        "text": "{url}"
+      }
+    ],
+    "wakes": [
+      "It sees what's new on its next call to the app's tools."
+    ]
+  }
+]

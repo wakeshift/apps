@@ -7,8 +7,10 @@ Chat with your own agents (Claude Code, Codex, Cursor and the rest) from Slack. 
 1. **A workspace adds Slackline** (Add to Slack, `/install`; an admin may need to approve it). Its bot token is stored sealed (AES-256-GCM).
 2. **People sign in with Slack** (OpenID Connect, `/signin`) to Slackline's console, `/home`.
 3. **An agent adds Slackline's MCP server**, `https://<host>/mcp`. It's OAuth-protected: the client registers (dynamic client registration), the person signs in with Slack and approves it on Slackline's consent page, naming it, and the client gets tokens. The agent is now that person's: the console lists it, and they can rename or revoke it.
-4. **The agent calls `watch`.** That conversation (a *listener*) gets a thread in the person's DM with Slackline and is subscribed to its own private topic, `u/<team>.<user>/l/<listener>`. Wakeshift's result tells the harness how it's woken (a Monitor for Claude Code, a connector beacon for Codex, and so on). Watching again from the same conversation keeps its thread: Slackline remembers an HMAC of the conversation's session key (or Codex thread), never the key.
-5. **Messages wake it.** Slackline routes each Slack message (below) to the right listener and publishes it to that listener's topic; Wakeshift wakes the conversation with the message framed as outside data.
+4. **The agent calls `watch`.** That conversation (a *listener*) gets a thread in the person's DM with Slackline, and `watch` subscribes it to Slackline's `slack.message` event for that listener. The event is personal: its user is the person who connected the agent (`<team>.<user>`), so no one else's subscription can match it. Wakeshift's result tells the harness how it's woken (a Monitor for Claude Code, a connector beacon for Codex, and so on). Watching again from the same conversation keeps its thread: Slackline remembers an HMAC of the conversation's session key (or Codex thread, or ChatGPT conversation), never the key.
+
+   A client that subscribes with MCP Events itself (ChatGPT) isn't subscribed by `watch`: the result gives it the listener's ID, and it subscribes to `slack.message` with it. Slackline lets it subscribe only to its own agent's listeners, and refuses `subscribe_events` from harnesses `watch` already subscribed. `unwatch` ends either kind of subscription.
+5. **Messages wake it.** Slackline routes each Slack message (below) to the right listener and emits it as `slack.message` for that listener, to the agent's person; Wakeshift wakes the conversation with the message framed as outside data.
 6. **The agent answers with `reply`**: in its DM thread, or in a channel it listens in (in the thread of the message it's answering, or as a new post), under its own name (`chat:write.customize`). Replies in a channel thread it posted in come back to it.
 
 | Tool | |
@@ -52,7 +54,7 @@ Slack retries an event without a 200 within 3 seconds. Slackline answers 200 onc
 
 ## Run it yourself
 
-1. In the [Wakeshift console](https://app.wakeshift.ai), open **Build → New app** and copy its test key.
+1. In the [Wakeshift console](https://app.wakeshift.ai), open **Build → New app** and copy its key (`wst_…`).
 2. Create an empty Postgres database. Slackline creates its tables when it starts.
 3. Give it a public HTTPS URL (a tunnel works while you try it), and create a Slack app from its manifest: at [api.slack.com/apps](https://api.slack.com/apps), choose **Create New App → From a manifest** and paste what `https://<your URL>/slack/manifest.json` returns once Slackline is running. (Start it once with placeholder Slack credentials to get the manifest, then restart it with the real ones.)
 4. Copy `.env.example` to `.env` and fill it in:

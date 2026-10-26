@@ -11,6 +11,9 @@
 // link expires (7 days without use); a watcher until it unwatches, its
 // subscription ends (7 days) or the link expires; counts until their
 // window ends; MCP sessions until they're idle for as long as a link lives.
+// When a link expires, Wakeshift is asked to forget its webhook (the app's
+// user there, with the conversations that watched it): forgetExpired, until
+// Wakeshift says it's done.
 
 import type { Check } from "./links.js";
 import type { Db } from "./db.js";
@@ -21,6 +24,11 @@ const RING = 50;
 const BODIES = 10;
 /** How often a link's last use is written: it only has to be right to the day. */
 const TOUCH_EVERY = 5 * 60_000;
+/** forgetExpired's backoff after a failure: a minute, doubling each time, at most 6 hours. */
+const FORGET_BACKOFF_MIN = 60_000;
+export const FORGET_BACKOFF_MAX = 6 * HOUR;
+/** How many forget calls forgetExpired has in flight at once. */
+const FORGET_CONCURRENCY = 8;
 
 /** One line of a webhook's live view. Every string in it may come from whoever posted. */
 export interface Activity {
@@ -134,18 +142,39 @@ export class State {
   /** When the link was last used (0: never, as far as anyone recorded). */
   async lastUse(id: string): Promise<number> {
     const r = await this.db.query("SELECT last_use FROM hooks WHERE hook = $1", [id]);
-    const t = r.rows[0] ? (r.rows[0].last_use as Date).getTime() : 0;
-    return Math.max(t, this.touched.get(id) ?? 0);
+    // No row: never used, or swept (its link expired; it may be being
+    // forgotten), whatever this process wrote before; and touch must ask
+    // the database again (it refuses a webhook being forgotten).
+    if (!r.rows[0]) {
+      this.touched.delete(id);
+      return 0;
+    }
+    return Math.max((r.rows[0].last_use as Date).getTime(), this.touched.get(id) ?? 0);
   }
 
-  async touch(id: string): Promise<void> {
+  /**
+   * Writes the link's use (at most every TOUCH_EVERY). False if its link
+   * has expired after all (a request that found it alive just before the
+   * sweep): it's being forgotten, or was in the last day, so it stays
+   * expired, and the request should say so.
+   */
+  async touch(id: string): Promise<boolean> {
     const t = this.now();
-    if (t - (this.touched.get(id) ?? 0) < TOUCH_EVERY) return;
-    await this.db.query(
-      "INSERT INTO hooks (hook, last_use) VALUES ($1, $2) ON CONFLICT (hook) DO UPDATE SET last_use = greatest(hooks.last_use, excluded.last_use)",
+    if (t - (this.touched.get(id) ?? 0) < TOUCH_EVERY) {
+      // Written lately: only check it isn't being forgotten (a read, not a write).
+      const q = await this.db.query("SELECT 1 FROM forgets WHERE hook = $1", [id]);
+      if (!q.rowCount) return true;
+      this.touched.delete(id);
+      return false;
+    }
+    const r = await this.db.query(
+      `INSERT INTO hooks (hook, last_use) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM forgets WHERE hook = $1)
+       ON CONFLICT (hook) DO UPDATE SET last_use = greatest(hooks.last_use, excluded.last_use)`,
       [id, new Date(t)],
     );
+    if (!r.rowCount) return false;
     this.touched.set(id, t);
+    return true;
   }
 
   /**
@@ -212,7 +241,7 @@ export class State {
 
   async pick(id: string, c: Checked): Promise<void> {
     await this.db.query(
-      `INSERT INTO hooks (hook, last_use, checked_check, checked_url) VALUES ($1, $2, $3, $4)
+      `INSERT INTO hooks (hook, last_use, checked_check, checked_url) SELECT $1, $2, $3, $4 WHERE NOT EXISTS (SELECT 1 FROM forgets WHERE hook = $1)
        ON CONFLICT (hook) DO UPDATE SET checked_check = excluded.checked_check, checked_url = excluded.checked_url
        WHERE hooks.checked_url IS DISTINCT FROM excluded.checked_url`,
       [id, new Date(this.now()), c.check, c.url],
@@ -372,6 +401,51 @@ export class State {
   // ── Retention ─────────────────────────────────────────────────────────
 
   /**
+   * Has Wakeshift forget the webhooks whose links expired (the sweep queues
+   * them): calls forget for each that's due, oldest first, up to limit,
+   * and returns how many it finished. One that fails is tried again after
+   * a backoff (a minute, doubling, at most FORGET_BACKOFF_MAX), however
+   * long that takes. Once queued, a webhook stays expired: its use isn't
+   * written again (touch, pick), so nothing can use it while it's being
+   * forgotten. One whose use was written as the sweep queued it (a request
+   * that found the link alive just before) is in use again, and isn't
+   * forgotten: it's queued again when it next expires.
+   */
+  async forgetExpired(forget: (hook: string) => Promise<unknown>, limit = 500): Promise<{ forgotten: number; failed: number }> {
+    const now = new Date(this.now());
+    await this.db.query("DELETE FROM forgets WHERE done_at IS NULL AND hook IN (SELECT hook FROM hooks)");
+    // Claimed for a while, so another instance's pass doesn't call it too.
+    const r = await this.db.query(
+      `UPDATE forgets SET next_try = $1::timestamptz + interval '10 minutes'
+       WHERE hook IN (SELECT f.hook FROM forgets f WHERE f.done_at IS NULL AND f.next_try <= $1 AND NOT EXISTS (SELECT 1 FROM hooks h WHERE h.hook = f.hook)
+                      ORDER BY f.next_try LIMIT $2 FOR UPDATE OF f SKIP LOCKED)
+       RETURNING hook, attempts`,
+      [now, limit],
+    );
+    let forgotten = 0;
+    let failed = 0;
+    const queue = r.rows as { hook: string; attempts: number }[];
+    const worker = async () => {
+      for (let row = queue.shift(); row; row = queue.shift()) {
+        try {
+          await forget(row.hook);
+          // Kept a day as done, so the link can't come back in use meanwhile (touch).
+          await this.db.query("UPDATE forgets SET done_at = $2 WHERE hook = $1", [row.hook, new Date(this.now())]);
+          forgotten++;
+        } catch {
+          failed++;
+          const wait = Math.min(FORGET_BACKOFF_MIN * 2 ** Math.min(row.attempts, 20), FORGET_BACKOFF_MAX);
+          await this.db
+            .query("UPDATE forgets SET attempts = attempts + 1, next_try = $2 WHERE hook = $1", [row.hook, new Date(this.now() + wait)])
+            .catch(() => {}); // the claim runs out instead: tried again in 10 minutes
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: FORGET_CONCURRENCY }, worker));
+    return { forgotten, failed };
+  }
+
+  /**
    * Forgets what the privacy policy says goes: activity and posts of
    * webhooks idle for over a day with no one watching, or for longer than
    * keepUse (how long a link lives unused); everything else about a webhook
@@ -411,7 +485,15 @@ export class State {
         [dayAgo, expired],
       );
       await c.query("DELETE FROM watchers WHERE hook IN (SELECT hook FROM hooks WHERE last_use < $1)", [expired]);
-      await c.query("DELETE FROM hooks WHERE last_use < $1", [expired]);
+      // The link has expired: Wakeshift forgets its webhook too, durably
+      // (queued in this transaction, done by forgetExpired).
+      await c.query(
+        `WITH gone AS (DELETE FROM hooks WHERE last_use < $1 RETURNING hook)
+         INSERT INTO forgets (hook, expired_at, next_try) SELECT hook, $2, $2 FROM gone
+         ON CONFLICT (hook) DO UPDATE SET expired_at = excluded.expired_at, next_try = excluded.next_try, attempts = 0, done_at = NULL`,
+        [expired, now],
+      );
+      await c.query("DELETE FROM forgets WHERE done_at < $1", [dayAgo]);
       await c.query("DELETE FROM counters WHERE until <= $1", [now]);
       await c.query("DELETE FROM sessions WHERE last_seen < $1", [new Date(t - sessionIdle)]);
       await c.query("COMMIT");

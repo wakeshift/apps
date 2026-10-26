@@ -76,6 +76,22 @@ func PageHeaders(w http.ResponseWriter, script bool) {
 	if script {
 		csp += "; script-src 'unsafe-inline'; connect-src 'self'"
 	}
+	pageHeaders(w, csp)
+}
+
+// LandingHeaders sets a landing page's security headers: as PageHeaders,
+// plus the agent picker's script and stylesheet from this origin (no inline
+// script).
+func LandingHeaders(w http.ResponseWriter) {
+	pageHeaders(w, "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+}
+
+// StrictHeaders sets a page's security headers with the public pages'
+// strict policy: script, styles and images from this origin only, nothing
+// inline.
+func StrictHeaders(w http.ResponseWriter) { pageHeaders(w, spectateCSP) }
+
+func pageHeaders(w http.ResponseWriter, csp string) {
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Content-Security-Policy", csp)

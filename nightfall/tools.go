@@ -19,22 +19,26 @@ type nightIn struct {
 	Players []string `json:"players,omitempty" jsonschema:"The player or players your ability targets, by handle"`
 	Center  []int    `json:"center,omitempty" jsonschema:"The center card or cards your ability targets: 1, 2 or 3"`
 	Session string   `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool"`
+	Note    string   `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type sayIn struct {
-	Text    string `json:"text" jsonschema:"What you say to the other players"`
+	Text    string `json:"text" jsonschema:"Public: said aloud to every other player in the game and to every spectator."`
 	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool"`
+	Note    string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type voteIn struct {
 	Player  string `json:"player" jsonschema:"The handle of the player to eliminate"`
 	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool"`
+	Note    string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 var errNotPlaying = errors.New("you're not in a game (pass the session you joined with, if you have one); call the `join` tool")
 
 type playerOut struct {
 	Handle string `json:"handle"`
+	House  string `json:"house,omitempty"` // "House · Haiku 5.5": a house agent
 	Voted  bool   `json:"voted,omitempty"`
 }
 
@@ -43,11 +47,12 @@ type playerOut struct {
 func (a *App) view(g *game, me *player) map[string]any {
 	var ps []playerOut
 	for _, p := range g.Players {
-		ps = append(ps, playerOut{Handle: p.Handle, Voted: p.Vote != ""})
+		ps = append(ps, playerOut{Handle: p.Handle, House: p.HouseLabel(), Voted: p.Vote != ""})
 	}
 	out := map[string]any{"game": g.ID, "phase": g.Phase, "you": me.Handle, "players": ps,
 		"follow_along_url":  a.srv.FollowURL(g.ID, me.Player),
-		"follow_along_note": "Give this link to your user so they can follow the game live. It shows your role, so give it only to them."}
+		"follow_along_note": "Give this link to your user so they can follow the game live. It shows your role, so give it only to them.",
+		"rules_url":         a.srv.PublicURL() + "/rules"}
 	if g.Phase == waiting {
 		need := minPlayers - len(g.Players)
 		if need > 0 {
@@ -71,8 +76,8 @@ func (a *App) view(g *game, me *player) map[string]any {
 		} else {
 			out["night"] = "Nothing for you to do: wait for day to break."
 		}
-		if len(me.Learned) > 0 && (me.Dealt == werewolf || me.Dealt == minion) {
-			out["learned"] = me.Learned // what werewolves and the minion see straight away
+		if len(me.Learned) > 0 && (me.Dealt == vampire || me.Dealt == thrall) {
+			out["learned"] = me.Learned // what the vampires and the thrall see straight away
 		}
 	case day, voting:
 		out["seconds_left"] = a.secondsLeft(g)
@@ -113,7 +118,8 @@ func (a *App) addTools(srv *mcp.Server) {
 				return nil, nil, err
 			}
 			g := gs.(*game)
-			return nil, a.view(g, g.player(gamekit.PlayerKey(ag.Workspace, ag.ID, session))), nil
+			key := gamekit.PlayerKey(ag.Workspace, ag.ID, session)
+			return nil, a.srv.Joined(ctx, req, g.ID, key, a.view(g, g.player(key))), nil
 		})
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "game", Description: "Your current game: the phase, the players, the cards in play, your dealt role and what it does, " +
@@ -134,8 +140,8 @@ func (a *App) addTools(srv *mcp.Server) {
 			return nil, a.view(g, me), nil
 		})
 
-	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "night", Description: "Make your role's night choice (during the night). Seer: players=[handle] to see a card, or center=[a,b]. " +
-		"Robber: players=[handle] to swap with. Troublemaker: players=[a,b] to swap. Drunk: center=[n]. Lone werewolf: center=[n] to look. " +
+	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "night", Description: "Make your role's night choice (during the night). Lamplighter: players=[handle] to see a card, or center=[a,b]. " +
+		"Changeling: players=[handle] to swap with. Gravedigger: players=[a,b] to swap. Sleepwalker: center=[n]. Lone vampire: center=[n] to look. " +
 		"You can change your choice until day breaks; it's carried out then, in role order."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in nightIn) (*mcp.CallToolResult, map[string]any, error) {
 			act := action{Center: in.Center}
@@ -143,7 +149,7 @@ func (a *App) addTools(srv *mcp.Server) {
 				act.Players = append(act.Players, strings.TrimPrefix(strings.TrimSpace(h), "@"))
 			}
 			var out map[string]any
-			err := a.move(ctx, req, in.Session, func(tx *gamekit.Tx, g *game, me *player) error {
+			err := a.move(ctx, req, in.Session, "night", in.Note, func(tx *gamekit.Tx, g *game, me *player) error {
 				if g.Phase != night {
 					return fmt.Errorf("it's not night: the game is %s", g.Phase)
 				}
@@ -182,6 +188,7 @@ func (a *App) addTools(srv *mcp.Server) {
 			if err := a.srv.Say(ctx, ag, g.ID, me.Player, text); err != nil {
 				return nil, nil, err
 			}
+			a.srv.ThinkAfterSay(ctx, g.ID, me.Key(), "say", in.Note)
 			return nil, map[string]any{"said": true}, nil
 		})
 
@@ -190,7 +197,7 @@ func (a *App) addTools(srv *mcp.Server) {
 		func(ctx context.Context, req *mcp.CallToolRequest, in voteIn) (*mcp.CallToolResult, map[string]any, error) {
 			target := strings.TrimPrefix(strings.TrimSpace(in.Player), "@")
 			var out map[string]any
-			err := a.move(ctx, req, in.Session, func(tx *gamekit.Tx, g *game, me *player) error {
+			err := a.move(ctx, req, in.Session, "vote", in.Note, func(tx *gamekit.Tx, g *game, me *player) error {
 				switch {
 				case g.Phase != day && g.Phase != voting:
 					return fmt.Errorf("it's not time to vote: it's %s", g.Phase)
@@ -209,8 +216,9 @@ func (a *App) addTools(srv *mcp.Server) {
 }
 
 // move runs a player's move on its game, under the game's lock (with who's
-// away found first: Wakeshift isn't called under the lock).
-func (a *App) move(ctx context.Context, req *mcp.CallToolRequest, explicit string, fn func(tx *gamekit.Tx, g *game, me *player) error) error {
+// away found first: Wakeshift isn't called under the lock), and keeps its
+// note for the player's operator once the move is made.
+func (a *App) move(ctx context.Context, req *mcp.CallToolRequest, explicit, tool, note string, fn func(tx *gamekit.Tx, g *game, me *player) error) error {
 	ag, err := a.srv.Agent(ctx, req)
 	if err != nil {
 		return err
@@ -232,7 +240,10 @@ func (a *App) move(ctx context.Context, req *mcp.CallToolRequest, explicit strin
 		if me == nil {
 			return errNotPlaying
 		}
-		return fn(tx, g, me)
+		if err := fn(tx, g, me); err != nil {
+			return err
+		}
+		return tx.Think(id, key, tool, note)
 	})
 	return err
 }

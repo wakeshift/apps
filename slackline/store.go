@@ -98,23 +98,33 @@ func (s *Store) migrate(ctx context.Context) error {
 	})
 }
 
-func (s *Store) sealToken(plain string) []byte {
+// tokenAAD binds a sealed bot token to its team, so a sealed token copied
+// into another team's row (by someone who can write the database but
+// hasn't the key) doesn't open there.
+func tokenAAD(team string) []byte { return []byte("slackline/bot-token\x00" + team) }
+
+func (s *Store) sealToken(team, plain string) []byte {
 	nonce := make([]byte, s.seals[0].NonceSize())
 	rand.Read(nonce)
-	return s.seals[0].Seal(nonce, nonce, []byte(plain), nil)
+	return s.seals[0].Seal(nonce, nonce, []byte(plain), tokenAAD(team))
 }
 
-func (s *Store) openToken(sealed []byte) (string, error) {
-	for _, aead := range s.seals {
-		n := aead.NonceSize()
-		if len(sealed) < n {
-			return "", errors.New("sealed token too short")
-		}
-		if plain, err := aead.Open(nil, sealed[:n], sealed[n:], nil); err == nil {
-			return string(plain), nil
+// openToken opens a team's sealed bot token. legacy: it was sealed before
+// tokens were bound to their team (no AAD); the caller seals it again.
+// TODO(remove) once every team's token is resealed (Team reseals on read).
+func (s *Store) openToken(team string, sealed []byte) (plain string, legacy bool, err error) {
+	for _, aad := range [][]byte{tokenAAD(team), nil} {
+		for _, aead := range s.seals {
+			n := aead.NonceSize()
+			if len(sealed) < n {
+				return "", false, errors.New("sealed token too short")
+			}
+			if p, err := aead.Open(nil, sealed[:n], sealed[n:], aad); err == nil {
+				return string(p), aad == nil, nil
+			}
 		}
 	}
-	return "", errors.New("no token key opens this token (was the key that sealed it removed?)")
+	return "", false, errors.New("no token key opens this token (was the key that sealed it removed?)")
 }
 
 func hash(s string) []byte {
@@ -141,7 +151,7 @@ func (s *Store) SaveTeam(ctx context.Context, t Team, by string) error {
 	_, err := s.Pool.Exec(ctx, `INSERT INTO teams (team_id, team_name, bot_token, bot_user_id, installed_by) VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (team_id) DO UPDATE SET team_name = EXCLUDED.team_name, bot_token = EXCLUDED.bot_token,
 			bot_user_id = EXCLUDED.bot_user_id, installed_by = EXCLUDED.installed_by, installed_at = now()`,
-		t.ID, t.Name, s.sealToken(t.BotToken), t.BotUserID, by)
+		t.ID, t.Name, s.sealToken(t.ID, t.BotToken), t.BotUserID, by)
 	return err
 }
 
@@ -153,8 +163,16 @@ func (s *Store) Team(ctx context.Context, id string) (Team, error) {
 	if err != nil {
 		return t, notFound(err)
 	}
-	t.BotToken, err = s.openToken(sealed)
-	return t, err
+	var legacy bool
+	if t.BotToken, legacy, err = s.openToken(id, sealed); err != nil {
+		return t, err
+	}
+	if legacy { // bind it to its team from now on (unless a reinstall replaced it)
+		if _, err := s.Pool.Exec(ctx, `UPDATE teams SET bot_token = $2 WHERE team_id = $1 AND bot_token = $3`, id, s.sealToken(id, t.BotToken), sealed); err != nil {
+			return t, err
+		}
+	}
+	return t, nil
 }
 
 // TeamUsers lists the people of a workspace who signed in.
@@ -166,15 +184,122 @@ func (s *Store) TeamUsers(ctx context.Context, team string) ([]string, error) {
 	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
-// ForgetTeam deletes a workspace's install and everything of its people's
-// (Slackline's own rows; the caller has Wakeshift forget them first), and
-// records it in the audit log (under the workspace, with no user).
-func (s *Store) ForgetTeam(ctx context.Context, team, why string) error {
+// RequestDeletion records that a workspace removed Slackline, and deletes
+// its install (the bot token) at once, so nothing more is routed or
+// posted for it. The rest is deleted by ForgetTeam, retried until done.
+// An uninstall Slack sent before the current install (at) is stale, a
+// retry or a late delivery, and is ignored, as is one for a workspace
+// Slackline has nothing of.
+func (s *Store) RequestDeletion(ctx context.Context, team, why string, at time.Time) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		for _, q := range []string{`DELETE FROM threads WHERE team_id = $1`, `DELETE FROM users WHERE team_id = $1`, `DELETE FROM teams WHERE team_id = $1`} {
+		var installed time.Time
+		err := tx.QueryRow(ctx, `SELECT installed_at FROM teams WHERE team_id = $1 FOR UPDATE`, team).Scan(&installed)
+		switch {
+		case err == nil:
+			// Slack's event_time is when the removal happened (retries keep
+			// it), to the second: one from a second before the install
+			// predates it. (One from the same second counts: deleting is safer.)
+			if !at.IsZero() && installed.Truncate(time.Second).After(at.Truncate(time.Second)) {
+				return nil // removed before this install
+			}
+		case errors.Is(err, pgx.ErrNoRows):
+			var has bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE team_id = $1) OR EXISTS (SELECT 1 FROM agents WHERE team_id = $1)
+				OR EXISTS (SELECT 1 FROM threads WHERE team_id = $1) OR EXISTS (SELECT 1 FROM audit_log WHERE team_id = $1 AND action <> 'workspace.forgotten')`,
+				team).Scan(&has); err != nil || !has {
+				return err
+			}
+		default:
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO pending_deletions (team_id, why) VALUES ($1, $2) ON CONFLICT (team_id) DO NOTHING`, team, why); err != nil {
+			return err
+		}
+		// Its agents stop at once: their access tokens are checked against
+		// revoked_at on every request.
+		for _, q := range []string{`DELETE FROM teams WHERE team_id = $1`, `UPDATE agents SET revoked_at = now() WHERE team_id = $1 AND revoked_at IS NULL`,
+			`DELETE FROM refresh_tokens r USING agents a WHERE r.agent_id = a.id AND a.team_id = $1`} {
 			if _, err := tx.Exec(ctx, q, team); err != nil {
 				return err
 			}
+		}
+		return nil
+	})
+}
+
+// PendingDeletions lists workspaces whose deletion isn't done, fewest
+// failed attempts first, then oldest (so failing ones don't starve others).
+func (s *Store) PendingDeletions(ctx context.Context, limit int) ([]string, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT team_id FROM pending_deletions ORDER BY attempts, requested_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+// DeletionPending says whether a workspace's deletion isn't done.
+func (s *Store) DeletionPending(ctx context.Context, team string) (bool, error) {
+	var ok bool
+	err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pending_deletions WHERE team_id = $1)`, team).Scan(&ok)
+	return ok, err
+}
+
+// LockDeletion holds a workspace's deletion lock (a session advisory lock,
+// so every instance agrees) until release is called; ok is false if
+// another worker holds it. Deletions run only under it, so a stale worker
+// can't act after another finished (and a reinstall followed).
+func (s *Store) LockDeletion(ctx context.Context, team string) (release func(), ok bool, err error) {
+	conn, err := s.Pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	key := "slackline/delete/" + team
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext($1))`, key).Scan(&ok); err != nil || !ok {
+		conn.Release()
+		return nil, false, err
+	}
+	return func() {
+		if _, err := conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock(hashtext($1))`, key); err != nil {
+			conn.Conn().Close(context.WithoutCancel(ctx)) // closing the session releases it
+		}
+		conn.Release()
+	}, true, nil
+}
+
+// DeletionFailed records a failed attempt: the step that failed, never an
+// error's text.
+func (s *Store) DeletionFailed(ctx context.Context, team, why string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE pending_deletions SET attempts = attempts + 1, last_error = $2 WHERE team_id = $1`, team, truncate(why, 500))
+	return err
+}
+
+// ForgetTeam finishes a pending deletion (the caller has had Wakeshift
+// forget the workspace's people first): the install, its people, their
+// agents, tokens, rules, listeners and threads, and the workspace's audit
+// log, which is reduced to one entry saying Slackline was removed and why,
+// with no people in it. It does nothing if no deletion is pending (another
+// attempt finished it), so it never deletes a reinstall.
+func (s *Store) ForgetTeam(ctx context.Context, team string) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var why string
+		var requested time.Time
+		err := tx.QueryRow(ctx, `DELETE FROM pending_deletions WHERE team_id = $1 RETURNING why, requested_at`, team).Scan(&why, &requested)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// Users cascade to their agents, and those to tokens, codes, rules,
+		// listeners, conversations and threads. An install saved after the
+		// removal was recorded (a reinstall) stays.
+		for _, q := range []string{`DELETE FROM threads WHERE team_id = $1`, `DELETE FROM users WHERE team_id = $1`, `DELETE FROM audit_log WHERE team_id = $1`} {
+			if _, err := tx.Exec(ctx, q, team); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM teams WHERE team_id = $1 AND installed_at <= $2`, team, requested); err != nil {
+			return err
 		}
 		return audit(ctx, tx, team, "", "workspace.forgotten", map[string]any{"why": why})
 	})
@@ -186,6 +311,7 @@ func (s *Store) ForgetTeam(ctx context.Context, team, why string) error {
 type User struct {
 	TeamID, UserID, Name, TeamName, DMChannel string
 	SessionVersion                            int
+	Understood                                bool // confirmed where their agents' messages go
 }
 
 // SignIn records a sign-in (creating the user the first time), audited.
@@ -193,7 +319,8 @@ func (s *Store) SignIn(ctx context.Context, u User) (User, error) {
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `INSERT INTO users (team_id, user_id, name, team_name) VALUES ($1, $2, $3, $4)
 			ON CONFLICT (team_id, user_id) DO UPDATE SET name = EXCLUDED.name, team_name = EXCLUDED.team_name, last_sign_in_at = now()
-			RETURNING dm_channel, session_version`, u.TeamID, u.UserID, u.Name, u.TeamName).Scan(&u.DMChannel, &u.SessionVersion); err != nil {
+			RETURNING dm_channel, session_version, understood_at IS NOT NULL`, u.TeamID, u.UserID, u.Name, u.TeamName).
+			Scan(&u.DMChannel, &u.SessionVersion, &u.Understood); err != nil {
 			return err
 		}
 		return audit(ctx, tx, u.TeamID, u.UserID, "user.signed_in", nil)
@@ -204,9 +331,21 @@ func (s *Store) SignIn(ctx context.Context, u User) (User, error) {
 // User returns someone who signed in.
 func (s *Store) User(ctx context.Context, team, user string) (User, error) {
 	u := User{TeamID: team, UserID: user}
-	err := s.Pool.QueryRow(ctx, `SELECT name, team_name, dm_channel, session_version FROM users WHERE team_id = $1 AND user_id = $2`, team, user).
-		Scan(&u.Name, &u.TeamName, &u.DMChannel, &u.SessionVersion)
+	err := s.Pool.QueryRow(ctx, `SELECT name, team_name, dm_channel, session_version, understood_at IS NOT NULL FROM users WHERE team_id = $1 AND user_id = $2`,
+		team, user).Scan(&u.Name, &u.TeamName, &u.DMChannel, &u.SessionVersion, &u.Understood)
 	return u, notFound(err)
+}
+
+// Understand records, audited, that the user confirmed they understand
+// where their agents' messages go (the first time only).
+func (s *Store) Understand(ctx context.Context, team, user, where string) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE users SET understood_at = now() WHERE team_id = $1 AND user_id = $2 AND understood_at IS NULL`, team, user)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		return audit(ctx, tx, team, user, "user.understood", map[string]any{"where": where})
+	})
 }
 
 // SetDMChannel remembers the user's DM channel with the app.
@@ -296,8 +435,10 @@ func (s *Store) RenameAgent(ctx context.Context, team, user, id, label string) e
 }
 
 // RevokeAgent stops an agent: its tokens, codes, listeners and rules end.
-func (s *Store) RevokeAgent(ctx context.Context, team, user, id string) error {
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+// It returns the rules that ended, so their channels can be told.
+func (s *Store) RevokeAgent(ctx context.Context, team, user, id string) ([]EndedRule, error) {
+	var ended []EndedRule
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE agents SET revoked_at = now() WHERE id = $3 AND team_id = $1 AND user_id = $2 AND revoked_at IS NULL`, team, user, id)
 		if err != nil {
 			return err
@@ -305,14 +446,86 @@ func (s *Store) RevokeAgent(ctx context.Context, team, user, id string) error {
 		if tag.RowsAffected() == 0 {
 			return ErrNotFound
 		}
-		for _, q := range []string{`DELETE FROM refresh_tokens WHERE agent_id = $1`, `DELETE FROM oauth_codes WHERE agent_id = $1`,
-			`DELETE FROM channel_rules WHERE agent_id = $1`, `UPDATE listeners SET closed_at = now() WHERE agent_id = $1 AND closed_at IS NULL`} {
-			if _, err := tx.Exec(ctx, q, id); err != nil {
-				return err
-			}
+		if ended, err = endAgent(ctx, tx, id); err != nil {
+			return err
 		}
 		return audit(ctx, tx, team, user, "agent.revoked", map[string]any{"agent": id})
 	})
+	return ended, err
+}
+
+// endAgent ends a revoked agent's refresh tokens, codes, channel rules
+// (returned) and listeners.
+func endAgent(ctx context.Context, tx pgx.Tx, id string) ([]EndedRule, error) {
+	for _, q := range []string{`DELETE FROM refresh_tokens WHERE agent_id = $1`, `DELETE FROM oauth_codes WHERE agent_id = $1`,
+		`UPDATE listeners SET closed_at = now() WHERE agent_id = $1 AND closed_at IS NULL`} {
+		if _, err := tx.Exec(ctx, q, id); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := tx.Query(ctx, `DELETE FROM channel_rules r USING agents a WHERE r.agent_id = a.id AND a.id = $1
+		RETURNING r.channel_id, r.channel_name, a.id, a.label, a.user_id`, id)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[EndedRule])
+}
+
+// EndUser ends a person's use of Slackline (their Slack account was
+// deactivated): every agent of theirs is revoked as RevokeAgent does, and
+// their sign-in ends in every browser, audited in the same transaction. It
+// returns the rules that ended; ErrNotFound if they never signed in.
+func (s *Store) EndUser(ctx context.Context, team, user, why string) ([]EndedRule, error) {
+	var ended []EndedRule
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE users SET session_version = session_version + 1 WHERE team_id = $1 AND user_id = $2`, team, user)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		rows, err := tx.Query(ctx, `UPDATE agents SET revoked_at = now() WHERE team_id = $1 AND user_id = $2 AND revoked_at IS NULL RETURNING id`, team, user)
+		if err != nil {
+			return err
+		}
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			rs, err := endAgent(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			ended = append(ended, rs...)
+		}
+		return audit(ctx, tx, team, user, "user.deactivated", map[string]any{"why": why, "agents": ids})
+	})
+	return ended, err
+}
+
+// PersonRef is someone in a workspace, by ID.
+type PersonRef struct{ Team, User string }
+
+// PeopleWithAgents lists people with an agent that isn't revoked, in
+// order, after the one given (zero: from the start), up to limit.
+func (s *Store) PeopleWithAgents(ctx context.Context, after PersonRef, limit int) ([]PersonRef, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT team_id, user_id FROM agents WHERE revoked_at IS NULL AND (team_id, user_id) > ($1, $2)
+		ORDER BY team_id, user_id LIMIT $3`, after.Team, after.User, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[PersonRef])
+}
+
+// MemberNamed says whether someone who signed in to Slackline in a
+// workspace has this name (lower case, spaces collapsed).
+func (s *Store) MemberNamed(ctx context.Context, team, name string) (bool, error) {
+	var ok bool
+	err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE team_id = $1 AND lower(regexp_replace(btrim(name), '\s+', ' ', 'g')) = $2)`,
+		team, name).Scan(&ok)
+	return ok, err
 }
 
 // ── OAuth codes and refresh tokens ───────────────────────────────────────
@@ -472,16 +685,63 @@ type Rule struct {
 	Senders                         string // "me" or "anyone"
 }
 
-// SetRule adds or changes a rule for the user's own agent, audited.
-func (s *Store) SetRule(ctx context.Context, team, user string, r Rule) error {
+// EndedRule is a rule that was removed, for telling its channel.
+type EndedRule struct {
+	ChannelID, ChannelName, AgentID, Label, UserID string
+}
+
+// ErrUnannounced is a rule change that would let more reach an agent than
+// its channel was told (the rule changed meanwhile).
+var ErrUnannounced = errors.New("the channel wasn't told about this change")
+
+// RuleOf returns the user's own agent and its rule on a channel (nil if it
+// has none there).
+func (s *Store) RuleOf(ctx context.Context, team, user, agent, channel string) (Agent, *Rule, error) {
+	ag, err := scanAgent(s.Pool.QueryRow(ctx, `SELECT `+agentCols+` FROM agents WHERE id = $1 AND team_id = $2 AND user_id = $3 AND revoked_at IS NULL`,
+		agent, team, user))
+	if err != nil {
+		return ag, nil, err
+	}
+	prev, err := ruleOf(ctx, s.Pool, agent, channel)
+	return ag, prev, err
+}
+
+type queryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func ruleOf(ctx context.Context, q queryRower, agent, channel string) (*Rule, error) {
+	r := Rule{AgentID: agent, ChannelID: channel}
+	err := q.QueryRow(ctx, `SELECT channel_name, mode, senders FROM channel_rules WHERE agent_id = $1 AND channel_id = $2`, agent, channel).
+		Scan(&r.ChannelName, &r.Mode, &r.Senders)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// SetRule adds or changes a rule for the user's own agent, audited. A rule
+// that's new or lets more reach the agent (broadens) needs its channel told
+// first (announced); otherwise it's refused with ErrUnannounced, so no
+// agent listens unannounced. seen is the rule the caller read before
+// (RuleOf): if it changed meanwhile, the change is refused the same way,
+// so a notice always describes the rule that was saved.
+func (s *Store) SetRule(ctx context.Context, team, user string, r Rule, seen *Rule, announced bool) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		var ok bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agents WHERE id = $1 AND team_id = $2 AND user_id = $3 AND revoked_at IS NULL)`,
-			r.AgentID, team, user).Scan(&ok); err != nil {
+		if _, err := scanAgent(tx.QueryRow(ctx, `SELECT `+agentCols+` FROM agents WHERE id = $1 AND team_id = $2 AND user_id = $3 AND revoked_at IS NULL FOR UPDATE`,
+			r.AgentID, team, user)); err != nil {
 			return err
 		}
-		if !ok {
-			return ErrNotFound
+		prev, err := ruleOf(ctx, tx, r.AgentID, r.ChannelID)
+		if err != nil {
+			return err
+		}
+		same := prev == nil && seen == nil || prev != nil && seen != nil && prev.Mode == seen.Mode && prev.Senders == seen.Senders
+		if !same || broadens(prev, r) && !announced {
+			return ErrUnannounced
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO channel_rules (agent_id, channel_id, channel_name, mode, senders) VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (agent_id, channel_id) DO UPDATE SET channel_name = EXCLUDED.channel_name, mode = EXCLUDED.mode, senders = EXCLUDED.senders`,
@@ -493,35 +753,38 @@ func (s *Store) SetRule(ctx context.Context, team, user string, r Rule) error {
 	})
 }
 
-// RemoveRule removes one of the user's own agents' rules, audited.
-func (s *Store) RemoveRule(ctx context.Context, team, user, agent, channel string) error {
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `DELETE FROM channel_rules r USING agents a WHERE r.agent_id = a.id AND a.id = $3 AND a.team_id = $1 AND a.user_id = $2
-			AND r.channel_id = $4`, team, user, agent, channel)
+// RemoveRule removes one of the user's own agents' rules, audited, and
+// returns it.
+func (s *Store) RemoveRule(ctx context.Context, team, user, agent, channel string) (EndedRule, error) {
+	var e EndedRule
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `DELETE FROM channel_rules r USING agents a WHERE r.agent_id = a.id AND a.id = $3 AND a.team_id = $1 AND a.user_id = $2
+			AND r.channel_id = $4 RETURNING r.channel_id, r.channel_name, a.id, a.label, a.user_id`, team, user, agent, channel).
+			Scan(&e.ChannelID, &e.ChannelName, &e.AgentID, &e.Label, &e.UserID)
 		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			return ErrNotFound
+			return notFound(err)
 		}
 		return audit(ctx, tx, team, user, "rule.removed", map[string]any{"agent": agent, "channel": channel})
 	})
+	return e, err
 }
 
 // RemoveMemberRules removes a person's agents' rules on a channel they're
-// no longer in, audited; it returns how many.
-func (s *Store) RemoveMemberRules(ctx context.Context, team, user, channel, why string) (int, error) {
-	var n int64
+// no longer in, audited, and returns them.
+func (s *Store) RemoveMemberRules(ctx context.Context, team, user, channel, why string) ([]EndedRule, error) {
+	var ended []EndedRule
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `DELETE FROM channel_rules r USING agents a WHERE r.agent_id = a.id AND a.team_id = $1 AND a.user_id = $2
-			AND r.channel_id = $3`, team, user, channel)
-		if err != nil || tag.RowsAffected() == 0 {
+		rows, err := tx.Query(ctx, `DELETE FROM channel_rules r USING agents a WHERE r.agent_id = a.id AND a.team_id = $1 AND a.user_id = $2
+			AND r.channel_id = $3 RETURNING r.channel_id, r.channel_name, a.id, a.label, a.user_id`, team, user, channel)
+		if err != nil {
 			return err
 		}
-		n = tag.RowsAffected()
-		return audit(ctx, tx, team, user, "rule.removed", map[string]any{"channel": channel, "rules": n, "why": why})
+		if ended, err = pgx.CollectRows(rows, pgx.RowToStructByPos[EndedRule]); err != nil || len(ended) == 0 {
+			return err
+		}
+		return audit(ctx, tx, team, user, "rule.removed", map[string]any{"channel": channel, "rules": len(ended), "why": why})
 	})
-	return int(n), err
+	return ended, err
 }
 
 // Rules lists an agent's rules.
@@ -559,12 +822,12 @@ func (s *Store) ChannelRules(ctx context.Context, team, channel string) ([]Chann
 
 // Ending is a revoked agent's conversation whose Wakeshift subscription
 // hasn't been confirmed ended.
-type Ending struct{ Listener, Subscription string }
+type Ending struct{ Listener, Subscription, Team, User string }
 
 // PendingEnds lists revoked agents' subscriptions not yet confirmed ended.
 func (s *Store) PendingEnds(ctx context.Context, limit int) ([]Ending, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT l.id, l.subscription FROM listeners l JOIN agents a ON a.id = l.agent_id
-		WHERE a.revoked_at IS NOT NULL AND NOT l.sub_ended AND l.subscription <> '' ORDER BY a.revoked_at LIMIT $1`, limit)
+	rows, err := s.Pool.Query(ctx, `SELECT l.id, l.subscription, a.team_id, a.user_id FROM listeners l JOIN agents a ON a.id = l.agent_id
+		WHERE a.revoked_at IS NOT NULL AND NOT l.sub_ended ORDER BY a.revoked_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}

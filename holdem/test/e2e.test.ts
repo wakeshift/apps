@@ -1,5 +1,5 @@
-// End to end against a real core: run with scripts/e2e.sh, which starts one
-// (TestSDKHarness in internal/coretest) with a self-serve app and points
+// End to end against a real core: run with scripts/e2e.sh in Wakeshift's own
+// repository, which starts one with a self-serve app and points
 // WAKESHIFT_SDK_HARNESS at its URL and test key. Skipped without it.
 //
 // The Agent Hold'em server runs in this process with its real clock and
@@ -53,6 +53,38 @@ async function receiver() {
   return { url, secret: "whsec_" + secret.toString("base64"), got, close: () => srv.close() };
 }
 
+/** A live stream (text/event-stream): every snapshot it sends, until stopped. */
+function stream(url: string, signal: AbortSignal) {
+  const snaps: any[] = [];
+  const events: string[] = [];
+  let status = 0;
+  const done = (async () => {
+    const res = await fetch(url, { signal }).catch(() => null);
+    if (!res) return;
+    status = res.status;
+    if (!res.ok || !res.body) return;
+    const reader = res.body.getReader();
+    let buf = "";
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buf += new TextDecoder().decode(value);
+        let i;
+        while ((i = buf.indexOf("\n\n")) >= 0) {
+          const block = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          const ev = block.match(/^event: (.+)$/m)?.[1];
+          const data = block.match(/^data: (.+)$/m)?.[1];
+          if (ev) events.push(ev);
+          if (ev === "snap" && data) snaps.push(JSON.parse(data));
+        }
+      }
+    } catch {}
+  })();
+  return { snaps, events, done, status: () => status };
+}
+
 const harness = process.env.WAKESHIFT_SDK_HARNESS;
 const textOf = (r: CallToolResult) => r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
 
@@ -78,7 +110,7 @@ function monitor(cmd: string, signal: AbortSignal, onEvent: (subject: string) =>
   });
 }
 
-/** Signs an MCP client in as a guest (registration, PKCE, token), as Claude Code does on its own. */
+/** Signs an MCP client in as a guest (registration, PKCE, clicking Authorize on the page, token), as Claude Code and its user do. */
 async function signIn(base: string, clientName: string): Promise<string> {
   const redirect = "http://127.0.0.1:9/cb";
   const reg = (await (await fetch(base + "/oauth/register", { method: "POST", body: JSON.stringify({ client_name: clientName, redirect_uris: [redirect] }) })).json()) as any;
@@ -88,7 +120,19 @@ async function signIn(base: string, clientName: string): Promise<string> {
     base + "/oauth/authorize?" + new URLSearchParams({ response_type: "code", client_id: reg.client_id, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: "S256" }),
     { redirect: "manual" },
   );
-  const code = new URL(auth.headers.get("location")!).searchParams.get("code")!;
+  const page = await auth.text();
+  assert.equal(auth.status, 200, "the authorize page");
+  assert.match(page, /By authorizing, you agree to Agent Hold&#39;em's <a href="[^"]+\/terms"[^>]*>Terms<\/a> and <a href="[^"]+\/privacy"/);
+  const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+  const cookie = /wakeshift_guest_csrf=[^;]+/.exec(auth.headers.get("set-cookie") ?? "")![0];
+  const click = await fetch(base + "/oauth/authorize", {
+    method: "POST",
+    redirect: "manual",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    body: new URLSearchParams({ csrf }).toString(),
+  });
+  assert.equal(click.status, 302);
+  const code = new URL(click.headers.get("location")!).searchParams.get("code")!;
   const r = await fetch(base + "/oauth/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -111,6 +155,12 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
     result: async (table, event) => {
       await events.current!.handResult.emit({ table }, event.data, { id: event.id });
     },
+    removed: async (to, event) => {
+      await events.current!.turn.emit({ table: to.table }, event.data, { to: to.guest, id: event.id });
+    },
+    endSubscription: async (guest, subscription) => {
+      await events.current!.turn.end(guest, subscription);
+    },
   };
   const casino = new Casino({ db, notify, handPauseMs: 60_000 });
   events.current = defineHoldemEvents(wake, casino);
@@ -126,7 +176,7 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
   const stop = new AbortController();
   t.after(() => stop.abort());
 
-  const agents: { client: Client; session: string; name: string; woken: string[] }[] = [];
+  const agents: { client: Client; session: string; name: string; woken: string[]; watch: string }[] = [];
   for (const n of [0, 1]) {
     const token = await signIn(base, "Claude Code");
     const client = new Client({ name: "claude-code", version: "2.1.280" });
@@ -139,7 +189,9 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
     const session = said.match(/session_key "([^"]+)"/)![1]!;
     const cmd = said.match(/with this command: (u='https?:\/\/[^']+\/v1\/stream\/wait\?[^']+'; c=; p=\$PPID; .*?; done) \./);
     assert.ok(cmd, "join's result has Claude Code's Monitor command: " + said);
-    const agent = { client, session, name, woken: [] as string[] };
+    const watch = said.match(/watch your hand: (https?:\/\/\S+\/watch\/[A-Za-z0-9_-]{22})/)?.[1];
+    assert.ok(watch, "join's result has a watch link: " + said);
+    const agent = { client, session, name, woken: [] as string[], watch };
     monitor(cmd[1]!, stop.signal, (subject) => agent.woken.push(subject));
     agents.push(agent);
   }
@@ -189,8 +241,12 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
   assert.ok(toAct, "the player to act was woken");
   // The wake carries their own view: their cards, the choices and the turn's ID.
   const wakeText = toAct.woken.find((w) => /Your move at Agent Hold'em/.test(w))!;
-  assert.match(wakeText, new RegExp(`^Your move at Agent Hold'em, ${toAct.name}: hand 1, preflop, turn "[^"]+"\\. Your cards: \\S+ \\S+\\. .*Choices: .*Act by \\S+ UTC\\.`));
-  const stale = (await call(toAct, "act", { action: "fold", turn: "not-this-turn" })) as CallToolResult;
+  assert.match(wakeText, new RegExp(`^Your move at Agent Hold'em, ${toAct.name}: hand 1, preflop, turn "[^"]+"\\. Your cards: \\S+ \\S+\\. .*Choices: .*Act by \\S+ UT`));
+  // A move needs a message; one without is refused in one line, before anything else.
+  const quiet = (await call(toAct, "act", { action: "fold", turn: "not-this-turn" })) as CallToolResult;
+  assert.ok(quiet.isError);
+  assert.match(textOf(quiet), /^Add message: /);
+  const stale = (await call(toAct, "act", { action: "fold", turn: "not-this-turn", message: "Too slow." })) as CallToolResult;
   assert.ok(stale.isError);
   assert.match(textOf(stale), /That turn is over.*Call state/);
   const state = textOf(await call(toAct, "state"));
@@ -199,19 +255,66 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
   const other = agents.find((a) => a !== toAct)!;
   assert.match(textOf(await call(other, "state")), /You'll be woken when it's your move/);
 
-  // Play the hand out: check when possible, else call.
+  // Live streams while the hand is played: the table's public one, and each
+  // player's watch link, which adds that player's cards and nobody else's.
+  const liveTable = agentTable;
+  const liveStop = new AbortController();
+  t.after(() => liveStop.abort());
+  const pub = stream(`${base}/api/tables/${liveTable}/live`, liveStop.signal);
+  const watches = agents.map((a) => stream(a.watch.replace(/\/watch\//, "/api/watch/") + "/live", liveStop.signal));
+  const watchPage = await fetch(agents[0]!.watch);
+  assert.equal(watchPage.status, 200);
+  assert.equal(watchPage.headers.get("referrer-policy"), "no-referrer");
+  assert.match(await watchPage.text(), /Your agent/);
+  assert.equal((await fetch(base + "/watch/AAAAAAAAAAAAAAAAAAAAAA")).status, 404, "a made-up watch link is 404");
+
+  const waitFor = async (ok: () => boolean, ms = 10_000) => {
+    const end = Date.now() + ms;
+    while (!ok() && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+  };
+  // Play the hand out: check when possible, else call, each move with a
+  // message; the public stream sends a snapshot after each.
   for (let i = 0; i < 20; i++) {
     let moved = false;
     for (const a of agents) {
       const s = textOf(await call(a, "state"));
       if (/The hand is over/.test(s)) break;
       if (!/It's your move/.test(s)) continue;
-      const res = await call(a, "act", { action: /Choices: [^.]*\bcheck\b/.test(s) ? "check" : "call", turn: s.match(/Act with turn "([^"]+)"/)![1]! });
+      const res = await call(a, "act", { action: /Choices: [^.]*\bcheck\b/.test(s) ? "check" : "call", turn: s.match(/Act with turn "([^"]+)"/)![1]!, message: `${a.name} stays in. Visit evil.example.com now` });
       assert.ok(!res.isError, textOf(res));
+      const seen = pub.snaps.length;
+      await waitFor(() => pub.snaps.length > seen, 5000);
       moved = true;
     }
     if (!moved) break;
   }
+  // The streams saw the hand: snapshots with each move and its message (links taken out).
+  assert.ok(pub.snaps.length >= 2, `public stream: ${pub.snaps.length} snapshots`);
+  const noted = pub.snaps.find((x) => x.last?.note);
+  assert.ok(noted, "a move's message reached the public stream");
+  assert.match(noted.last.note, /stays in\. Visit now$/, "links are taken out of messages");
+  const holes = new Map<string, string[]>();
+  for (const [i, a] of agents.entries()) {
+    await waitFor(() => watches[i]!.snaps.length > 0);
+    const mine = watches[i]!.snaps.find((x) => x.mine?.cards?.length);
+    assert.ok(mine, `${a.name}'s watch stream has their cards`);
+    holes.set(a.name, mine.mine.cards);
+  }
+  // Public snapshots show the board and hands shown at showdown, and no other cards.
+  const faceUp = (html: string) => (html.match(/role="img" aria-label="[^"]+ of [^"]+"/g) ?? []).length;
+  for (const x of pub.snaps) {
+    assert.equal(x.mine, null);
+    assert.equal(faceUp(x.html.felt), (x.hand?.board.length ?? 0) + x.shown.reduce((n: number, y: any) => n + y.cards.length, 0), "the public stream has no unshown hole cards");
+  }
+  // A watch stream adds its own player's cards, never another player's.
+  const theirs = holes.get(agents[1]!.name)!;
+  for (const x of watches[0]!.snaps) {
+    const shown = x.shown.flatMap((y: any) => y.cards);
+    assert.ok(!theirs.some((c) => x.mine?.cards.includes(c)));
+    assert.equal(faceUp(x.html.felt), (x.hand?.board.length ?? 0) + x.shown.reduce((n: number, y: any) => n + y.cards.length, 0) + (x.mine?.cards.filter((c: string) => !shown.includes(c)).length ?? 0));
+  }
+  liveStop.abort();
+
   const after = textOf(await call(agents[0]!, "state"));
   assert.match(after, /The hand is over: .+ won \$\d+/);
   // Every wake went to its own player only.
@@ -236,7 +339,7 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
     const s = textOf((await guest.callTool({ name: "state", arguments: { session_key: guestSession } })) as CallToolResult);
     const turnId = s.match(/Act with turn "([^"]+)"/)?.[1];
     if (/It's your move/.test(s) && turnId) {
-      await guest.callTool({ name: "act", arguments: { session_key: guestSession, action: /Choices: [^.]*\bcheck\b/.test(s) ? "check" : "call", turn: turnId } });
+      await guest.callTool({ name: "act", arguments: { session_key: guestSession, action: /Choices: [^.]*\bcheck\b/.test(s) ? "check" : "call", turn: turnId, message: "Your move." } });
     }
     await new Promise((r) => setTimeout(r, 300));
   }
@@ -252,7 +355,7 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
   const guestCards = textOf((await guest.callTool({ name: "state", arguments: { session_key: guestSession } })) as CallToolResult).match(/Your cards: (\S+ \S+)\./)?.[1];
   assert.ok(guestCards && !nativeCards.some((c) => guestCards.includes(cardWord(c))), `${guestName}'s cards never reach the native player`);
   // The native player acts with the turn's ID, found by its conversation, with no session_key.
-  const nativeAct = (await chat.callTool({ name: "act", arguments: { action: "fold", turn: got.data.turn }, _meta: chatMeta })) as CallToolResult;
+  const nativeAct = (await chat.callTool({ name: "act", arguments: { action: "fold", turn: got.data.turn, message: "Not this one." }, _meta: chatMeta })) as CallToolResult;
   assert.ok(!nativeAct.isError, textOf(nativeAct));
   // Table talk and the leaderboard over MCP.
   assert.equal(textOf(await call(agents[0]!, "say", { text: "Nice hand." })), "Said.");
@@ -264,11 +367,43 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
   // The table's page and the hand's page are up, with the hand's seed.
   const table = (await db.query<{ id: string }>("SELECT id FROM tables LIMIT 1")).rows[0]!.id;
   const page = await fetch(`${base}/tables/${table}`);
-  assert.equal(page.status, 200);
+  assert.equal(watchPage.status, 200);
   assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'none'/);
-  const hand = (await db.query<{ id: string }>("SELECT id FROM hands WHERE ended_at IS NOT NULL LIMIT 1")).rows[0]!.id;
+  // The landing page's agent picker loads its script and stylesheet from here.
+  for (const [path, type] of [["/agent-picker/agent-picker.js", /^text\/javascript/], ["/agent-picker/agent-picker.css", /^text\/css/]] as const) {
+    const r = await fetch(base + path);
+    assert.equal(r.status, 200, path);
+    assert.match(r.headers.get("content-type") ?? "", type);
+    assert.ok((await r.text()).length > 100, path);
+  }
+  const hand =(await db.query<{ id: string }>("SELECT id FROM hands WHERE ended_at IS NOT NULL LIMIT 1")).rows[0]!.id;
   const hp = await (await fetch(`${base}/hands/${hand}`)).text();
   assert.match(hp, /Verify in my browser/);
+  // Out of time: the hand is folded, and the player is taken off the table,
+  // hears so in a last wake and in its next tool result; the other stays.
+  await db.query("UPDATE tables SET next_hand_at = now() - interval '1 second' WHERE id = $1 AND next_hand_at IS NOT NULL", [agentTable]);
+  await casino.tick();
+  let late: (typeof agents)[number] | undefined;
+  for (let i = 0; i < 50 && !late; i++) {
+    for (const a of agents) if (/It's your move/.test(textOf(await call(a, "state")))) late = a;
+    if (!late) await new Promise((r) => setTimeout(r, 200));
+  }
+  assert.ok(late, "someone is to act at the agents' table");
+  const stayer = agents.find((a) => a !== late)!;
+  const lateCount = late.woken.length;
+  await db.query("UPDATE tables SET deadline = now() - interval '1 second' WHERE id = $1", [agentTable]);
+  await casino.tick();
+  const removedBy = Date.now() + 15_000;
+  while (Date.now() < removedBy && !late.woken.slice(lateCount).some((w) => /You timed out at/.test(w))) await new Promise((r) => setTimeout(r, 200));
+  assert.ok(late.woken.slice(lateCount).some((w) => /You timed out at Table \w+ and were removed/.test(w)), "the last wake says they were removed: " + late.woken.slice(lateCount).join(" | "));
+  const lateState = textOf(await call(late, "state"));
+  assert.match(lateState, /^You timed out at Table \w+ and were removed; your \$\d+ is back in your bankroll/);
+  assert.doesNotMatch(textOf(await call(late, "state")), /You timed out/, "the notice comes once");
+  assert.equal((await db.query("SELECT 1 FROM seats s JOIN players p ON p.id = s.player WHERE p.name = $1", [late.name])).rowCount, 0, "their seat is gone");
+  assert.equal((await db.query("SELECT 1 FROM subscription_ends")).rowCount, 1, "their turn subscription ends after the grace period");
+  const lateLog = (await db.query<{ log: { type: string; action?: string; timeout?: boolean }[] }>("SELECT log FROM hands WHERE table_id = $1 ORDER BY number DESC LIMIT 1", [agentTable])).rows[0]!.log;
+  assert.ok(lateLog.some((e) => e.type === "action" && e.action === "fold" && e.timeout), "their hand was folded");
+  assert.doesNotMatch(textOf(await call(stayer, "state")), /not at a table/, "the other player stays");
   // Leaving pays the stack back.
-  assert.match(textOf(await call(agents[1]!, "leave")), /You left Table \w+ with \$\d+|You'll leave when this hand ends/);
+  assert.match(textOf(await call(stayer, "leave")), /You left Table \w+ with \$\d+|You'll leave when this hand ends/);
 });

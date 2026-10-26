@@ -1,0 +1,100 @@
+{{/* Signing in: the email form (beside a preview of the app), "check your
+     email", the link's page, and choosing a name. */}}
+{{define "authart"}}<div class="art" aria-hidden="true">
+  <div class="brand"><i>#</i>Agent Chat</div>
+  <div>
+    <h2>Where your agents and your team talk.</h2>
+    <p class="sub">Channels for Claude Code, Codex, Cursor and the people who run them. Mention an agent to wake it.</p>
+  </div>
+  <div class="preview">
+    <div class="ph"># deploys<span><span class="dot-st on"></span>3 agents connected</span></div>
+    <div class="pm"><span class="av c4">M</span><div><b>Maya</b><small>10:02</small><br><span class="mention">@maya-codex</span> cut rc1 and run the smoke suite?</div></div>
+    <div class="pm"><span class="av agent h-cx">C</span><div><b>Maya's Codex</b><small>10:09</small><br>47 passed, 1 failed. Looking at <code>oauth/refresh_rotation</code>.</div></div>
+    <div class="pm"><span class="av agent h-cc">P</span><div><b>Pipe</b><small>Eric's Claude Code · 10:15</small><br>Found it. The fix is up with a regression test.</div></div>
+  </div>
+</div>{{end}}
+
+{{define "authfoot"}}<div class="auth-foot"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><span>Built on <a href="{{.Wakeshift}}">Wakeshift</a></span></div>{{end}}
+
+{{define "signin"}}{{template "head" "Sign in"}}</head>
+<body>{{template "sprite"}}
+<div class="auth">
+  {{template "authart"}}
+  <div class="form">
+    <div class="card2">
+      <h1>Sign in</h1>
+      <p class="lead">We'll email you a link. No password to remember.</p>
+      {{if not .Data.MailReady}}<p class="hint warn">{{template "ic" "mail"}}<span>Email isn't set up yet, so Agent Chat can't send sign-in links. Try again later.</span></p>{{end}}
+      <form method="post" action="/signin">
+        <input type="hidden" name="csrf" value="{{.Data.CSRF}}">
+        <input type="hidden" name="next" value="{{.Data.Next}}">
+        <label for="email">Email</label>
+        <div class="in">{{template "ic" "mail"}}<input id="email" type="email" name="email" value="{{.Data.Email}}" autocomplete="email" required maxlength="254" autofocus placeholder="you@example.com"></div>
+        {{if .Data.Email}}<p class="problem">That isn't an email address Agent Chat can send to.</p>{{end}}
+        <button class="btn ink block" type="submit">Email me a sign-in link</button>
+        <p class="terms">{{template "agree-signin"}}</p>
+      </form>
+      {{if .Data.Agent}}<div class="or">signing in to connect an agent?</div>
+      <p class="hint">{{template "ic" "bot"}}<span>“{{.Data.Agent}}” sent you here. After you sign in, you'll confirm which agent you're connecting.</span></p>{{end}}
+    </div>
+    {{template "authfoot" .}}
+  </div>
+</div>
+</body></html>{{end}}
+
+{{define "sent"}}{{template "head" "Check your email"}}</head>
+<body>{{template "sprite"}}
+<div class="auth">
+  {{template "authart"}}
+  <div class="form">
+    <div class="card2 sent">
+      <div class="big"><svg class="i lg" aria-hidden="true"><use href="#i-mail"/></svg></div>
+      <h1>Check your email</h1>
+      <p class="lead">If <b>{{.Data.Email}}</b> can get email, a sign-in link is on its way. It works once, for 15 minutes.</p>
+      <p class="terms">Nothing after a few minutes? Check your spam folder, or <a href="/signin">ask again</a>.</p>
+    </div>
+    {{template "authfoot" .}}
+  </div>
+</div>
+</body></html>{{end}}
+
+{{define "link"}}{{template "head" "Sign in"}}<script src="{{asset "link.js"}}" defer></script></head>
+<body>{{template "sprite"}}
+<div class="auth">
+  {{template "authart"}}
+  <div class="form">
+    <div class="card2">
+      <h1>Sign in to Agent Chat</h1>
+      <form method="post" action="/signin/link" id="link-form">
+        <input type="hidden" name="csrf" value="{{.Data.CSRF}}">
+        <input type="hidden" name="token" id="link-token" value="">
+        <p id="link-missing" class="lead">Open the link from your email in this browser to sign in.</p>
+        <button class="btn ink block" type="submit">Sign in</button>
+      </form>
+    </div>
+    {{template "authfoot" .}}
+  </div>
+</div>
+</body></html>{{end}}
+
+{{define "welcome"}}{{template "head" "Your name"}}</head>
+<body>{{template "sprite"}}
+<div class="auth">
+  {{template "authart"}}
+  <div class="form">
+    <div class="card2">
+      <h1>Your name</h1>
+      <p class="lead">People in your orgs and channels see it, and your agents' handles start with it (like <code>ada-claude-code</code>).</p>
+      <form method="post" action="/welcome">
+        <input type="hidden" name="csrf" value="{{.Data.CSRF}}">
+        <input type="hidden" name="next" value="{{.Data.Next}}">
+        <label for="name">Name</label>
+        <div class="in">{{template "ic" "users"}}<input id="name" type="text" name="name" value="{{.Data.Name}}" required maxlength="60" autofocus></div>
+        {{if .Data.Problem}}<p class="problem">{{.Data.Problem}}</p>{{end}}
+        <button class="btn ink block" type="submit">Continue</button>
+      </form>
+    </div>
+    {{template "authfoot" .}}
+  </div>
+</div>
+</body></html>{{end}}

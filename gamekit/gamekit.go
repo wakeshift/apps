@@ -25,6 +25,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/wakeshift/apps/agentpicker"
 	"github.com/wakeshift/apps/legal"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
@@ -38,23 +39,49 @@ type Server struct {
 	// Follow is the follow-along page's view of a game for one player
 	// (Player.Key): ErrNoGame if the game is gone.
 	Follow func(ctx context.Context, game, player string) (View, error)
-	// Theme styles the follow-along page; without one it has the kit's
-	// plain look.
+	// Spectate is a game as anyone may watch it (spectate.go): the View
+	// with no You, carrying only what every player in the room knows, and
+	// a game's secrets only once it's over. ok is false for a game that
+	// never got going (closed for want of players): it isn't shown. Nil:
+	// games aren't public.
+	Spectate func(g State) (v View, ok bool)
+	// OwnPages: the game serves its own public pages (/games, /games/{id});
+	// the kit only lists them (Listing).
+	OwnPages bool
+	// Table, if set, draws the game as a table on its public page and its
+	// follow-along page (spectate.go).
+	Table *Table
+	// Theme styles the follow-along page and the public pages; without one
+	// they have the kit's plain look.
 	Theme *Theme
 	// Static is the game's own files (images, say), served under /static/.
 	// Link to them with StaticURL.
 	Static fs.FS
+	// Rules is the page at /rules, if the game has one: the public pages
+	// link to it.
+	Rules http.HandlerFunc
 	// Landing is the page at /, if the game has one.
 	Landing http.HandlerFunc
 	// Legal is the game's terms and privacy policy (/terms, /tos, /privacy).
+	// With it, guest sign-in shows the authorize page first (authorize.go),
+	// whose Authorize button is where players agree to them, so the game's
+	// pages and tools don't repeat it.
 	Legal *legal.Pages
-	Now   func() time.Time
+	// Logo, if set, is a file in Static shown on the authorize page.
+	Logo string
+	Now  func() time.Time
 
 	// The games: where they're kept, their rooms' group prefix
 	// ("app.nightfall.game."), and seats per game.
 	Store    *Store
 	Prefix   string
 	MaxSeats int
+	// LobbyPhase, for a game that stays open to joiners while it plays
+	// (Sketch Stadium's rooms), is the phase it waits for players in: the
+	// lobby (GET /api/lobby) shows only open games in that phase as
+	// waiting, and counts the rest as playing. Empty: every open game is
+	// waiting.
+	LobbyPhase string
 	// NewState is an empty state of the game's own type (a pointer to a
 	// struct embedding Game), to read a game into.
 	NewState func() State
@@ -79,16 +106,31 @@ type Server struct {
 	// seats in one game, so one person can demo a game with their own
 	// agents. Nil: the rule applies to everyone.
 	SharedSeats map[string]bool
+	// HouseSecret checks house agents' claims (HOUSE_SECRET, house.go):
+	// they're labelled as house players. Empty: there are no house agents.
+	HouseSecret string
+	// OperatorNote offers moves' operator note (GAMES_OPERATOR_NOTE,
+	// thinking.go). Off: no tool lists it, and a call's note is dropped.
+	OperatorNote bool
+	// PlayerName, if set, is the name a player (PlayerKey) asks its game's
+	// room for, the same in every game it plays: a lowercase handle
+	// ([a-z][a-z0-9-], at most 24 characters). Wakeshift adds -2, -3… if
+	// another player in the room has it. Nil: a random animal per game.
+	PlayerName func(key string) string
 
 	ticking    atomic.Bool
 	forgotAt   atomic.Int64 // when forget last ran (UnixNano)
 	follows    followCache
+	listing    listingCache   // spectate.go
+	spectate   spectateAssets // spectate.go
 	slotsOnce  sync.Once
 	calls      chan struct{}
 	staticOnce sync.Once
 	staticHash map[string]string // file name → a short hash of its content
 	guestOnce  sync.Once
 	guestAuth  *appkit.GuestAuth
+	eventsOnce sync.Once
+	updates    *appkit.DefinedEvent[UpdateArgs, appkit.GroupMessage] // events.go
 }
 
 // ParseWorkspaces reads a comma-separated list of workspace IDs (UUIDs)
@@ -142,6 +184,7 @@ func (s *Server) now() time.Time {
 
 // Start publishes the manifest, retrying until Wakeshift accepts it.
 func (s *Server) Start(ctx context.Context) error {
+	s.events() // its event types go in the manifest
 	for wait := time.Second; ; wait = min(wait*2, time.Minute) {
 		attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err := s.Kit.PublishManifest(attempt, s.Manifest)
@@ -163,28 +206,35 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) Handler(addTools func(*mcp.Server)) http.Handler {
 	srv := mcp.NewServer(&mcp.Implementation{Name: s.Name, Title: s.Title, Version: "0.1.0"}, &mcp.ServerOptions{Instructions: s.Instructions})
 	addTools(srv)
+	// The operator note: its legacy name, and off unless OperatorNote (thinking.go).
+	srv.AddReceivingMiddleware(s.operatorNotes)
 	// Codex threads: a fresh connector beacon while one is watching and its
 	// connector isn't connected (appkit/codex.go).
 	srv.AddReceivingMiddleware(appkit.ConnectorBeacons(s.Agent, appkit.AllTools))
 	// Harnesses nothing wakes: a note on results while messages wait for
 	// the wait tool (AddWatch).
 	srv.AddReceivingMiddleware(appkit.InboxNotes(s.Agent, "", appkit.AllTools))
+	// game.update for clients that subscribe with MCP Events (events.go).
+	s.events()
+	attached := s.Kit.Attach(srv, appkit.AttachOptions{Identify: s.identify})
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", appkit.LogMCP(auth.RequireBearerToken(s.verify, &auth.RequireBearerTokenOptions{ResourceMetadataURL: s.PublicURL() + "/.well-known/oauth-protected-resource"})(h)))
-	if s.headless() {
-		// Players sign in as guests: no Wakeshift account (docs/headless.md).
-		s.guest().Routes(mux)
-	} else {
-		mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.Kit.ResourceMetadata)
-		mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.Kit.ResourceMetadata)
-	}
+	mux.Handle("/mcp", appkit.LogMCP(appkit.RequireBearer(s.verify, s.PublicURL()+"/.well-known/oauth-protected-resource")(attached.Wrap(h))))
+	// Players sign in as guests: no Wakeshift account,
+	// agreeing to the game's terms on its authorize page (authorize.go).
+	s.guestRoutes(mux)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	s.followRoutes(mux)
 	s.staticRoutes(mux)
 	s.tickRoutes(mux)
+	s.lobbyRoutes(mux)
+	s.spectateRoutes(mux)
 	if s.Landing != nil {
 		mux.HandleFunc("GET /{$}", s.Landing)
+		mux.Handle("GET /agent-picker/", agentpicker.Handler()) // the landing's "connect your agent" picker
+	}
+	if s.Rules != nil {
+		mux.HandleFunc("GET /rules", s.Rules)
 	}
 	if s.Legal != nil {
 		s.Legal.Routes(mux)
@@ -195,48 +245,43 @@ func (s *Server) Handler(addTools func(*mcp.Server)) http.Handler {
 // PublicURL is the app's public URL (its MCP URL without /mcp).
 func (s *Server) PublicURL() string { return strings.TrimSuffix(s.Kit.MCPURL, "/mcp") }
 
-// headless reports whether players sign in as guests (the default) rather
-// than with Wakeshift accounts (Manifest.Accounts "wakeshift").
-func (s *Server) headless() bool { return s.Manifest.Accounts != "wakeshift" }
-
 func (s *Server) guest() *appkit.GuestAuth {
 	s.guestOnce.Do(func() { s.guestAuth = &appkit.GuestAuth{App: s.Kit, ProxyHops: s.ProxyHops} })
 	return s.guestAuth
 }
 
 func (s *Server) verify(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
-	if s.headless() {
-		g, err := s.guest().Verify(token)
-		if err != nil {
-			return nil, auth.ErrInvalidToken
-		}
-		return &auth.TokenInfo{UserID: g.Workspace + "/" + g.Agent, Expiration: g.Expires,
-			Extra: map[string]any{"workspace": g.Workspace, "agent": g.Agent}}, nil
-	}
-	c, err := s.Kit.Verify(ctx, token)
+	g, err := s.guest().Verify(token)
 	if err != nil {
-		return nil, auth.ErrInvalidToken
+		return nil, err // an appkit.TokenError: auth.ErrInvalidToken, with why
 	}
-	return &auth.TokenInfo{UserID: c.Workspace + "/" + c.Agent, Expiration: time.Unix(c.Expires, 0), Extra: map[string]any{"token": token}}, nil
+	return &auth.TokenInfo{UserID: g.Workspace + "/" + g.Agent, Expiration: g.Expires,
+		Extra: map[string]any{"workspace": g.Workspace, "agent": g.Agent}}, nil
 }
 
 // Agent is the app acting for the calling agent.
 func (s *Server) Agent(ctx context.Context, req *mcp.CallToolRequest) (*appkit.Agent, error) {
-	if req.Extra == nil || req.Extra.TokenInfo == nil {
+	if req.Extra == nil {
 		return nil, errors.New("not signed in")
 	}
-	if ws, _ := req.Extra.TokenInfo.Extra["workspace"].(string); ws != "" {
-		agent, _ := req.Extra.TokenInfo.Extra["agent"].(string)
-		ag, err := s.Kit.ActAs(ctx, ws, agent)
-		if appkit.IsCode(err, "no_grant") {
-			return nil, fmt.Errorf("%s isn't allowed for this agent any more; sign in again (in Claude Code: /mcp, then Authenticate)", s.Title)
-		}
-		return ag, err
+	return s.agentOf(ctx, req.Extra.TokenInfo)
+}
+
+// agentOf is the app acting for the signed-in guest's agent, in the guest's
+// workspace. It's also how a native subscription to game.update is made,
+// beside the seat's membership of its room.
+func (s *Server) agentOf(ctx context.Context, ti *auth.TokenInfo) (*appkit.Agent, error) {
+	if ti == nil {
+		return nil, errors.New("not signed in")
 	}
-	token, _ := req.Extra.TokenInfo.Extra["token"].(string)
-	ag, err := s.Kit.Exchange(ctx, token)
-	if appkit.IsCode(err, "invalid_grant") {
-		return nil, fmt.Errorf("%s isn't allowed for this agent any more (the consent was revoked or expired); sign in again", s.Title)
+	ws, _ := ti.Extra["workspace"].(string)
+	agent, _ := ti.Extra["agent"].(string)
+	if ws == "" {
+		return nil, errors.New("not signed in")
+	}
+	ag, err := s.Kit.ActAs(ctx, ws, agent)
+	if appkit.IsCode(err, "no_grant") {
+		return nil, fmt.Errorf("%s isn't allowed for this agent any more; sign in again (in Claude Code: /mcp, then Authenticate)", s.Title)
 	}
 	return ag, err
 }

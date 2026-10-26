@@ -37,8 +37,8 @@ code, .mono { font-family: var(--mono); }
 .site-head.home .wrap { padding-top: 24px; padding-bottom: 24px; gap: 24px; }
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text); }
 .brand:hover { color: var(--text); }
-.chip-logo { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--brass); color: var(--ground); font: 800 14px var(--display); box-shadow: inset 0 0 0 2px var(--ground), inset 0 0 0 4px var(--brass); flex: none; }
-.home .chip-logo { width: 40px; height: 40px; font-size: 18px; box-shadow: inset 0 0 0 3px var(--ground), inset 0 0 0 5px var(--brass); }
+.chip-logo { display: block; width: 32px; height: 32px; flex: none; }
+.home .chip-logo { width: 40px; height: 40px; }
 .brand-name { font: 800 18px var(--display); letter-spacing: -0.01em; }
 .home .brand-name { font-size: 22px; letter-spacing: -0.02em; }
 .nav { display: flex; gap: 24px; align-items: center; flex-wrap: wrap; font-size: 15px; }
@@ -111,11 +111,6 @@ code, .mono { font-family: var(--mono); }
 .seat.empty .plate { background: transparent; border-style: dashed; box-shadow: none; color: var(--text-3); }
 .seat .timer { width: 132px; height: 5px; display: block; }
 .dealer { position: absolute; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--ivory); color: var(--ground); font: 800 13px var(--display); transform: translate(-50%, -50%); }
-/* Six seats around the table (and where the dealer button sits for each). */
-.s0 { left: 50%; top: -4%; } .s1 { left: 96%; top: 24%; } .s2 { left: 90%; top: 90%; }
-.s3 { left: 50%; top: 106%; } .s4 { left: 8%; top: 90%; } .s5 { left: 4%; top: 24%; }
-.d0 { left: 40%; top: 20%; } .d1 { left: 78%; top: 32%; } .d2 { left: 76%; top: 72%; }
-.d3 { left: 60%; top: 82%; } .d4 { left: 24%; top: 72%; } .d5 { left: 22%; top: 32%; }
 
 /* Landing */
 .hero { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(480px, 100%), 1fr)); gap: 56px; align-items: center; padding-top: 56px; padding-bottom: 96px; }
@@ -146,10 +141,16 @@ code, .mono { font-family: var(--mono); }
 .steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 14px; }
 .steps li { display: flex; gap: 14px; align-items: baseline; }
 .steps .n { font-family: var(--mono); color: var(--brass); }
-.howto { display: flex; flex-direction: column; gap: 12px; padding: 28px; border-radius: 20px; background: var(--panel); border: 1px solid var(--line); }
+.howto { min-width: 0; padding: 28px; border-radius: 20px; background: var(--panel); border: 1px solid var(--line); }
 .tabs { display: flex; gap: 8px; flex-wrap: wrap; }
-.command { font: 14px/1.6 var(--mono); color: var(--text); background: var(--ground); border: 1px solid var(--line); border-radius: 12px; padding: 18px; overflow-x: auto; white-space: pre; margin: 0; }
-.howto [hidden] { display: none; }
+/* The agent picker (/agent-picker/agent-picker.css), on the felt. */
+.howto .ap { --ap-fg: var(--text); --ap-muted: var(--text-3); --ap-line: var(--line-3); --ap-accent: var(--brass); --ap-on-fg: var(--ground);
+  --ap-code-bg: var(--ground); --ap-code-fg: var(--text); --ap-box-radius: 12px; --ap-mono: var(--mono); }
+.howto .ap .ap-pill { min-height: 44px; font: 500 14px var(--body); }
+.howto .ap .ap-pill[aria-pressed="true"] { font-weight: 600; }
+.howto .ap-code { border: 1px solid var(--line); padding: 16px 18px; font-size: 14px; }
+.howto .ap-say { color: var(--text-2); }
+.howto .ap-say q { color: var(--text); }
 .section { padding-bottom: 96px; }
 .section-head { display: flex; justify-content: space-between; align-items: end; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
 .section-head h2 { font: 800 36px var(--display); letter-spacing: -.02em; }
@@ -169,8 +170,7 @@ a.tile:hover { border-color: var(--line-3); color: var(--text); }
 .table-title .rule { width: 1px; height: 24px; background: var(--line); }
 .table-title h1 { font: 600 18px var(--display); }
 .table-main { display: flex; flex-wrap: wrap; gap: 28px; padding-top: 28px; padding-bottom: 28px; }
-.table-stage { flex: 999 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 20px; }
-.table-stage .felt { aspect-ratio: 1.75; margin: 72px 56px 72px; }
+.table-stage { flex: 999 1 760px; min-width: 0; display: flex; flex-direction: column; gap: 20px; container: stage / inline-size; }
 .table-side { flex: 1 1 340px; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 .fingerprint { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 14px 18px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); }
 .fingerprint .label { font-size: 12px; color: var(--text-3); }
@@ -184,19 +184,25 @@ a.tile:hover { border-color: var(--line-3); color: var(--text); }
 .log .what.allin { color: var(--alert); }
 .log .what.deal { color: var(--mint-2); }
 .log .what.win { color: var(--brass); }
+.log li.has-note, .replay-log li.has-note { flex-wrap: wrap; }
+.log li .note, .replay-log li .note { flex-basis: 100%; font-size: 13px; color: var(--text-2); font-style: italic; overflow-wrap: anywhere; }
 .talk { display: flex; flex-direction: column; gap: 10px; }
+/* The hand's log and the table talk scroll, newest last; table.js keeps them at the newest line unless the reader has scrolled up. */
+.log.scroll, .talk.scroll { max-height: 420px; overflow-y: auto; overscroll-behavior: contain; padding-right: 6px; scrollbar-width: thin; }
+.log.scroll:focus-visible, .talk.scroll:focus-visible { outline: 2px solid var(--brass); outline-offset: 4px; }
+@media (max-width: 720px) { .log.scroll, .talk.scroll { max-height: 320px; } }
 .talk .line { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 12px; background: var(--ground); }
 .talk .who { font-size: 12px; font-weight: 600; }
 .talk .said { font-size: 14px; line-height: 1.45; color: var(--text); overflow-wrap: anywhere; }
 .c0 { color: var(--brass); } .c1 { color: var(--mint-2); } .c2 { color: var(--alert); } .c3 { color: #C9B6FF; } .c4 { color: #8FC8FF; } .c5 { color: #F5A3C7; }
 .hint { font-size: 12px; color: var(--text-3); }
 .recent a { text-decoration: none; }
-/* The phone layout of the table: the board, then the players as a list. */
+/* The phone layout of the table: the board, then the players as a list. It
+   takes over whenever the table area is narrower than the felt needs. */
 .phone-board { display: none; }
 .phone-seats { display: none; }
-@media (max-width: 720px) {
-  .wrap, .wrap.wide { padding-left: 18px; padding-right: 18px; }
-  .table-stage .felt { display: none; }
+@container stage (max-width: 759px) {
+  .arena { display: none; }
   .phone-board { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 18px; border-radius: 22px; background: radial-gradient(ellipse at 50% 30%, #1E5A45 0%, #133E30 60%, #0E2C23 100%); }
   .phone-board .card { width: 52px; height: 74px; border-radius: 7px; padding: 5px 7px; font-size: 19px; }
   .phone-board .card .suit { width: 22px; height: 22px; }
@@ -214,6 +220,9 @@ a.tile:hover { border-color: var(--line-3); color: var(--text); }
   .prow .status.allin { color: var(--alert); }
   .prow .status.out { color: var(--text-3); }
   .prow .chips { font: 700 14px var(--mono); color: var(--brass); min-width: 48px; text-align: right; }
+}
+@media (max-width: 720px) {
+  .wrap, .wrap.wide { padding-left: 18px; padding-right: 18px; }
   .table-head .tag, .table-head .live, .table-title .rule { display: none; }
   .table-head .brand-name { display: none; }
   .table-head .actions .btn-brass { display: none; }
@@ -330,11 +339,140 @@ table.board tr[hidden] { display: none; }
 .message { display: flex; flex-direction: column; gap: 16px; padding-top: 96px; padding-bottom: 120px; max-width: 640px; }
 .message h1 { font: 800 48px/1 var(--display); letter-spacing: -.03em; }
 .message p { color: var(--text-2); font-size: 18px; }
-.draft { margin: 32px 0 0; padding: 12px 16px; border-radius: 12px; border: 1px solid #6B5A2E; background: rgba(242,181,68,.06); color: var(--text-2); font-size: 14px; }
-.prose { max-width: 760px; padding-top: 24px; padding-bottom: 96px; color: var(--text-2); line-height: 1.7; }
+.prose { max-width: 760px; padding-top: 48px; padding-bottom: 96px; color: var(--text-2); line-height: 1.7; }
 .prose h1 { font: 800 44px/1.05 var(--display); letter-spacing: -.03em; color: var(--text); margin: 0 0 24px; }
 .prose h2 { font: 800 24px var(--display); color: var(--text); margin: 36px 0 12px; }
 .prose p, .prose ul { margin: 0 0 14px; }
 .prose li { margin-bottom: 6px; }
 .prose strong { color: var(--text); }
 .prose code { font-size: 14px; background: var(--panel); padding: 2px 6px; border-radius: 6px; }
+
+/* Live table: bets in front of players, the watch page's own cards, and the
+   animations' pieces (live script: table.js). */
+.wager { position: absolute; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 6px; pointer-events: none; }
+.wager .stack { position: relative; width: 22px; height: 22px; }
+.wager .stack i { position: absolute; left: 0; width: 22px; height: 8px; border-radius: 50%; background: var(--brass); box-shadow: inset 0 -2px 0 rgba(0,0,0,.35), 0 0 0 1px #8A6420; }
+.wager .stack i:nth-child(1) { top: 12px; } .wager .stack i:nth-child(2) { top: 7px; } .wager .stack i:nth-child(3) { top: 2px; }
+.wager .amt { font: 700 13px var(--mono); color: var(--text); background: rgba(11,20,17,.72); padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.seat.mine .plate { border-color: var(--mint); box-shadow: 0 0 0 3px rgba(95,224,160,.18), 0 10px 24px rgba(0,0,0,.45); }
+.seat.mine.acting .plate { border-color: var(--brass); }
+.yours { font: 600 10px var(--body); letter-spacing: .08em; text-transform: uppercase; color: var(--mint); }
+.cards.mine .card { box-shadow: 0 0 0 2px var(--mint), 0 6px 14px rgba(0,0,0,.35); }
+.cards.mine.folded { opacity: .45; }
+.mine-panel .cards { justify-content: flex-start; }
+.thinking-panel .thinking .what { font-style: italic; opacity: .85; white-space: normal; text-align: left; }
+.caption { min-height: 24px; margin: 0; font: 500 15px var(--body); color: var(--text-2); text-align: center; }
+.caption b { color: var(--text); font-weight: 600; }
+.caption q { color: var(--brass-hi); font-style: italic; }
+/* The live table on the table page. One layout, in the units of a 900×600
+   table: --u is one of those units at the table's current width (container
+   units), so every piece keeps its place relative to the others at any size
+   and nothing can collide at one size but not another. The felt is drawn
+   inside the area; seats, cards, timers, chips and the dealer button are
+   placed by their seat, never outside the area, so the caption above it is
+   always clear. (The phone list takes over below the width the felt needs.) */
+.arena { position: relative; container-type: inline-size; aspect-ratio: 900 / 600; --u: calc(100cqw / 900); }
+.arena .oval { position: absolute; left: calc(95 * var(--u)); top: calc(120 * var(--u)); width: calc(710 * var(--u)); height: calc(360 * var(--u)); border-radius: 50%; background: radial-gradient(ellipse at 50% 38%, #1E5A45 0%, #133E30 58%, #0E2C23 100%); box-shadow: 0 0 0 calc(14 * var(--u)) #1A120B, 0 0 0 calc(16 * var(--u)) #3A2A1A, 0 calc(30 * var(--u)) calc(70 * var(--u)) rgba(0,0,0,.55); }
+.arena-live, .arena-fx { position: absolute; inset: 0; }
+.arena-fx { pointer-events: none; z-index: 6; }
+.arena .middle { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.arena .middle > div { display: flex; flex-direction: column; align-items: center; gap: calc(12 * var(--u)); }
+.arena .street { font-size: calc(12 * var(--u)); line-height: 1.25; }
+.arena [data-board] { gap: calc(8 * var(--u)); flex-wrap: nowrap; }
+.arena [data-board] .card { width: calc(54 * var(--u)); height: calc(76 * var(--u)); border-radius: calc(7 * var(--u)); padding: calc(6 * var(--u)) calc(7 * var(--u)); font-size: calc(20 * var(--u)); }
+.arena [data-board] .card .suit { width: calc(22 * var(--u)); height: calc(22 * var(--u)); }
+.arena [data-board] .card.empty { border-width: calc(2 * var(--u)); }
+.arena .pots { gap: calc(8 * var(--u)); flex-wrap: nowrap; }
+.arena .pot { font-size: calc(15 * var(--u)); padding: calc(5 * var(--u)) calc(13 * var(--u)); }
+.arena .side-pot { font-size: calc(12 * var(--u)); padding: calc(5 * var(--u)) calc(11 * var(--u)); white-space: nowrap; }
+/* A seat is its plate (centred on --px, --py), its cards (on --cx, --cy) and,
+   while it's to act, its timer just under the plate. */
+.arena .seat { display: contents; }
+.arena .seat .plate { position: absolute; left: calc(var(--px) * var(--u)); top: calc(var(--py) * var(--u)); transform: translate(-50%, -50%); box-sizing: border-box; width: calc(170 * var(--u)); height: calc(112 * var(--u)); min-width: 0; justify-content: center; gap: calc(3 * var(--u)); padding: calc(8 * var(--u)) calc(12 * var(--u)); border-radius: calc(14 * var(--u)); border-width: max(1px, calc(2 * var(--u))); box-shadow: 0 calc(10 * var(--u)) calc(24 * var(--u)) rgba(0,0,0,.45); }
+.arena .seat .plate > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arena .seat .who { font-size: calc(15 * var(--u)); }
+.arena .seat .via { font-size: calc(12 * var(--u)); }
+.arena .seat .chips { font-size: calc(14 * var(--u)); }
+.arena .seat .status { font-size: calc(12 * var(--u)); min-height: calc(15 * var(--u)); }
+.arena .seat .yours { font-size: calc(11 * var(--u)); }
+.arena .seat [data-cards] { position: absolute; left: calc(var(--cx) * var(--u)); top: calc(var(--cy) * var(--u)); transform: translate(-50%, -50%); gap: calc(4 * var(--u)); }
+.arena .seat [data-cards] .card { width: calc(32 * var(--u)); height: calc(45 * var(--u)); border-radius: calc(5 * var(--u)); padding: calc(3 * var(--u)) calc(5 * var(--u)); font-size: calc(14 * var(--u)); }
+.arena .seat [data-cards] .card.back { padding: 0; box-shadow: inset 0 0 0 calc(2 * var(--u)) var(--ivory); }
+.arena .seat [data-cards] .card .suit { width: calc(13 * var(--u)); height: calc(13 * var(--u)); }
+.arena .seat .timer { position: absolute; left: calc(var(--px) * var(--u)); top: calc((var(--py) + 66.5) * var(--u)); transform: translate(-50%, -50%); width: calc(132 * var(--u)); height: calc(5 * var(--u)); }
+/* Where each seat sits. The top seat's cards are beside its plate, so nothing
+   rises above the plate; the others' cards are above theirs, toward the felt.
+   Each seat's speech bubble has its own place, fitted around these, the
+   chips and the dealer button (.bubble.at0 to .at5 below): moving any of
+   them means moving those too. The layout test fails if a bubble leaves its
+   seat or covers anything. */
+.arena .s0 { --px: 450; --py: 64; --cx: 321; --cy: 64; }
+.arena .s1 { --px: 805; --py: 186; --cx: 805; --cy: 101; }
+.arena .s2 { --px: 775; --py: 512; --cx: 775; --cy: 427; }
+.arena .s3 { --px: 450; --py: 520; --cx: 450; --cy: 435; }
+.arena .s4 { --px: 125; --py: 512; --cx: 125; --cy: 427; }
+.arena .s5 { --px: 95; --py: 186; --cx: 95; --cy: 101; }
+/* Chips each player has put in this round: between the seat and the pot. */
+.arena .wager { left: calc(var(--x) * var(--u)); top: calc(var(--y) * var(--u)); gap: calc(6 * var(--u)); }
+.arena .wager .stack { width: calc(22 * var(--u)); height: calc(22 * var(--u)); }
+.arena .wager .stack i { width: calc(22 * var(--u)); height: calc(8 * var(--u)); }
+.arena .wager .stack i:nth-child(1) { top: calc(12 * var(--u)); } .arena .wager .stack i:nth-child(2) { top: calc(7 * var(--u)); } .arena .wager .stack i:nth-child(3) { top: calc(2 * var(--u)); }
+.arena .wager .amt { font-size: calc(13 * var(--u)); padding: calc(2 * var(--u)) calc(8 * var(--u)); }
+.arena .b0 { --x: 450; --y: 176; } .arena .b1 { --x: 655; --y: 220; } .arena .b2 { --x: 640; --y: 410; }
+.arena .b3 { --x: 450; --y: 393; } .arena .b4 { --x: 260; --y: 410; } .arena .b5 { --x: 245; --y: 220; }
+/* The dealer button, by the dealer's seat. */
+.arena .dealer { left: calc(var(--x) * var(--u)); top: calc(var(--y) * var(--u)); width: calc(28 * var(--u)); height: calc(28 * var(--u)); font-size: calc(13 * var(--u)); }
+.arena .d0 { --x: 380; --y: 178; } .arena .d1 { --x: 700; --y: 268; } .arena .d2 { --x: 660; --y: 466; }
+.arena .d3 { --x: 560; --y: 470; } .arena .d4 { --x: 240; --y: 440; } .arena .d5 { --x: 200; --y: 268; }
+/* The animations' pieces, in the area's own layer (live updates don't touch it). */
+.fx { position: absolute; z-index: 5; pointer-events: none; margin: 0; }
+.arena-fx .cards { gap: calc(4 * var(--u)); }
+.arena-fx .cards .card { width: calc(32 * var(--u)); height: calc(45 * var(--u)); border-radius: calc(5 * var(--u)); padding: calc(3 * var(--u)) calc(5 * var(--u)); font-size: calc(14 * var(--u)); }
+.arena-fx .cards .card.back { padding: 0; box-shadow: inset 0 0 0 calc(2 * var(--u)) var(--ivory); }
+.arena-fx .cards .card .suit { width: calc(13 * var(--u)); height: calc(13 * var(--u)); }
+/* A move's message, by the player who made it. Each seat has its own place
+   for one, beside its plate (or above its cards), in the table's own units:
+   it scales with the table, never moves elsewhere, and no two seats' places
+   overlap each other or any other piece, so six can be up at once. Its tail
+   points at the seat. Long messages are cut to the lines the place holds;
+   the hand's log has them in full. --x is the left edge; --top or --bottom
+   the edge nearest the seat; --w the width; --lines the most lines shown. */
+.bubble { position: absolute; z-index: 6; box-sizing: border-box; left: calc(var(--x) * var(--u)); width: calc(var(--w) * var(--u)); padding: calc(7 * var(--u)) calc(11 * var(--u)); border-radius: calc(12 * var(--u)); background: var(--ivory); color: var(--black); font: 500 calc(12.5 * var(--u))/1.32 var(--body); box-shadow: 0 calc(8 * var(--u)) calc(20 * var(--u)) rgba(0,0,0,.4); pointer-events: none; overflow-wrap: anywhere; transition: opacity .6s ease; }
+.bubble.top { top: calc(var(--top) * var(--u)); }
+.bubble.bottom { bottom: calc((600 - var(--bottom)) * var(--u)); }
+.bubble b { display: block; font: 700 calc(10.5 * var(--u))/1.25 var(--mono); letter-spacing: .04em; color: #4A5A52; margin-bottom: calc(2 * var(--u)); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bubble .said { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--lines); max-height: calc(var(--lines) * 1.32em); overflow: hidden; }
+.bubble.fading { opacity: 0; }
+.bubble.fresh { animation: bubble-in .22s cubic-bezier(.2,.7,.2,1); }
+@keyframes bubble-in { from { opacity: 0; transform: scale(.94); } }
+.bubble::after { content: ""; position: absolute; width: calc(10 * var(--u)); height: calc(10 * var(--u)); background: var(--ivory); transform: rotate(45deg); }
+/* Tails: l and r point sideways at the plate, b down at the seat's cards. */
+.bubble.tail-l::after { left: calc(-5 * var(--u)); top: min(calc(var(--tail) * var(--u)), calc(100% - 15 * var(--u))); }
+.bubble.tail-r::after { right: calc(-5 * var(--u)); top: min(calc(var(--tail) * var(--u)), calc(100% - 15 * var(--u))); }
+.bubble.tail-l.bottom::after, .bubble.tail-r.bottom::after { top: auto; bottom: calc(var(--tail) * var(--u)); }
+.bubble.tail-b::after { bottom: calc(-5 * var(--u)); left: calc(var(--tail) * var(--u)); margin-left: calc(-5 * var(--u)); }
+/* The places, in the table's 900 by 600 units (seats as in .s0 to .s5 above). */
+.bubble.at0 { --x: 538; --top: 10; --w: 220; --lines: 3; --tail: 49; }
+.bubble.at1 { --x: 547; --bottom: 188; --w: 170; --lines: 3; --tail: 12; }
+.bubble.at2 { --x: 718; --bottom: 401; --w: 176; --lines: 4; --tail: 57; }
+.bubble.at3 { --x: 220; --top: 462; --w: 142; --lines: 5; --tail: 53; }
+.bubble.at4 { --x: 6; --bottom: 401; --w: 176; --lines: 4; --tail: 119; }
+.bubble.at5 { --x: 183; --bottom: 188; --w: 170; --lines: 3; --tail: 12; }
+/* On a phone, the same message sits in the player's row. */
+.prow .psaid { flex-basis: 100%; margin: 2px 0 0; padding: 6px 10px; border-radius: 10px; background: var(--ivory); color: var(--black); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; transition: opacity .6s ease; }
+.prow .psaid.fading { opacity: 0; }
+.prow:has(.psaid) { flex-wrap: wrap; }
+/* A check or an all-in: a badge on the player's own plate, over its status line. */
+.tap { position: absolute; z-index: 6; transform: translate(-50%, -50%); padding: calc(3 * var(--u)) calc(9 * var(--u)); border-radius: 999px; background: var(--mint); color: var(--ground); font: 700 calc(11 * var(--u)) var(--mono); letter-spacing: .06em; white-space: nowrap; pointer-events: none; }
+.tap.allin { background: var(--alert); }
+/* The winner, above the board. */
+.toast { position: absolute; z-index: 6; left: 50%; top: calc(205 * var(--u)); transform: translate(-50%, -50%); max-width: calc(300 * var(--u)); padding: calc(7 * var(--u)) calc(15 * var(--u)); border-radius: 999px; background: var(--brass); color: var(--ground); font: 700 calc(13 * var(--u)) var(--display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+@media (max-width: 720px) {
+  .prow .cards.mine { flex: none; }
+  .prow.flash { border-color: var(--mint); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fx { display: none; }
+  .bubble, .prow .psaid { transition: none; }
+  .bubble.fresh { animation: none; }
+}

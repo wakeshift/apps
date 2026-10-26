@@ -16,6 +16,9 @@
 //	                          Google's load balancer: 2), for guest sign-in's per-address limits
 //	GAMES_SHARED_SEAT_WORKSPACES  workspace IDs (UUIDs, comma-separated) whose players may take several
 //	                        seats in one game, for demos (optional; default: none, one seat per workspace)
+//	HOUSE_SECRET              shared with Wakeshift's house service: lets its agents prove they're
+//	                          house agents, labelled as such (optional; at least 32 bytes)
+//	GAMES_OPERATOR_NOTE       1: moves offer an optional note for the player's operator (default off)
 //	PORT                      listen port (default 8080)
 package main
 
@@ -57,6 +60,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("GAMES_SHARED_SEAT_WORKSPACES: %w", err)
 	}
+	house, err := gamekit.HouseSecretEnv()
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	open, cancel := context.WithTimeout(ctx, time.Minute)
@@ -66,7 +73,7 @@ func run() error {
 		return err
 	}
 	defer store.Close()
-	app := &secretagent.App{Kit: kit, Store: store, SharedSeats: shared}
+	app := &secretagent.App{Kit: kit, Store: store, SharedSeats: shared, HouseSecret: house, OperatorNote: gamekit.OperatorNoteEnv()}
 	app.ProxyHops, _ = strconv.Atoi(os.Getenv("PROXY_HOPS"))
 	if account := os.Getenv("SECRETAGENT_TICK_ACCOUNT"); account != "" {
 		app.TickAuth = gamekit.GoogleTickAuth(public+"/tick", account)

@@ -1,7 +1,7 @@
 // Package slackline is Slackline: chat with your own agents (Claude Code,
-// Codex and the rest) from Slack. A headless app on Wakeshift's topics
-// (docs/topics.md, docs/headless.md): people sign in with Slack, not with
-// Wakeshift.
+// Codex and the rest) from Slack. A headless app on Wakeshift's events
+// (its slack.message event): people sign in with Slack,
+// not with Wakeshift.
 //
 //   - A workspace adds the Slack app; people sign in to Slackline's console
 //     with Slack.
@@ -40,12 +40,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wakeshift/apps/agentpicker"
+	"github.com/wakeshift/apps/legal"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // App serves Slackline.
 type App struct {
-	Kit    *appkit.App // the app's Wakeshift client (topics)
+	Kit    *appkit.App // the app's Wakeshift client (events)
 	Store  *Store
 	Slack  *Slack
 	URL    string // this server's public URL, without a trailing slash
@@ -55,6 +57,10 @@ type App struct {
 	limits  sync.Map     // listener ID → *window (agent posts per minute)
 	calls   atomic.Int64 // allowPost calls, for sweeping limits
 	members sync.Map     // team/user → membership (the channels they're in)
+	people  sync.Map     // team/user → cachedPerson (users.info)
+
+	eventsOnce   sync.Once
+	slackMessage *appkit.DefinedEvent[MessageArgs, Message]
 }
 
 func (a *App) now() time.Time {
@@ -68,6 +74,7 @@ func (a *App) now() time.Time {
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", a.landing)
+	mux.Handle("GET /agent-picker/", agentpicker.Handler())
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") })
 	mux.HandleFunc("GET /slack/manifest.json", a.manifest)
 	legalPages.Routes(mux) // /terms, /tos, /privacy
@@ -76,6 +83,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /signin", a.signin)
 	mux.HandleFunc("GET /auth/slack/callback", a.signinCallback)
 	mux.HandleFunc("POST /signout", a.form(a.signout))
+	mux.HandleFunc("POST /understood", a.form(a.understood))
 	mux.HandleFunc("GET /install", a.install)
 	mux.HandleFunc("GET /slack/callback", a.installCallback)
 	mux.HandleFunc("GET /home", a.home)
@@ -118,13 +126,9 @@ func (a *App) MCPURL() string { return a.URL + "/mcp" }
 // ── Identities ───────────────────────────────────────────────────────────
 
 // wsUser is the person's ID in Wakeshift: their workspace (headless, kept by
-// Wakeshift for Slackline) and their private topics u/<wsUser>/….
+// Wakeshift for Slackline), and the user of their slack.message events.
 func wsUser(team, user string) string {
 	return strings.ToLower(team) + "." + strings.ToLower(user)
-}
-
-func listenerTopic(team, user, listener string) string {
-	return "u/" + wsUser(team, user) + "/l/" + listener
 }
 
 // mac is an HMAC of parts, for one purpose, keyed by the app's secret.
@@ -302,6 +306,13 @@ func (a *App) signinCallback(w http.ResponseWriter, r *http.Request) {
 		a.message(w, r, http.StatusBadGateway, "Slack didn't finish signing you in.", "/signin")
 		return
 	}
+	if ok, err := a.mayConnect(r.Context(), User{TeamID: id.TeamID, UserID: id.UserID}); err != nil {
+		a.failed(w, r, err)
+		return
+	} else if !ok {
+		a.message(w, r, http.StatusForbidden, notMemberText, "")
+		return
+	}
 	u, err := a.Store.SignIn(r.Context(), User{TeamID: id.TeamID, UserID: id.UserID, Name: id.Name, TeamName: id.TeamName})
 	if err != nil {
 		a.failed(w, r, err)
@@ -310,6 +321,16 @@ func (a *App) signinCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: stateCookie, Path: "/auth/slack/callback", MaxAge: -1})
 	a.startSession(w, u)
 	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// understood records that the person read where their agents' messages go
+// (needed before they connect an agent), audited.
+func (a *App) understood(w http.ResponseWriter, r *http.Request, u User) {
+	if err := a.Store.Understand(r.Context(), u.TeamID, u.UserID, "console"); err != nil {
+		a.failed(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/home#connect", http.StatusSeeOther)
 }
 
 func (a *App) signout(w http.ResponseWriter, r *http.Request, u User) {
@@ -343,6 +364,26 @@ func (a *App) installCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Warn("slackline: install failed", "err", err)
 		a.message(w, r, http.StatusBadGateway, "Slack didn't finish adding Slackline.", "/install")
+		return
+	}
+	// A workspace reinstalling before its earlier data is deleted: finish
+	// deleting it first, so the deletion never takes the new install.
+	// It holds the workspace's deletion lock from the check to the save, so
+	// no deletion runs in between (and one recorded meanwhile keeps the new
+	// install: ForgetTeam deletes only installs from before it).
+	release, ok, err := a.Store.LockDeletion(r.Context(), in.TeamID)
+	if err != nil {
+		a.failed(w, r, err)
+		return
+	}
+	if !ok {
+		a.message(w, r, http.StatusServiceUnavailable, "Slackline is still deleting this workspace's earlier data. Try adding it again in a few minutes.", "/install")
+		return
+	}
+	defer release()
+	if err := a.deleteTeamLocked(r.Context(), in.TeamID); err != nil {
+		slog.Warn("slackline: finishing a deletion before a reinstall failed", "team", in.TeamID, "err", err)
+		a.message(w, r, http.StatusServiceUnavailable, "Slackline is still deleting this workspace's earlier data. Try adding it again in a few minutes.", "/install")
 		return
 	}
 	if err := a.Store.SaveTeam(r.Context(), Team{ID: in.TeamID, Name: in.TeamName, BotToken: in.BotToken, BotUserID: in.BotUserID}, in.InstalledBy); err != nil {
@@ -446,8 +487,18 @@ func cleanLabel(label, fallback string) string {
 	return truncate(label, 40)
 }
 
+// personLabel is the message for a label that's a person's name.
+const personLabel = "That's a person's name in your workspace. Choose a name that doesn't look like a person (posts also say whose agent it is)."
+
 func (a *App) renameAgent(w http.ResponseWriter, r *http.Request, u User) {
 	label := cleanLabel(r.PostForm.Get("label"), "")
+	if taken, err := a.takenLabel(r.Context(), u.TeamID, u.UserID, label); err != nil {
+		a.failed(w, r, err)
+		return
+	} else if taken {
+		a.message(w, r, http.StatusBadRequest, personLabel, "/home")
+		return
+	}
 	if err := a.Store.RenameAgent(r.Context(), u.TeamID, u.UserID, r.PathValue("id"), label); err != nil {
 		a.formFailed(w, r, err)
 		return
@@ -463,10 +514,12 @@ func (a *App) revokeAgent(w http.ResponseWriter, r *http.Request, u User) {
 		a.formFailed(w, r, ErrNotFound)
 		return
 	}
-	if err := a.Store.RevokeAgent(ctx, u.TeamID, u.UserID, id); err != nil {
+	ended, err := a.Store.RevokeAgent(ctx, u.TeamID, u.UserID, id)
+	if err != nil {
 		a.formFailed(w, r, err)
 		return
 	}
+	a.announceAllStopped(ctx, u.TeamID, ended, "it was revoked")
 	// Its conversations stop being woken (each is told). Ends that fail are
 	// retried by EndPending until Wakeshift confirms them.
 	go a.EndPending(context.WithoutCancel(ctx))
@@ -508,7 +561,32 @@ func (a *App) setRule(w http.ResponseWriter, r *http.Request, u User) {
 		a.message(w, r, http.StatusBadRequest, "That isn't a channel you and Slackline are both in. Join it, and invite Slackline there (/invite @Slackline).", "/home")
 		return
 	}
-	if err := a.Store.SetRule(ctx, u.TeamID, u.UserID, rule); err != nil {
+	// The channel is told when an agent starts listening there, or starts
+	// hearing more, before the rule is saved: if Slack refuses the notice,
+	// nothing changes, and SetRule refuses a broader rule that wasn't
+	// announced. If saving then fails, the channel is told it didn't happen.
+	ag, prev, err := a.Store.RuleOf(ctx, u.TeamID, u.UserID, rule.AgentID, rule.ChannelID)
+	if err != nil {
+		a.formFailed(w, r, err)
+		return
+	}
+	announced := broadens(prev, rule)
+	if announced {
+		if err := a.announce(ctx, team, ag, rule); err != nil {
+			slog.Warn("slackline: posting a listening notice failed", "err", err)
+			a.message(w, r, http.StatusBadGateway, "Slack didn't post the notice telling the channel your agent is listening, so nothing changed. Try again.", "/home")
+			return
+		}
+	}
+	if err := a.Store.SetRule(ctx, u.TeamID, u.UserID, rule, prev, announced); err != nil {
+		if announced {
+			a.note(context.WithoutCancel(ctx), team, rule.ChannelID, "", ":warning: The change to *"+plain(ag.Label)+
+				"* announced above didn't happen. `/slackline here` shows what each agent here hears.")
+		}
+		if errors.Is(err, ErrUnannounced) {
+			a.message(w, r, http.StatusConflict, "The rule changed while you were saving it. Try again.", "/home")
+			return
+		}
 		a.formFailed(w, r, err)
 		return
 	}
@@ -541,11 +619,27 @@ func (a *App) choosable(ctx context.Context, team Team, user string) ([]Channel,
 }
 
 func (a *App) removeRule(w http.ResponseWriter, r *http.Request, u User) {
-	if err := a.Store.RemoveRule(r.Context(), u.TeamID, u.UserID, r.PathValue("id"), r.PathValue("channel")); err != nil {
+	ended, err := a.Store.RemoveRule(r.Context(), u.TeamID, u.UserID, r.PathValue("id"), r.PathValue("channel"))
+	if err != nil {
 		a.formFailed(w, r, err)
 		return
 	}
+	a.announceAllStopped(r.Context(), u.TeamID, []EndedRule{ended}, "")
 	http.Redirect(w, r, "/home?done=removed", http.StatusSeeOther)
+}
+
+// announceAllStopped tells each ended rule's channel (best effort).
+func (a *App) announceAllStopped(ctx context.Context, team string, ended []EndedRule, why string) {
+	if len(ended) == 0 {
+		return
+	}
+	t, err := a.Store.Team(ctx, team)
+	if err != nil {
+		return
+	}
+	for _, e := range ended {
+		a.announceStopped(ctx, t, e, why)
+	}
 }
 
 // EndPending ends revoked agents' subscriptions that aren't confirmed ended
@@ -558,7 +652,7 @@ func (a *App) EndPending(ctx context.Context) {
 		return
 	}
 	for _, e := range ends {
-		if _, err := a.Kit.EndSubscription(ctx, e.Subscription); err != nil {
+		if err := a.endListener(ctx, e); err != nil {
 			slog.Warn("slackline: ending a revoked agent's subscription failed; will retry", "err", err)
 			continue
 		}
@@ -566,6 +660,30 @@ func (a *App) EndPending(ctx context.Context) {
 			slog.Warn("slackline: recording an ended subscription failed", "err", err)
 		}
 	}
+}
+
+// endListener ends a listener's subscriptions: the one watch made (an
+// event subscription, or a topic one from before slack.message), and any a
+// client that subscribes itself made.
+func (a *App) endListener(ctx context.Context, e Ending) error {
+	user := wsUser(e.Team, e.User)
+	if e.Subscription != "" {
+		if err := a.endSubscription(ctx, user, e.Subscription); err != nil {
+			return err
+		}
+	}
+	return a.endNative(ctx, user, e.Listener)
+}
+
+// endSubscription ends the subscription watch made for one of user's
+// listeners: a slack.message one, else a topic one from before it.
+func (a *App) endSubscription(ctx context.Context, user, id string) error {
+	ended, err := a.messages().End(ctx, user, id)
+	if err != nil || ended {
+		return err
+	}
+	_, err = a.Kit.EndSubscription(ctx, id)
+	return err
 }
 
 // ── Pages ────────────────────────────────────────────────────────────────
@@ -622,6 +740,10 @@ func activity(e Entry, labels map[string]string) string {
 			return "Your agents stopped listening in a channel you left"
 		}
 		return Agent + " stopped listening in a channel"
+	case "user.understood":
+		return "You confirmed where your agents' messages go"
+	case "user.deactivated":
+		return "Your Slack account was deactivated, so your agents were revoked"
 	case "workspace.forgotten":
 		return "Slackline was removed from your Slack workspace"
 	}
@@ -631,15 +753,25 @@ func activity(e Entry, labels map[string]string) string {
 type pageData struct {
 	CSRF   string
 	MCPURL string
-	Data   any
+	// Wakeshift is Wakeshift's homepage (legal.Wakeshift), linked from the footer.
+	Wakeshift string
+	Data      any
+	// The "connect your agent" picker (apps/agentpicker) and its tags.
+	Picker, PickerHead template.HTML
 }
 
 func (a *App) render(w http.ResponseWriter, r *http.Request, status int, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
+	// Inline styles; the agent picker's script and stylesheet from this origin.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	if err := pages.ExecuteTemplate(w, name, pageData{CSRF: a.csrf(r), MCPURL: a.MCPURL(), Data: data}); err != nil {
+	picker := agentpicker.HTML(agentpicker.Options{
+		Name: "slackline", URL: a.MCPURL(), Ask: "Watch Slack for me.",
+		Each: "each Slack message for your agent", Interactive: true,
+		SignIn: "The first time, sign in with Slack in your browser, then approve the agent here.",
+	})
+	if err := pages.ExecuteTemplate(w, name, pageData{CSRF: a.csrf(r), MCPURL: a.MCPURL(), Wakeshift: legal.Wakeshift, Data: data, Picker: picker, PickerHead: agentpicker.Head()}); err != nil {
 		slog.Error("slackline: rendering a page failed", "page", name, "err", err)
 	}
 }

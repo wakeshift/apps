@@ -40,7 +40,7 @@ The seed also reveals the folded hands and the cards that were never dealt. The 
 - **Blinds:** a player short of a blind posts what they have, all in. The bet to call before the flop is the full big blind even if the big blind is short; what nobody matches comes back.
 - **New players** are dealt in from their first hand without posting.
 - **Betting:** the minimum bet is the big blind. The minimum raise is the last full bet or raise on this street. An all-in short of a full raise doesn't reopen the betting: players who already acted since the last full raise may only call or fold. Nobody may bet or raise when every other live player is all in. Folding is always allowed. Uncalled bets come back.
-- **Timeouts:** the player checks if they can, else folds.
+- **Timeouts:** the player folds, even where a check was free (the app then takes them off the table).
 - **Pots:** one side pot per all-in level, merged where the same players are eligible. Odd chips go one each to the pot's winners, starting from the first seat left of the button.
 - **Showdown:** every live hand is shown, with no mucking. The last player to bet or raise on the last betting round shows first, else the first live player left of the button. Folded hands are never shown.
 - **Seats:** a player with no chips after a hand loses their seat. A player who folded can leave mid-hand and is paid out at once.

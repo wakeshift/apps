@@ -6,7 +6,7 @@
 {{if .Agents}}<a class="btn btn-ghost" href="#connect">Connect an agent</a>{{end}}
 </div>
 {{if .Notice}}<div class="callout notice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg><p>{{.Notice}}</p></div>{{end}}
-{{if not .Installed}}<div class="callout warn install"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg><p>Slackline isn't in your Slack workspace yet, so your agents can't reach you. An admin may need to approve it.</p><a class="btn btn-slack sm" href="/install">{{template "slack"}}Add to Slack</a></div>{{end}}
+{{if not .Installed}}<div class="callout warn install"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg><p>Slackline isn't in your Slack workspace yet, so your agents can't reach you. An admin may need to approve it. {{template "agree"}}</p><a class="btn btn-slack sm" href="/install">{{template "slack"}}Add to Slack</a></div>{{end}}
 
 {{range .Agents}}{{$agent := .}}
 <article class="card agent">
@@ -37,7 +37,7 @@
 <select name="senders"><option value="me">from me only</option><option value="anyone">from anyone there</option></select>
 <button>Add</button>
 </div>
-<label class="check"><input type="checkbox" name="understood" value="1"><span>I understand that “from anyone there” lets anyone in the channel wake this agent and ask it things. It runs on my machine with my access, and their messages reach it as outside information. (Needed only for “from anyone there”.)</span></label>
+<label class="check"><input type="checkbox" name="understood" value="1"><span>I understand that “from anyone there” lets anyone in the channel who is a member of this workspace (not guests or people from other organisations) wake this agent and ask it things. Slackline tells the channel it's listening. It runs on my machine with my access, and their messages reach it as outside information. (Needed only for “from anyone there”.)</span></label>
 </form>
 {{else if $.Data.Installed}}<p class="small muted">To add a channel, invite Slackline there first: <code>/invite @Slackline</code>.{{if $.Data.NotIn}} It can see {{$.Data.NotIn}} channel{{if gt $.Data.NotIn 1}}s{{end}} it isn't in yet.{{end}}</p>{{end}}
 </div>
@@ -58,10 +58,14 @@
 
 <section id="connect" class="card pad connect">
 <h2>Connect an agent</h2>
+{{if .User.Understood}}
 <p class="muted">Add Slackline's MCP server to your agent, then ask it to watch Slack. It signs in through your browser with Slack, and you approve it here.</p>
-<div class="cmd"><span class="lbl">Claude Code</span><code>claude mcp add --transport http slackline {{$.MCPURL}}</code></div>
-<div class="cmd"><span class="lbl">Codex</span><code>codex mcp add slackline --url {{$.MCPURL}}</code></div>
-<div class="cmd"><span class="lbl">Others</span><span>Add <code>{{$.MCPURL}}</code> as a remote MCP server (streamable HTTP).</span></div>
+{{$.Picker}}
+{{else}}
+<div class="callout warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg><p><strong>Before you connect an agent: where messages go.</strong> {{template "disclosure"}} <a href="/privacy">Privacy</a></p></div>
+<form method="post" action="/understood"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>I understand, continue</button></form>
+<p class="muted small agree">{{template "agree"}}</p>
+{{end}}
 </section>
 
 {{if .Log}}<section class="activity">

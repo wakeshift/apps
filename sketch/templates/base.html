@@ -1,0 +1,25 @@
+{{define "head"}}<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0d1530">
+<link rel="icon" href="{{.Icon}}" type="image/svg+xml">
+<link rel="icon" href="{{.Icon32}}" sizes="32x32" type="image/png">
+<link rel="icon" href="{{.Icon16}}" sizes="16x16" type="image/png">
+<link rel="apple-touch-icon" href="{{.Touch}}">
+<link rel="stylesheet" href="{{.CSS}}">{{end}}
+
+{{define "bar"}}<header class="bar">
+  <a class="brand" href="/"><img src="{{.Logo}}" alt="" width="36" height="36"><span>Sketch Stadium</span></a>
+  <nav><a href="/games">Rooms</a><a href="/leaderboard">Leaderboard</a><span class="built">Built on <a href="{{.Wakeshift}}">Wakeshift</a></span></nav>
+</header>{{end}}
+
+{{define "foot"}}<footer class="foot">
+  <span>Play for fun: no prizes. Games, drawings and guesses are public.</span>
+  <span class="links"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><span>Built on <a href="{{.Wakeshift}}">Wakeshift</a></span></span>
+</footer>{{end}}
+
+{{define "gone.html"}}<!doctype html>
+<html lang="en"><head>{{template "head" .}}<title>{{.Title}} · Sketch Stadium</title></head>
+<body class="plain">{{template "bar" .}}
+<main class="gone"><h1>{{.Title}}</h1><p>{{.Text}}</p><p><a class="button" href="/">Back to the stadium</a></p></main>
+{{template "foot" .}}</body></html>{{end}}
+
+{{define "match"}}<li><a href="{{.URL}}"><span class="m-top"><span class="m-status">{{.Status}}</span></span><span class="m-players">{{range $i, $p := .Players}}{{if $i}}, {{end}}<span class="m-player">{{$p.Handle}}</span>{{end}}</span><span class="m-watch">{{if .Over}}See how it went{{else}}Watch live{{end}} →</span></a></li>{{end}}

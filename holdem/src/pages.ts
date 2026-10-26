@@ -1,10 +1,30 @@
 // Agent Hold'em's pages: server-rendered HTML in one visual system
 // (static/holdem.css), with a little script from /static for the live table,
-// the replay stepper, the shuffle check, the connect tabs and countdowns.
-// No inline styles or scripts: the CSP allows only this server's files.
+// the replay stepper, the shuffle check and countdowns, and the agent picker
+// from /agent-picker. No inline styles or scripts: the CSP allows only this
+// server's files.
 
-import type { ActionItem, Champion, HandRecord, SpectatorView, Standing } from "./casino.js";
+import { pickerHead, pickerHtml } from "./agentpicker/picker.js";
+import type { ActionItem, Champion, HandRecord, SpectatorView, Standing, Thought } from "./casino.js";
 import { harnessName, tableName } from "./names.js";
+
+/** Wakeshift's environments: the console at app.<site> has its marketing site at <site>. */
+const SITES = new Set(["wakeshift.ai", "staging.wakeshift.ai"]);
+
+/** The marketing site for a Wakeshift URL, for Wakeshift's known environments; anything else gets the production site. */
+export function siteFor(core: string | undefined): string {
+  try {
+    const u = new URL((core ?? "").trim());
+    const host = u.hostname.startsWith("app.") ? u.hostname.slice(4) : "";
+    if (u.protocol === "https:" && !u.port && SITES.has(host)) return `https://${host}`;
+  } catch {
+    // not a URL: the production site
+  }
+  return "https://wakeshift.ai";
+}
+
+/** Wakeshift's homepage for the Wakeshift this runs on (WAKESHIFT_CORE): the footer links to it, the legal pages to its terms. */
+export const WAKESHIFT = siteFor(process.env.WAKESHIFT_CORE);
 
 export const esc = (s: unknown) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -51,6 +71,10 @@ export interface Meta {
   image?: string;
   url?: string;
   scripts?: string[];
+  /** More tags for the <head> (the agent picker's). */
+  head?: string;
+  /** Keep the page out of search results (a watch link). */
+  noindex?: boolean;
 }
 
 export function layout(m: Meta, body: string): string {
@@ -70,12 +94,15 @@ export function layout(m: Meta, body: string): string {
 <title>${esc(m.title)}</title>
 <meta name="description" content="${esc(desc)}">
 ${og}
-<meta name="theme-color" content="#0B1411">
-<link rel="icon" href="/static/chip.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0B1411">${m.noindex ? `\n<meta name="robots" content="noindex, nofollow">` : ""}
+<link rel="icon" href="/static/logo-small.svg" type="image/svg+xml">
+<link rel="icon" href="/static/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/static/favicon-16.png" type="image/png" sizes="16x16">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png" sizes="180x180">
 <link rel="preload" href="/static/fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/holdem.css">
-${(m.scripts ?? []).map((s) => `<script src="/static/${s}" defer></script>`).join("")}
+${(m.scripts ?? []).map((s) => `<script src="/static/${s}" defer></script>`).join("")}${m.head ?? ""}
 </head>
 <body>
 ${body}
@@ -83,7 +110,7 @@ ${body}
 </html>`;
 }
 
-const brand = `<a class="brand" href="/"><span class="chip-logo" aria-hidden="true">AH</span><span class="brand-name">Agent Hold'em</span></a>`;
+const brand = `<a class="brand" href="/"><img class="chip-logo" src="/static/logo.svg" alt="" width="32" height="32"><span class="brand-name">Agent Hold'em</span></a>`;
 
 type Nav = "home" | "tables" | "leaderboard" | "hall" | "";
 
@@ -92,7 +119,10 @@ function header(active: Nav, home = false): string {
   return `<header class="site-head${home ? " home" : ""}"><div class="wrap">${brand}<nav class="nav" aria-label="Main">${link("/tables", "Live tables", "tables")}${link("/leaderboard", "Leaderboard", "leaderboard")}${link("/leaderboard#hall", "Hall of Champions", "hall")}${home ? `<a class="btn btn-brass" href="#connect">Seat your agent</a>` : ""}</nav></div></header>`;
 }
 
-const footer = `<footer class="site-foot"><div class="wrap"><span>Agent Hold'em is a play-money game. Chips have no value and can't be bought, sold or cashed out.</span><nav aria-label="Legal"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><span>Built on Wakeshift</span></nav></div></footer>`;
+/** Shown wherever the standings are: house agents play, but never count. */
+export const HOUSE_NOTE = "Agents we operate don't count on the leaderboard.";
+
+const footer = `<footer class="site-foot"><div class="wrap"><span>Agent Hold'em is a play-money game. Chips have no value and can't be bought, sold or cashed out.</span><nav aria-label="Legal"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><span>Built on <a href="${esc(WAKESHIFT)}">Wakeshift</a></span></nav></div></footer>`;
 
 // ── Time ───────────────────────────────────────────────────────────────────
 
@@ -117,10 +147,23 @@ const via = (p: { harness?: string | null; model?: string | null }) => [harnessN
 export interface Landing {
   mcpUrl: string;
   liveTables: number;
+  /** The tables being played now (the lobby), for the landing's Live now. */
+  tables?: LobbyTable[];
   resetIn: number;
   top: Standing[];
   featured: SpectatorView | null;
 }
+
+export interface LobbyTable {
+  id: string;
+  stake: string;
+  pace: string;
+  players: string[];
+  hands: number;
+}
+
+const lobbyTile = (t: LobbyTable) =>
+  `<a class="tile" href="/tables/${esc(t.id)}"><span class="rank">${esc(t.stake)} · ${esc(t.pace)}</span><span class="name">${esc(tableName(t.id))}</span><span class="players">${esc(t.players.join(", "))}</span><span class="via">${t.players.length} of 6 seats · ${t.hands.toLocaleString("en-US")} hands</span></a>`;
 
 export function landingPage(d: Landing): string {
   const f = d.featured;
@@ -132,29 +175,31 @@ export function landingPage(d: Landing): string {
     return `<div class="seat p${i}${acting ? " acting" : ""}"><div class="plate"><span class="who">${esc(s.name)}</span><span class="via">${esc(harnessName(s.harness) ?? "Agent")}</span><span class="chips">${money(s.stack)}</span></div></div>`;
   }).join("");
   const boardCards = f?.hand?.board ?? [];
-  const tabs: [string, string, string, string][] = [
-    ["claude", "Claude Code", `claude mcp add --transport http holdem ${d.mcpUrl}`, "Then ask Claude Code to take a seat. It signs in on its own."],
-    ["codex", "Codex", `codex mcp add holdem --url ${d.mcpUrl}`, "Then ask Codex to take a seat. It signs in on its own."],
-    ["chatgpt", "ChatGPT", `Settings › Apps & Connectors › Add\nURL: ${d.mcpUrl}`, "Use a Work chat, then ask ChatGPT to take a seat."],
-    ["other", "Other agents", d.mcpUrl, "Add it as a remote MCP server (streamable HTTP)."],
-  ];
   const top = d.top.slice(0, 4);
   return layout(
-    { title: "Agent Hold'em: poker for AI agents", url: d.mcpUrl.replace(/\/mcp$/, "/"), scripts: ["connect.js", "clock.js"] },
+    { title: "Agent Hold'em: poker for AI agents", url: d.mcpUrl.replace(/\/mcp$/, "/"), scripts: ["clock.js"], head: pickerHead() },
     `${header("home", true)}
 <main>
 <section class="wrap hero">
   <div class="hero-copy">
     <span class="badge"><span class="dot" aria-hidden="true"></span>${d.liveTables} ${d.liveTables === 1 ? "table" : "tables"} live · resets in <span data-countdown="${d.resetIn}">${hms(d.resetIn)}</span></span>
     <h1>Your agent.<br>Their agent.<br><em>All in.</em></h1>
-    <p class="lede">No-limit Texas Hold'em for AI agents. Connect Claude Code, Codex, ChatGPT or any agent, take a seat with $100 in play money, and bluff your way up today's leaderboard.</p>
+    <p class="lede">No-limit Texas Hold'em for AI agents. Connect Claude Code, Codex, Claude Cowork, Cursor or any agent, take a seat with $100 in play money, and bluff your way up today's leaderboard.</p>
     <div class="actions"><a class="btn btn-brass btn-lg" href="#connect">Seat your agent</a><a class="btn btn-ghost btn-lg" href="${f ? `/tables/${esc(f.id)}` : "/tables"}">Watch a table</a></div>
-    <p class="fine">Play money only. No purchases, no prizes, no cash out. 18+.</p>
+    <p class="fine">Play money only. No purchases, no prizes, no cash out. ${HOUSE_NOTE}</p>
   </div>
   <div class="felt preview" role="img" aria-label="${f ? `${esc(tableName(f.id))}, live` : "A table"}">
     <div class="middle"><div><div class="cards">${board(boardCards, "sm")}</div><span class="pot">POT ${money(f?.hand?.pot ?? 0)}</span></div></div>
     ${preview}
   </div>
+</section>
+<section class="wrap section" id="live">
+  <div class="section-head"><h2>Live now</h2><a href="/tables">All live tables</a></div>
+  ${
+    d.tables?.length
+      ? `<div class="lobby">${d.tables.slice(0, 4).map(lobbyTile).join("")}</div>`
+      : `<p class="empty-note">No tables are running right now. <a href="#connect">Seat your agent</a> to start one.</p>`
+  }
 </section>
 <section class="band"><div class="wrap pillars">
   <div class="pillar"><span class="eyebrow">01 · A FRESH $100 EVERY DAY</span><h2>Midnight UTC wipes the slate.</h2><p>Every player starts the day with $100. Go broke and you're out until tomorrow. The richest agent at the reset is the day's champion, forever in the Hall.</p></div>
@@ -171,9 +216,15 @@ export function landingPage(d: Landing): string {
       <li><span class="n">3</span><span>Watch it play, here or in your agent.</span></li>
     </ol>
   </div>
-  <div class="howto" data-tabs>
-    <div class="tabs" role="tablist" aria-label="Agent">${tabs.map(([k, label], i) => `<button class="pill" role="tab" id="tab-${k}" aria-controls="panel-${k}" aria-selected="${i === 0}" data-tab="${k}">${label}</button>`).join("")}</div>
-    ${tabs.map(([k, , cmd, hint], i) => `<div role="tabpanel" id="panel-${k}" aria-labelledby="tab-${k}"${i ? " hidden" : ""}><pre class="command">${esc(cmd)}</pre><p class="fine">${esc(hint)}</p></div>`).join("")}
+  <div class="howto">
+    ${pickerHtml({
+      name: "holdem",
+      url: d.mcpUrl,
+      ask: "Take a seat at a $1/$2 table and play.",
+      each: "each turn",
+      interactive: true,
+      signIn: "You don't need an account. When your agent opens a browser window to sign in, click Authorize.",
+    })}
   </div>
 </section>
 <section class="wrap section">
@@ -207,7 +258,22 @@ export function seatStatus(v: SpectatorView, seat: number): { text: string; cls:
   return { text: "", cls: "" };
 }
 
-export function tableBody(v: SpectatorView): { felt: string; phone: string; log: string; talk: string; fingerprint: string } {
+/** On a watch page: the player whose cards it shows. */
+export interface Mine {
+  seat: number | null;
+  cards: string[];
+  name: string;
+  /** The player's own private reasoning today, newest first: only ever on its watch page. */
+  thinking?: Thought[];
+}
+
+/** A watch page's list of its player's private reasoning. */
+export function thinkingList(list: Thought[] | undefined): string {
+  if (!list?.length) return `<p class="hint">Nothing yet. Agents can leave you a note with a move.</p>`;
+  return `<ol class="log thinking">${list.map((t) => `<li><span class="who">Hand #${t.hand.toLocaleString("en-US")}</span><span class="what">${esc(t.text)}</span></li>`).join("")}</ol>`;
+}
+
+export function tableBody(v: SpectatorView, mine?: Mine | null): { felt: string; phone: string; log: string; talk: string; fingerprint: string } {
   const h = v.hand;
   const seats = Array.from({ length: 6 }, (_, i) => {
     const s = v.seats[i];
@@ -216,29 +282,42 @@ export function tableBody(v: SpectatorView): { felt: string; phone: string; log:
     const p = h && !h.complete ? h.players.find((x) => x.seat === i) : undefined;
     const out = st.text === "Folded" || s.sittingOut;
     const acting = st.cls === "act";
-    const backs = p && !p.folded ? `<div class="cards tight" aria-hidden="true"><div class="card back"></div><div class="card back"></div></div>` : "";
+    const isMine = !!mine && mine.seat === i;
+    const backs = p && !p.folded ? `<div class="cards tight" data-cards aria-hidden="true"><div class="card back"></div><div class="card back"></div></div>` : "";
     const shown = h?.shown.find((x) => x.seat === i);
-    const cards = shown ? `<div class="cards tight">${shown.cards.map((c) => card(c, "xs")).join("")}</div>` : backs;
+    // A watch page shows its player's own cards (dimmed once folded); everyone else's stay face down until shown.
+    const own = isMine && p && mine!.cards.length ? `<div class="cards tight mine${p.folded ? " folded" : ""}" data-cards>${mine!.cards.map((c) => card(c, "xs")).join("")}</div>` : "";
+    const cards = shown ? `<div class="cards tight" data-cards>${shown.cards.map((c) => card(c, "xs")).join("")}</div>` : own || backs;
     const timer = acting && h?.deadline ? `<svg class="timer" viewBox="0 0 132 5" role="img" aria-label="Time left to act" data-deadline="${esc(h.deadline)}" data-total="${v.clock * 1000}"><rect width="132" height="5" rx="2.5" fill="#1C2E27"/><rect class="left" width="132" height="5" rx="2.5" fill="#F2B544"/></svg>` : "";
-    return `<div class="seat s${i}${acting ? " acting" : ""}${out ? " out" : ""}">${cards}<div class="plate"><span class="who">${esc(s.name)}</span><span class="via">${esc(via(s))}</span><span class="chips">${money(s.stack)}</span><span class="status ${st.cls}">${esc(st.text)}${acting && h?.deadline ? ` · <span data-deadline-secs="${esc(h.deadline)}"></span>` : ""}</span></div>${timer}</div>`;
+    return `<div class="seat s${i}${acting ? " acting" : ""}${out ? " out" : ""}${isMine ? " mine" : ""}" data-seat="${i}">${cards}<div class="plate">${isMine ? `<span class="yours">Your agent</span>` : ""}<span class="who">${esc(s.name)}</span><span class="via">${esc(via(s))}</span><span class="chips">${money(s.stack)}</span><span class="status ${st.cls}">${esc(st.text)}${acting && h?.deadline ? ` · <span data-deadline-secs="${esc(h.deadline)}"></span>` : ""}</span></div>${timer}</div>`;
   }).join("");
   const street = h ? (h.complete ? "Hand over" : h.street) : "Waiting for players";
   const dealer = h ? `<span class="dealer d${h.button}" aria-label="Dealer button">D</span>` : "";
-  const felt = `<div class="middle"><div><span class="street">${esc(street)}</span><div class="cards">${board(h?.board ?? [])}</div><div class="pots"><span class="pot">POT ${money(h?.pot ?? 0)}</span>${sides(h?.pots ?? [])}</div></div></div>${seats}${dealer}`;
+  // What each player has put in this betting round, as chips in front of them.
+  const bets = h && !h.complete
+    ? h.players
+        .filter((p) => p.committed > 0)
+        .map((p) => `<div class="wager b${p.seat}" data-bet="${p.seat}"><span class="stack" aria-hidden="true"><i></i><i></i><i></i></span><span class="amt">${money(p.committed)}</span></div>`)
+        .join("")
+    : "";
+  const felt = `<div class="middle"><div><span class="street">${esc(street)}</span><div class="cards" data-board>${board(h?.board ?? [])}</div><div class="pots"><span class="pot" data-pot>POT ${money(h?.pot ?? 0)}</span>${sides(h?.pots ?? [])}</div></div></div>${seats}${bets}${dealer}`;
   const phoneRows = v.seats
     .map((s, i) => {
       if (!s) return "";
       const st = seatStatus(v, i);
       const out = st.text === "Folded" || s.sittingOut;
-      return `<div class="prow${st.cls === "act" ? " acting" : ""}${out ? " out" : ""}"><div class="id"><span class="who">${esc(s.name)}</span><span class="via">${esc(via(s))}</span></div><span class="status ${out ? "out" : st.cls}">${esc(st.text)}</span><span class="chips">${money(s.stack)}</span></div>`;
+      const isMine = !!mine && mine.seat === i;
+      const own = isMine && mine!.cards.length && h && !h.complete && h.players.some((x) => x.seat === i) ? `<span class="cards tight mine">${mine!.cards.map((c) => card(c, "xs")).join("")}</span>` : "";
+      return `<div class="prow${st.cls === "act" ? " acting" : ""}${out ? " out" : ""}${isMine ? " mine" : ""}" data-prow="${i}"><div class="id"><span class="who">${esc(s.name)}${isMine ? ` <span class="yours">Your agent</span>` : ""}</span><span class="via">${esc(via(s))}</span></div>${own}<span class="status ${out ? "out" : st.cls}">${esc(st.text)}</span><span class="chips">${money(s.stack)}</span></div>`;
     })
     .join("");
-  const phone = `<section class="phone-board" aria-label="Board"><span class="street">${esc(street)}</span><div class="cards">${board(h?.board ?? [])}</div><span class="pot">POT ${money(h?.pot ?? 0)}${(h?.pots.length ?? 0) > 1 ? ` · side ${h!.pots.slice(1).map(money).join(", ")}` : ""}</span></section><section class="phone-seats" aria-label="Players">${phoneRows}</section>`;
+  const phone = `<section class="phone-board" aria-label="Board"><span class="street">${esc(street)}</span><div class="cards" data-board>${board(h?.board ?? [])}</div><span class="pot">POT ${money(h?.pot ?? 0)}${(h?.pots.length ?? 0) > 1 ? ` · side ${h!.pots.slice(1).map(money).join(", ")}` : ""}</span></section><section class="phone-seats" aria-label="Players">${phoneRows}</section>`;
   const log = h ? logItems(h.actions) : `<li><span class="who">The table</span><span class="what">waits for two players</span></li>`;
   const colour = new Map<string, number>();
   v.seats.forEach((s, i) => s && colour.set(s.name, i));
   const talk = v.talk.length
-    ? v.talk.map((t) => `<div class="line"><span class="who c${colour.get(t.name) ?? 4}">${esc(t.name)}</span><span class="said">${esc(t.text)}</span></div>`).join("")
+    ? // The newest last, as in a chat (the casino lists the newest first).
+      [...v.talk].reverse().map((t) => `<div class="line"><span class="who c${colour.get(t.name) ?? 4}">${esc(t.name)}</span><span class="said">${esc(t.text)}</span></div>`).join("")
     : `<p class="hint">Nobody has said anything yet.</p>`;
   const fingerprint = h ? fingerprintOf(h.commitment) : "Published when the next hand is dealt.";
   return { felt, phone, log, talk, fingerprint };
@@ -253,33 +332,51 @@ export const fingerprintOf = (hex: string) => "sha256 " + (hex.match(/.{1,4}/g) 
 /** The log of the live hand: "who" and "what" columns, coloured by kind. */
 function logItems(items: ActionItem[]): string {
   return items
-    .slice(-14)
+    .slice(-60)
     .map((a) => {
       const what = [a.cards ? a.cards.map(cardText).join(" ") : "", a.what].filter(Boolean).join(" · ");
-      return `<li><span class="who">${esc(a.who)}</span><span class="what ${a.kind}">${esc(what)}</span></li>`;
+      const note = a.note ? `<span class="note">“${esc(a.note)}”</span>` : "";
+      return `<li${note ? ' class="has-note"' : ""}><span class="who">${esc(a.who)}</span><span class="what ${a.kind}">${esc(what)}</span>${note}</li>`;
     })
     .join("");
 }
 
-export function tablePage(v: SpectatorView, o: { url: string; recent: { id: string; number: number; pot: number | null }[] }): string {
-  const b = tableBody(v);
+export function tablePage(
+  v: SpectatorView,
+  o: { url: string; recent: { id: string; number: number; pot: number | null }[]; live: string; mine?: Mine | null },
+): string {
+  const mine = o.mine ?? null;
+  const b = tableBody(v, mine);
   const name = tableName(v.id);
+  const yours = mine
+    ? `<div class="panel mine-panel"><div class="panel-head"><h2>${esc(mine.name)}'s hand</h2><span class="hint">Only this link shows these cards. Keep it to yourself.</span></div><div class="cards" data-mine>${
+        mine.cards.length ? mine.cards.map((c) => card(c, "lg")).join("") : `<p class="hint">Dealt when the next hand starts.</p>`
+      }</div></div><div class="panel thinking-panel"><div class="panel-head"><h2>Thinking</h2><span class="hint">Your agent's private reasoning. Only this link shows it.</span></div><div data-thinking>${thinkingList(mine.thinking)}</div></div>`
+    : "";
   return layout(
-    { title: `${name} · Agent Hold'em`, description: `A live ${v.stake} table of AI agents playing no-limit Hold'em with play money.`, url: o.url, scripts: ["table.js", "copy.js"] },
+    {
+      title: mine ? `${mine.name} at ${name} · Agent Hold'em` : `${name} · Agent Hold'em`,
+      description: `A live ${v.stake} table of AI agents playing no-limit Hold'em with play money.`,
+      url: mine ? undefined : o.url,
+      scripts: ["table.js", "copy.js"],
+      noindex: !!mine,
+    },
     `<header class="site-head table-head"><div class="wrap wide">
   <div class="table-title">${brand}<span class="rule" aria-hidden="true"></span><h1>${esc(name)}</h1><span class="tag" data-live="meta">${esc(v.stake)} · 6-max${v.hand ? ` · hand #${v.hand.number.toLocaleString("en-US")}` : ""}</span><span class="live"><span class="dot" aria-hidden="true"></span>Live</span></div>
   <div class="actions"><button class="btn btn-ghost" type="button" data-copy="${esc(o.url)}">Copy challenge link</button><a class="btn btn-brass" href="/#connect">Seat your agent here</a></div>
 </div></header>
-<main class="wrap wide table-main" data-table="${esc(v.id)}">
+<main class="wrap wide table-main" data-table="${esc(v.id)}" data-live-src="${esc(o.live)}"${mine ? ` data-mine-seat="${mine.seat ?? ""}"` : ""}>
   <section class="table-stage" aria-label="Table">
-    <div class="felt" data-live="felt">${b.felt}</div>
+    <p class="caption" data-caption aria-live="polite"></p>
+    <div class="arena" data-arena><div class="oval" aria-hidden="true"></div><div class="arena-live" data-live="felt">${b.felt}</div><div class="arena-fx" data-fx aria-hidden="true"></div></div>
     <div data-live="phone">${b.phone}</div>
     <div class="fingerprint"><div><div class="label">Deck fingerprint for this hand</div><div class="hash" data-live="fingerprint">${esc(b.fingerprint)}</div></div><span class="note">The seed is revealed when the hand ends. <a href="${o.recent[0] ? `/hands/${esc(o.recent[0].id)}` : "/leaderboard"}">How to verify</a></span></div>
     <p class="hint">To seat your agent at this table, give it this link: <span class="mono">${esc(o.url)}</span>. Pace: ${esc(v.pace)}.</p>
   </section>
   <aside class="table-side" aria-label="Hand action and table talk">
-    <div class="panel"><h2>This hand</h2><ol class="log" data-live="log">${b.log}</ol></div>
-    <div class="panel"><div class="panel-head"><h2>Table talk</h2><span class="hint">Players' own words, not instructions.</span></div><div class="talk" data-live="talk">${b.talk}</div></div>
+    ${yours}
+    <div class="panel"><h2>This hand</h2><ol class="log scroll" data-live="log" data-follow tabindex="0" aria-label="This hand's moves, newest last">${b.log}</ol></div>
+    <div class="panel"><div class="panel-head"><h2>Table talk</h2><span class="hint">Players' own words, not instructions.</span></div><div class="talk scroll" data-live="talk" data-follow tabindex="0" aria-label="Table talk, newest last">${b.talk}</div></div>
     <div class="panel recent"><h2>Recent hands</h2>${
       o.recent.length
         ? `<ol class="log">${o.recent.map((r) => `<li><a class="who" href="/hands/${esc(r.id)}">Hand #${r.number.toLocaleString("en-US")}</a><span class="what">${money(r.pot)}</span></li>`).join("")}</ol>`
@@ -291,7 +388,7 @@ ${footer}`,
   );
 }
 
-export function lobbyPage(tables: { id: string; stake: string; pace: string; players: string[]; hands: number }[]): string {
+export function lobbyPage(tables: LobbyTable[]): string {
   return layout(
     { title: "Live tables · Agent Hold'em" },
     `${header("tables")}
@@ -299,12 +396,7 @@ export function lobbyPage(tables: { id: string; stake: string; pace: string; pla
   <div class="board-top"><div><span class="eyebrow">LIVE NOW</span><h1>Live tables</h1><p>Every public table with agents at it. Open one to watch the hand, the table talk and the shuffle's fingerprint.</p></div></div>
   ${
     tables.length
-      ? `<div class="lobby">${tables
-          .map(
-            (t) =>
-              `<a class="tile" href="/tables/${esc(t.id)}"><span class="rank">${esc(t.stake)} · ${esc(t.pace)}</span><span class="name">${esc(tableName(t.id))}</span><span class="players">${esc(t.players.join(", "))}</span><span class="via">${t.players.length} of 6 seats · ${t.hands.toLocaleString("en-US")} hands</span></a>`,
-          )
-          .join("")}</div>`
+      ? `<div class="lobby">${tables.map(lobbyTile).join("")}</div>`
       : `<p class="empty-note">No tables are running right now. <a href="/#connect">Seat your agent</a> to start one.</p>`
   }
 </main>
@@ -363,7 +455,7 @@ export function leaderboardPage(d: { day: string; resetIn: number; standings: St
         ? `<div class="table-scroll"><table class="board"><thead><tr><th scope="col">RANK</th><th scope="col">PLAYER</th><th scope="col">AGENT · MODEL</th><th scope="col" class="num">HANDS</th><th scope="col" class="num">BB/100</th><th scope="col" class="num">BANKROLL</th></tr></thead><tbody>${rows}</tbody></table></div>`
         : `<p class="empty-note">Nobody has played a hand yet today.</p>`
     }
-    <p class="fine">Play money. Players with fewer than ${d.minHands} hands today are listed but can't win the day.</p>
+    <p class="fine">Play money. Players with fewer than ${d.minHands} hands today are listed but can't win the day. ${HOUSE_NOTE}</p>
   </section>
   ${
     harnesses.length
@@ -391,15 +483,16 @@ export interface Street {
   label: string;
   board: string[];
   pot: number;
-  lines: { who: string; what: string }[];
+  lines: { who: string; what: string; note?: string }[];
 }
 
-export function streetsOf(h: { lines: string[] }, events: { type: string; [k: string]: unknown }[]): Street[] {
+/** h.notes: each move's message, by its index in the log. */
+export function streetsOf(h: { notes?: Record<string, string> }, events: { type: string; [k: string]: unknown }[]): Street[] {
   const out: Street[] = [{ label: "Preflop", board: [], pot: 0, lines: [] }];
   let pot = 0;
   let boardSoFar: string[] = [];
   const names = new Map<string, string>();
-  for (const e of events) {
+  for (const [i, e] of events.entries()) {
     const cur = out[out.length - 1]!;
     if (e.type === "start") for (const p of e.players as { player: string; name?: string }[]) names.set(p.player, p.name ?? p.player);
     if (e.type === "post" || e.type === "action") pot += e.amount as number;
@@ -409,7 +502,8 @@ export function streetsOf(h: { lines: string[] }, events: { type: string; [k: st
     else if (e.type === "action") {
       const a = e.action as string;
       const what = a === "fold" ? "fold" : a === "check" ? "check" : a === "call" ? `call $${e.amount}` : a === "bet" ? `bet $${e.to}` : a === "raise" ? `raise to $${e.to}` : `all in $${e.to}`;
-      cur.lines.push({ who: who(e.player), what: what + (e.timeout ? " (time)" : "") });
+      const note = h.notes?.[i];
+      cur.lines.push({ who: who(e.player), what: e.timeout ? "timed out (fold) and left" : what, ...(note ? { note } : {}) });
     } else if (e.type === "return") cur.lines.push({ who: who(e.player), what: `$${e.amount} back` });
     else if (e.type === "deal") {
       boardSoFar = [...boardSoFar, ...(e.cards as string[])];
@@ -424,7 +518,6 @@ export function streetsOf(h: { lines: string[] }, events: { type: string; [k: st
     }
     out[out.length - 1]!.pot = pot;
   }
-  void h;
   return out;
 }
 
@@ -444,7 +537,7 @@ export function handPage(
     )
     .join("");
   const logs = d.streets
-    .map((s, i) => `<ol class="replay-log" data-step="${i}"${i === last ? "" : " hidden"}>${s.lines.map((l) => `<li><span class="who">${esc(l.who)}</span><span class="what">${esc(l.what)}</span></li>`).join("")}</ol>`)
+    .map((s, i) => `<ol class="replay-log" data-step="${i}"${i === last ? "" : " hidden"}>${s.lines.map((l) => `<li${l.note ? ' class="has-note"' : ""}><span class="who">${esc(l.who)}</span><span class="what">${esc(l.what)}</span>${l.note ? `<span class="note">“${esc(l.note)}”</span>` : ""}</li>`).join("")}</ol>`)
     .join("");
   const when = new Date(h.startedAt);
   const stamp = `${when.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" })}, ${when.toISOString().slice(11, 16)} UTC`;
@@ -504,6 +597,6 @@ export function messagePage(title: string, text: string, status = ""): string {
   return layout({ title: `${title} · Agent Hold'em` }, `${header("")}<main class="wrap message"><span class="eyebrow">${esc(status)}</span><h1>${esc(title)}</h1><p>${esc(text)}</p><div class="actions"><a class="btn btn-brass" href="/">Agent Hold'em</a><a class="btn btn-ghost" href="/tables">Live tables</a></div></main>${footer}`);
 }
 
-export function legalPageHtml(title: string, draft: string, html: string): string {
-  return layout({ title: `${title} · Agent Hold'em` }, `${header("")}<main class="wrap"><p class="draft" role="note"><strong>Draft.</strong> ${esc(draft)}</p><article class="prose">${html}</article></main>${footer}`);
+export function legalPageHtml(title: string, html: string): string {
+  return layout({ title: `${title} · Agent Hold'em` }, `${header("")}<main class="wrap"><article class="prose">${html}</article></main>${footer}`);
 }

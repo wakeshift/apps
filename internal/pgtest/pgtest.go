@@ -30,7 +30,8 @@ const (
 )
 
 // EmptyURL returns the URL of a new, empty database owned by an ordinary
-// role (NOSUPERUSER, NOBYPASSRLS). It's dropped when the test ends.
+// role (NOSUPERUSER, NOBYPASSRLS; CREATEROLE, as Cloud SQL's users have).
+// It's dropped when the test ends.
 func EmptyURL(t testing.TB) string {
 	t.Helper()
 	adminURL := os.Getenv(envURL)
@@ -47,8 +48,10 @@ func EmptyURL(t testing.TB) string {
 
 	// The role is shared by all test databases, so it may exist already, or
 	// another test package may be creating it at the same moment (a unique
-	// violation on pg_authid). Anything else is a setup problem.
-	if _, err := admin.Exec(ctx, `CREATE ROLE `+appRole+` LOGIN PASSWORD '`+appPass+`' NOSUPERUSER NOBYPASSRLS`); err != nil {
+	// violation on pg_authid). Anything else is a setup problem. It may
+	// create roles, as the database's owner does on Cloud SQL: the core's
+	// migrations make the admin service's read role (080_admin.sql).
+	if _, err := admin.Exec(ctx, `CREATE ROLE `+appRole+` LOGIN PASSWORD '`+appPass+`' NOSUPERUSER NOBYPASSRLS CREATEROLE`); err != nil {
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || (pgErr.Code != "42710" && pgErr.Code != "23505") { // duplicate_object, unique_violation
 			t.Fatalf("creating the test role: %v", err)
@@ -61,6 +64,19 @@ func EmptyURL(t testing.TB) string {
 		}
 		if !login || super || bypass {
 			t.Fatalf("the test role %s exists but isn't an ordinary login role (login %v, superuser %v, bypassrls %v): drop it and run again", appRole, login, super, bypass)
+		}
+		// Made before it needed CREATEROLE. Another package may be doing
+		// the same at once ("tuple concurrently updated"): check again.
+		var createRole bool
+		if err := admin.QueryRow(ctx, `SELECT rolcreaterole FROM pg_roles WHERE rolname = $1`, appRole).Scan(&createRole); err != nil {
+			t.Fatalf("reading the test role: %v", err)
+		}
+		if !createRole {
+			if _, err := admin.Exec(ctx, `ALTER ROLE `+appRole+` CREATEROLE`); err != nil {
+				if err := admin.QueryRow(ctx, `SELECT rolcreaterole FROM pg_roles WHERE rolname = $1`, appRole).Scan(&createRole); err != nil || !createRole {
+					t.Fatalf("letting the test role create roles: %v", err)
+				}
+			}
 		}
 	}
 	b := make([]byte, 6)

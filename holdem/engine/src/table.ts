@@ -20,7 +20,7 @@
 //   the last full raise may only call or fold.
 // - Nobody may bet or raise when every other live player is all in.
 // - Folding is always allowed, even when checking is.
-// - A timed-out player checks if they can, else folds.
+// - A timed-out player folds, even where a check was free.
 // - Side pots: one layer per all-in level, merged where the same players are
 //   eligible. A pot's odd chips go one each to its winners, starting from the
 //   first seat left of the button.
@@ -429,8 +429,9 @@ export function act(state: TableState, player: string, action: Action): TableSta
 export function timeout(state: TableState): TableState {
   const who = toAct(state);
   if (!who) throw new EngineError("no_hand", "nobody is to act");
-  const legal = legalActions(state, who.player)!;
-  return doAct(state, who.player, { type: legal.check ? "check" : "fold" }, true);
+  // Out of time is a fold, even where a check was free: the app then takes
+  // the player off the table.
+  return doAct(state, who.player, { type: "fold" }, true);
 }
 
 function doAct(state: TableState, player: string, action: Action, timedOut: boolean): TableState {

@@ -1,0 +1,186 @@
+/* Nightfall's table (table.go, table.html, table.js): a candlelit round
+   table, the players around it, the phase in the middle.
+
+   Two layouts, by the width of the table's column (a container query, so
+   the transcript beside it on a wide screen counts):
+   - from 720px, the round table: every piece is placed in units of a
+     thousandth of the table's width (--u), in slots that never meet, so
+     nothing overlaps at any width. A seat's slot is its bubble's space,
+     its plate and its card, top to bottom; the middle sits between them.
+   - below, a phone's: the middle on top, then the seats in a grid, each
+     with its bubble in the flow above it. */
+
+.stage { container-type: inline-size; }
+.nf-table { --ink: #0c0910; --parchment: #f2e6cf; --ash: #b9a8ad; --candle: #e3a94f; --blood: #b3122e; --rose: #ec6a7d;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --ease: cubic-bezier(.2, .7, .2, 1); position: relative; }
+.nf-table [hidden] { display: none !important; }
+
+/* The room: a night sky, warming to candlelit day. */
+.nf-table .arena { position: relative; isolation: isolate; overflow: hidden; padding: 14px; border-radius: 22px; border: 1px solid #f2e6cf1f; background: #0b080e; }
+.nf-table .sky, .nf-table .sky i { position: absolute; inset: 0; }
+.nf-table .sky { z-index: -2; }
+.nf-table .sky i { transition: opacity 2.4s ease; }
+.nf-table .sky-night { background: radial-gradient(130% 90% at 50% -10%, #3b0f22 0%, #1a0a16 50%, #0b080e 100%); }
+.nf-table .sky-day { opacity: 0; background: radial-gradient(130% 95% at 50% -10%, #8a5a2b 0%, #4a2a1c 45%, #1f1310 100%); }
+.nf-table .stars { opacity: .55; background-image:
+  radial-gradient(1.4px 1.4px at 8% 14%, #f2e6cf 50%, transparent 60%), radial-gradient(1px 1px at 22% 6%, #f2e6cf 50%, transparent 60%),
+  radial-gradient(1.6px 1.6px at 37% 11%, #f2e6cf 50%, transparent 60%), radial-gradient(1px 1px at 61% 4%, #f2e6cf 50%, transparent 60%),
+  radial-gradient(1.4px 1.4px at 78% 13%, #f2e6cf 50%, transparent 60%), radial-gradient(1px 1px at 92% 7%, #f2e6cf 50%, transparent 60%),
+  radial-gradient(1.2px 1.2px at 4% 52%, #f2e6cf 50%, transparent 60%), radial-gradient(1.2px 1.2px at 96% 48%, #f2e6cf 50%, transparent 60%),
+  radial-gradient(1px 1px at 14% 88%, #f2e6cf 50%, transparent 60%), radial-gradient(1px 1px at 88% 92%, #f2e6cf 50%, transparent 60%); }
+.nf-table.phase-day .sky-day, .nf-table.phase-over .sky-day { opacity: 1; }
+.nf-table.phase-voting .sky-day { opacity: .45; }
+.nf-table.phase-day .stars, .nf-table.phase-over .stars { opacity: 0; }
+.nf-table.phase-voting .stars { opacity: .25; }
+.nf-table .board { display: none; }
+
+/* The middle: the phase, its clock, the center cards, the moderator. */
+.nf-table .middle { position: relative; display: flex; flex-direction: column; align-items: center; gap: 10px; margin: 0 0 14px; padding: 14px 16px;
+  border-radius: 16px; background: #0c0910b3; border: 1px solid #f2e6cf1f; text-align: center; }
+.nf-table .phase-row { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px 12px; }
+.nf-table .phase-name { font: 700 24px/1.1 var(--serif); letter-spacing: .01em; }
+.nf-table .clock { font: 600 14px/1 ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; padding: 5px 9px; border-radius: 999px;
+  background: #f2e6cf14; border: 1px solid #f2e6cf2e; color: var(--parchment); }
+.nf-table.phase-voting .clock { border-color: var(--rose); color: var(--rose); }
+.nf-table .announce { margin: 0; max-width: 46ch; color: var(--ash); font-size: 14px; line-height: 1.4; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.nf-table .announce:empty { display: none; }
+.nf-table .announce.fresh { animation: nf-rise .5s var(--ease) both; }
+
+/* The moon by night (red while the town votes), the sun by day. */
+.nf-table .orb { position: relative; flex: none; width: 30px; height: 30px; }
+.nf-table .orb::before, .nf-table .orb::after { content: ""; position: absolute; inset: 0; border-radius: 50%; transition: opacity 1.6s ease, filter 1.6s ease; }
+.nf-table .orb::before { background: radial-gradient(circle at 36% 34%, #fffaf0, #efe6d6 55%, #c9bca2); box-shadow: 0 0 16px 3px #b3122e66, 0 0 40px 8px #b3122e26; }
+.nf-table .orb::after { opacity: 0; background: radial-gradient(circle at 40% 38%, #fff3c4, #f0bd5c 55%, #c9782a); box-shadow: 0 0 18px 5px #e3a94f80, 0 0 46px 12px #e3a94f33; }
+.nf-table.phase-day .orb::before, .nf-table.phase-over .orb::before { opacity: 0; }
+.nf-table.phase-day .orb::after, .nf-table.phase-over .orb::after { opacity: 1; }
+.nf-table.phase-voting .orb::before { filter: sepia(1) saturate(7) hue-rotate(-45deg) brightness(.85); }
+.nf-table.phase-waiting .orb::before { filter: brightness(.6); }
+
+/* Cards: face down (a crimson back), turned over at the end. */
+.nf-table .pile { display: flex; justify-content: center; gap: 10px; }
+.nf-table .tcard { position: relative; flex: none; display: inline-block; width: 30px; height: 42px; perspective: 500px; }
+.nf-table .tcard .inner { position: absolute; inset: 0; transform-style: preserve-3d; transition: transform .9s var(--ease); }
+.nf-table .tcard .back, .nf-table .tcard .face { position: absolute; inset: 0; border-radius: 4px; -webkit-backface-visibility: hidden; backface-visibility: hidden; }
+.nf-table .tcard .back { border: 1.5px solid #e3a94fa6; box-shadow: inset 0 0 0 2px #1a0a10, 0 4px 10px #0009;
+  background: radial-gradient(circle at 50% 50%, #e3a94f 0 9%, transparent 10%), repeating-linear-gradient(45deg, #5a0a18 0 3px, #78112a 3px 6px); }
+.nf-table .tcard .face { transform: rotateY(180deg); display: grid; place-items: center; border: 1.5px solid var(--candle); background: var(--parchment); color: #6b4a12; box-shadow: 0 4px 10px #0009; }
+.nf-table .tcard .face b { font: 700 18px/1 var(--serif); }
+.nf-table .tcard .face .name { position: absolute; top: calc(100% + 5px); left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 11px; color: var(--parchment); }
+.nf-table .seat .tcard .face .name { display: none; }
+.nf-table .tcard.up .inner { transform: rotateY(180deg); }
+.nf-table .tcard.coven .face { background: #f6dcdc; color: #8a0f25; border-color: var(--blood); }
+.nf-table .tcard.martyr .face { background: #d9d4cc; color: #2a2628; border-color: #8c847a; }
+.nf-table .pile .tcard.up { margin: 0 24px 18px; } /* room for its name below, clear of the next */
+.nf-table .pile .tcard:nth-child(2) .inner { transition-delay: .12s; } .nf-table .pile .tcard:nth-child(3) .inner { transition-delay: .24s; }
+
+/* The seats (narrow). */
+.nf-table .seats { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 12px; }
+@container (min-width: 520px) { .nf-table .seats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.nf-table .seat { position: relative; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; }
+.nf-table .bubble-slot { display: flex; justify-content: center; min-width: 0; }
+.nf-table .bubble { position: relative; margin: 0 0 9px; max-width: 100%; padding: 6px 10px; border-radius: 13px; background: var(--parchment); color: #1b1218;
+  font-size: 13px; line-height: 1.35; box-shadow: 0 6px 18px #0008; transform-origin: 50% 100%; animation: nf-pop .32s var(--ease) both; }
+.nf-table .bubble .said { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; overflow-wrap: anywhere; }
+.nf-table .bubble::after { content: ""; position: absolute; left: 50%; bottom: -5px; width: 10px; height: 10px; margin-left: -5px; background: var(--parchment); transform: rotate(45deg); }
+.nf-table .bubble.gone { animation: nf-fade .7s ease forwards; }
+.nf-table .plate { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; padding: 8px 10px; border-radius: 14px;
+  background: #140c12e6; border: 1px solid #f2e6cf26; box-shadow: 0 8px 22px #0007; transition: border-color .6s, box-shadow .6s, opacity .6s; }
+.nf-table .pic { flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; font: 700 16px/1 var(--serif); color: #fff6e6; box-shadow: inset 0 0 0 1.5px #ffffff33; }
+.nf-table .c0 .pic { background: #7a1024; } .nf-table .c1 .pic { background: #3f2a66; } .nf-table .c2 .pic { background: #1f4d4a; } .nf-table .c3 .pic { background: #7a4a12; }
+.nf-table .c4 .pic { background: #4a1f4f; } .nf-table .c5 .pic { background: #2b3f6b; } .nf-table .c6 .pic { background: #5b2a1a; } .nf-table .c7 .pic { background: #35502a; }
+.nf-table .names { display: flex; flex-direction: column; min-width: 0; }
+.nf-table .who, .nf-table .via { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nf-table .who { font-weight: 700; font-size: 14px; line-height: 1.25; }
+.nf-table .via { font-size: 12px; line-height: 1.3; color: var(--ash); }
+.nf-table .via.mine { color: var(--rose); }
+.nf-table .tokens { display: flex; align-items: flex-start; gap: 8px; min-width: 0; margin-top: 8px; min-height: 42px; }
+.nf-table .marks { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; min-width: 0; font-size: 12px; line-height: 1.3; }
+.nf-table .marks > * { min-width: 0; overflow-wrap: anywhere; }
+.nf-table .role { font: 700 13px/1.25 var(--serif); color: var(--parchment); }
+.nf-table .ballot { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 1px 7px; border-radius: 999px; border: 1px solid #e3a94f8c; color: var(--candle); }
+.nf-table .ballot.fresh { animation: nf-pop .4s var(--ease) both; }
+.nf-table .fate { padding: 1px 7px; border-radius: 999px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; font-size: 10.5px; }
+.nf-table .fate.dead { background: var(--blood); color: #fff1f1; }
+.nf-table .fate.win { background: var(--candle); color: #2a1a08; }
+.nf-table .you .plate { border-color: #ec6a7d99; }
+.nf-table .won .plate { border-color: var(--candle); box-shadow: 0 0 0 2px #e3a94f59, 0 0 28px #e3a94f4d, 0 8px 22px #0007; }
+.nf-table .staked .plate { opacity: .62; }
+.nf-table .staked .who { text-decoration: line-through; text-decoration-color: var(--rose); }
+
+/* After the seats: the cards in play, and who won. */
+.nf-table .in-play { margin: 12px 2px 0; color: var(--ash); font-size: 13px; overflow-wrap: anywhere; }
+.nf-table .in-play .label { margin-right: .5em; font-weight: 700; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--candle); }
+.nf-table .outcome { margin: 10px 2px 0; font: 700 22px/1.2 var(--serif); color: var(--candle); }
+
+/* Vote arrows, once it's over (drawn by table.js on the round table). */
+.nf-table .arrows { display: none; }
+
+/* The round table. */
+@container (min-width: 720px) {
+  .nf-table .arena { --u: calc(100cqw / 1000); height: calc(692 * var(--u)); padding: 0; border-radius: calc(28 * var(--u)); }
+  .nf-table .board { display: block; position: absolute; z-index: -1; left: calc(110 * var(--u)); top: calc(108 * var(--u)); width: calc(780 * var(--u)); height: calc(476 * var(--u));
+    border-radius: 50%; transition: filter 2.4s ease;
+    background: radial-gradient(ellipse at 50% 46%, #e3a94f2e 0%, transparent 42%), radial-gradient(ellipse at 50% 40%, #47162a 0%, #2a0f1d 55%, #190a13 100%);
+    box-shadow: 0 0 0 calc(12 * var(--u)) #2b1810, 0 0 0 calc(14 * var(--u)) #e3a94f4d, 0 calc(30 * var(--u)) calc(90 * var(--u)) #000c; }
+  .nf-table.phase-day .board, .nf-table.phase-over .board { filter: brightness(1.18) saturate(.92); }
+  .nf-table .middle { position: absolute; left: calc(285 * var(--u)); top: calc(242 * var(--u)); width: calc(430 * var(--u)); height: calc(208 * var(--u));
+    justify-content: center; gap: calc(10 * var(--u)); margin: 0; padding: 0 calc(10 * var(--u)); background: none; border: 0; }
+  .nf-table .orb { width: max(22px, calc(40 * var(--u))); height: max(22px, calc(40 * var(--u))); }
+  .nf-table .phase-name { font-size: max(18px, calc(32 * var(--u))); }
+  .nf-table .clock { font-size: max(12px, calc(15 * var(--u))); }
+  .nf-table .announce { font-size: max(12px, calc(14.5 * var(--u))); -webkit-line-clamp: 3; }
+  .nf-table .pile { gap: calc(12 * var(--u)); }
+  .nf-table .pile .tcard { width: max(22px, calc(34 * var(--u))); height: max(31px, calc(48 * var(--u))); }
+  .nf-table .pile .tcard.up { margin: 0 24px max(14px, calc(18 * var(--u))); }
+
+  .nf-table .seats { display: block; }
+  .nf-table .seat { position: absolute; display: block; width: calc(240 * var(--u)); height: calc(220 * var(--u)); left: calc((var(--x) - 120) * var(--u)); top: calc((var(--y) + 16) * var(--u)); }
+  .nf-table .bubble-slot { position: absolute; z-index: 3; left: 0; right: 0; top: 0; height: calc(94 * var(--u)); align-items: flex-end; }
+  .nf-table .bubble { margin: 0 0 calc(2 * var(--u)); max-height: 100%; padding: calc(7 * var(--u)) calc(11 * var(--u)); font-size: max(12px, calc(14 * var(--u))); }
+  .nf-table .bubble .said { -webkit-line-clamp: 3; }
+  .nf-table .bubble::after { bottom: calc(-5 * var(--u)); }
+  .nf-table .plate { position: absolute; left: calc(8 * var(--u)); right: calc(8 * var(--u)); top: calc(102 * var(--u)); height: calc(72 * var(--u));
+    gap: calc(10 * var(--u)); padding: 0 calc(12 * var(--u)); border-radius: calc(16 * var(--u)); }
+  .nf-table .pic { width: max(24px, calc(44 * var(--u))); height: max(24px, calc(44 * var(--u))); font-size: max(12px, calc(20 * var(--u))); }
+  .nf-table .who { font-size: max(12px, calc(16 * var(--u))); }
+  .nf-table .via { font-size: max(10.5px, calc(12.5 * var(--u))); }
+  .nf-table .tokens { position: absolute; left: calc(8 * var(--u)); right: calc(8 * var(--u)); top: calc(180 * var(--u)); height: calc(40 * var(--u)); min-height: 0; margin: 0; gap: calc(8 * var(--u)); }
+  .nf-table .tokens .tcard { width: max(19px, calc(28 * var(--u))); height: max(27px, calc(40 * var(--u))); }
+  .nf-table .tokens .tcard .face b { font-size: max(12px, calc(17 * var(--u))); }
+  .nf-table .marks { max-height: 100%; overflow: hidden; gap: 0 calc(6 * var(--u)); font-size: max(10.5px, calc(12 * var(--u))); line-height: 1.25; }
+  .nf-table .role { font-size: max(11px, calc(13 * var(--u))); }
+  .nf-table .ballot { padding: 0 calc(7 * var(--u)); }
+  .nf-table.arrowed .ballot.for { display: none; }
+  .nf-table .fate { padding: 0 calc(7 * var(--u)); font-size: max(9.5px, calc(10.5 * var(--u))); }
+  .nf-table .seats { position: relative; z-index: 1; }
+  .nf-table .arrows { display: block; position: absolute; z-index: 0; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  .nf-table .arrows path { fill: none; stroke: var(--rose); stroke-width: max(1.5px, calc(2.5 * var(--u))); stroke-linecap: round; opacity: .85; }
+  .nf-table .arrows marker path { fill: var(--rose); stroke: none; }
+  .nf-table .arrows .drawn { stroke-dasharray: var(--len); stroke-dashoffset: var(--len); animation: nf-draw .9s var(--ease) forwards; }
+
+  /* Where each seat sits, by how many there are: the slots go around the
+     table, clear of each other and of the middle. */
+  .nf-table .n1 .s0, .nf-table .n3 .s0, .nf-table .n4 .s0 { --x: 500; --y: 0; }
+  .nf-table .n2 .s0, .nf-table .n4 .s3, .nf-table .n5 .s4, .nf-table .n6 .s5 { --x: 132; --y: 220; }
+  .nf-table .n2 .s1, .nf-table .n4 .s1, .nf-table .n5 .s2, .nf-table .n6 .s2 { --x: 868; --y: 220; }
+  .nf-table .n3 .s1 { --x: 730; --y: 440; } .nf-table .n3 .s2 { --x: 270; --y: 440; }
+  .nf-table .n4 .s2, .nf-table .n5 .s3 { --x: 500; --y: 440; }
+  .nf-table .n5 .s0, .nf-table .n6 .s0 { --x: 315; --y: 0; } .nf-table .n5 .s1, .nf-table .n6 .s1 { --x: 685; --y: 0; }
+  .nf-table .n6 .s3 { --x: 685; --y: 440; } .nf-table .n6 .s4 { --x: 315; --y: 440; }
+}
+
+/* The cards turn over one seat after another. */
+.nf-table .s1 .tokens .inner { transition-delay: .15s; } .nf-table .s2 .tokens .inner { transition-delay: .3s; }
+.nf-table .s3 .tokens .inner { transition-delay: .45s; } .nf-table .s4 .tokens .inner { transition-delay: .6s; } .nf-table .s5 .tokens .inner { transition-delay: .75s; }
+
+@keyframes nf-pop { from { opacity: 0; transform: translateY(6px) scale(.86); } to { opacity: 1; transform: none; } }
+@keyframes nf-fade { to { opacity: 0; transform: scale(.82); } }
+@keyframes nf-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes nf-draw { to { stroke-dashoffset: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .nf-table *, .nf-table *::before, .nf-table *::after { animation: none !important; transition: none !important; }
+  .nf-table .bubble.gone { opacity: 0; }
+}

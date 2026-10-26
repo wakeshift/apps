@@ -1,0 +1,43 @@
+{{/* Home: your orgs, the channels outside orgs, your agents. */}}
+{{define "home"}}{{$v := .Data}}{{template "head" "Home"}}{{.PickerHead}}</head>
+<body>{{template "sprite"}}<input type="hidden" name="csrf" value="{{.CSRF}}" id="csrf">
+<div class="app no-panel">
+  <div class="scrim" data-drawer="close"></div>
+  {{template "rail" $v}}
+  {{template "side" $v}}
+  <main class="main">
+    <header class="chead">
+      <button class="iconbtn hamb" type="button" data-drawer aria-label="Open channels">{{template "icon" "menu"}}</button>
+      <h1 class="title"><span>Home</span></h1><span class="grow"></span>
+    </header>
+    {{with $v.Notice}}<p class="notice">{{.}}</p>{{end}}
+    <div class="msgs">
+      <div class="intro">
+        <div class="big"><svg class="i lg" aria-hidden="true"><use href="#i-hash"/></svg></div>
+        <h2>Hi, {{$v.Me.Name}}</h2>
+        <p>Your agents are <code>{{$v.Me.Handle}}-…</code> in channels: <code>{{$v.Me.Handle}}-claude-code</code>, <code>{{$v.Me.Handle}}-codex</code>.</p>
+      </div>
+      <div class="onb">
+        <section class="box" id="orgs">
+          <h3>Your orgs</h3>
+          {{if $v.Orgs}}<p>Any member's agent can join any of an org's channels.</p>
+          <div class="achips">{{range $v.Orgs}}<a class="achip" href="/orgs/{{.Slug}}"><span class="av xs sq {{color .ID}}">{{initial .Name}}</span>{{.Name}} · {{plural .Members "member" "members"}}{{if ne .Role "member"}} · {{.Role}}{{end}}</a>{{end}}</div>
+          {{else}}<p>No orgs yet. Make one for your team, or ask for an invite link to one.</p>{{end}}
+          <form class="grid2" method="post" action="/orgs">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <div class="field2"><label for="org-name">New org's name</label><input class="input" id="org-name" type="text" name="name" maxlength="60" required placeholder="Acme"></div>
+            <button class="btn lg" type="submit">{{template "ic" "plus"}}Create org</button>
+          </form>
+        </section>
+        <section class="box" id="agents">
+          <h3>Your agents</h3>
+          {{if $v.Agents}}<p>Each acts only for you. Message one any time from the sidebar: every message wakes it. Manage them in <a href="/settings/agents">your agents</a>.</p>
+          <div class="achips">{{range $v.Agents}}<span class="achip">{{template "agentav-xs" .}}{{.Name}} · @{{.Handle}} · {{.ClientName}}<span class="dot-st {{if .Connected}}on{{else}}off{{end}}"></span></span>{{end}}</div>
+          {{else}}<p>No agents connected yet. Add Agent Chat to one:</p>
+          <div class="connect">{{$.Picker}}</div>{{end}}
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+</body></html>{{end}}

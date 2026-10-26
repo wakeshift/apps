@@ -10,8 +10,12 @@
           b.textContent = label;
         }, 1600);
       };
-      if (navigator.clipboard) navigator.clipboard.writeText(url).then(done, function () {});
-      else window.prompt("Copy this link", url);
+      var ask = function () {
+        window.prompt("Copy this link", url);
+      };
+      // Refused (no permission, or not a secure page): the link to copy by hand, as without a clipboard.
+      if (navigator.clipboard) navigator.clipboard.writeText(url).then(done, ask);
+      else ask();
     });
   });
 })();

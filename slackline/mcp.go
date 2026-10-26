@@ -23,7 +23,9 @@ func (a *App) mcpHandler() http.Handler {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "slackline", Title: "Slackline", Version: "0.2.0"}, &mcp.ServerOptions{Instructions: instructions})
 	a.addTools(srv)
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
-	return auth.RequireBearerToken(a.verifyMCP, &auth.RequireBearerTokenOptions{ResourceMetadataURL: a.URL + "/.well-known/oauth-protected-resource"})(h)
+	a.messages()
+	attached := a.Kit.Attach(srv, appkit.AttachOptions{Identify: identify})
+	return appkit.RequireBearer(a.verifyMCP, a.URL+"/.well-known/oauth-protected-resource")(attached.Wrap(h))
 }
 
 func (a *App) verifyMCP(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
@@ -81,7 +83,7 @@ func (a *App) addTools(srv *mcp.Server) {
 			if err != nil {
 				return nil, nil, err
 			}
-			return a.watch(ctx, ag, in.Args.Call(req, wsUser(ag.TeamID, ag.UserID)), in.Label)
+			return a.watch(ctx, ag, in.Args.Call(req, wsUser(ag.TeamID, ag.UserID)), appkit.SpeaksEvents(req), in.Label)
 		})
 	mcp.AddTool(srv, &mcp.Tool{Name: "reply", Description: "Post in Slack: in your DM thread with the person who connected you, or in a " +
 		"channel you listen in (pass the channel and thread_ts of the message you're answering). You can't mention @channel, people or groups."},
@@ -98,7 +100,7 @@ func (a *App) addTools(srv *mcp.Server) {
 			if err != nil {
 				return nil, nil, err
 			}
-			return a.unwatch(ctx, ag, in.Args.Call(req, wsUser(ag.TeamID, ag.UserID)))
+			return a.unwatch(ctx, ag, in.Args.Call(req, wsUser(ag.TeamID, ag.UserID)), appkit.SpeaksEvents(req))
 		})
 	mcp.AddTool(srv, &mcp.Tool{Name: "listening", Description: "Where you listen in Slack: your DM thread, and the channels the person who " +
 		"connected you chose (every message or only @Slackline mentions, from them only or from anyone there)."},
@@ -117,8 +119,8 @@ func (a *App) addTools(srv *mcp.Server) {
 }
 
 // convKeys are hashes of what identifies the calling conversation across
-// calls: the session key Wakeshift gave it, Codex's thread, or the
-// conversation ID the agent passes.
+// calls: the session key Wakeshift gave it, Codex's thread, ChatGPT's
+// conversation, or the conversation ID the agent passes.
 func (a *App) convKeys(ag Agent, call appkit.Call, more ...string) [][]byte {
 	var keys [][]byte
 	add := func(kind, v string) {
@@ -128,6 +130,9 @@ func (a *App) convKeys(ag Agent, call appkit.Call, more ...string) [][]byte {
 	}
 	add("session", call.Session)
 	add("codex", appkit.CodexThread(call.Meta))
+	if s, ok := call.Meta["openai/session"].(string); ok {
+		add("openai", s)
+	}
 	add("conversation", call.Conversation)
 	for _, s := range more {
 		add("session", s)
@@ -145,7 +150,7 @@ func (a *App) listenerOf(ctx context.Context, ag Agent, call appkit.Call) (Liste
 	return l, err
 }
 
-func (a *App) watch(ctx context.Context, ag Agent, call appkit.Call, label string) (*mcp.CallToolResult, any, error) {
+func (a *App) watch(ctx context.Context, ag Agent, call appkit.Call, native bool, label string) (*mcp.CallToolResult, any, error) {
 	team, err := a.Store.Team(ctx, ag.TeamID)
 	if errors.Is(err, ErrNotFound) {
 		return nil, nil, errors.New("Slackline isn't in this person's Slack workspace yet: ask them to add it (Add to Slack, at " + a.URL + ")")
@@ -161,15 +166,21 @@ func (a *App) watch(ctx context.Context, ag Agent, call appkit.Call, label strin
 	if !existing {
 		l = Listener{ID: newID(), AgentID: ag.ID, Label: cleanLabel(label, ag.Label)}
 	}
-	sub, err := a.Kit.Subscribe(ctx, call, listenerTopic(ag.TeamID, ag.UserID, l.ID), appkit.SubscribeOptions{})
-	if err != nil {
-		return nil, nil, err
+	// A client that subscribes itself (ChatGPT) does, after this, with the
+	// listener's ID; every other harness is subscribed here.
+	var sub appkit.CallerSubscription
+	if !native {
+		if sub, err = a.messages().Subscribe(ctx, call, MessageArgs{Listener: l.ID}); err != nil {
+			return nil, nil, err
+		}
 	}
 	switch {
 	case !existing:
 		l.Subscription = sub.ID
 		if err := a.openListener(ctx, team, ag, &l); err != nil {
-			a.Kit.Unsubscribe(context.WithoutCancel(ctx), call, listenerTopic(ag.TeamID, ag.UserID, l.ID))
+			if !native {
+				a.messages().Unsubscribe(context.WithoutCancel(ctx), call, MessageArgs{Listener: l.ID})
+			}
 			return nil, nil, err
 		}
 	case l.Closed:
@@ -181,6 +192,13 @@ func (a *App) watch(ctx context.Context, ag Agent, call appkit.Call, label strin
 	if err := a.Store.Touch(ctx, l.ID, sub.ID); err != nil {
 		return nil, nil, err
 	}
+	// The subscription it replaces (a topic one, from before slack.message)
+	// would otherwise outlive the listener's record of it.
+	if existing && sub.ID != "" && l.Subscription != "" && l.Subscription != sub.ID {
+		if err := a.endSubscription(ctx, call.User, l.Subscription); err != nil {
+			slog.Warn("slackline: ending a listener's replaced subscription failed", "err", err)
+		}
+	}
 	if err := a.Store.RememberConversation(ctx, a.convKeys(ag, call, sub.Session), l.ID); err != nil {
 		return nil, nil, err
 	}
@@ -188,7 +206,17 @@ func (a *App) watch(ctx context.Context, ag Agent, call appkit.Call, label strin
 	if err != nil {
 		return nil, nil, err
 	}
-	return sub.Addition.Apply(nil, "Listening in Slack as \""+ag.Label+"\" (this conversation: \""+l.Label+"\"). "+where), nil, nil
+	text := "Listening in Slack as \"" + ag.Label + "\" (this conversation: \"" + l.Label + "\"). " + where
+	if native {
+		// Until it subscribes, messages reach no one (and the person is told
+		// so in Slack): say which it is.
+		note := "To be woken by Slack messages, subscribe to the slack.message event with listener \"" + l.ID + "\". You aren't subscribed yet."
+		if ids, err := a.nativeSubs(ctx, call.User, l.ID); err == nil && len(ids) > 0 {
+			note = "You're subscribed to the slack.message event with listener \"" + l.ID + "\": Slack messages wake you."
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text + "\n\n" + note}}}, map[string]any{"listener": l.ID, "subscribe": note}, nil
+	}
+	return sub.Addition.Apply(nil, text), nil, nil
 }
 
 // openListener starts the conversation's thread in the person's DM.
@@ -285,9 +313,10 @@ func (a *App) reply(ctx context.Context, ag Agent, call appkit.Call, in replyIn)
 		return nil, nil, err
 	}
 	// It posts under the name its person approved (the console can change
-	// it), never one it chose itself.
+	// it), never one it chose itself, followed by whose agent it is, so it
+	// can't pass for a person.
 	ts, err := a.Slack.post(ctx, team.BotToken, message{Channel: channel, ThreadTS: thread, Text: escapeTruncate(text, 12000),
-		Username: ag.Label, IconEmoji: ":robot_face:"})
+		Username: agentUsername(ag.Label, a.ownerName(ctx, team, ag)), IconEmoji: ":robot_face:"})
 	if err != nil {
 		return nil, nil, slackFailed(err)
 	}
@@ -318,12 +347,17 @@ func validTS(s string) bool {
 	return true
 }
 
-func (a *App) unwatch(ctx context.Context, ag Agent, call appkit.Call) (*mcp.CallToolResult, any, error) {
+func (a *App) unwatch(ctx context.Context, ag Agent, call appkit.Call, native bool) (*mcp.CallToolResult, any, error) {
 	l, err := a.listenerOf(ctx, ag, call)
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := a.Kit.Unsubscribe(ctx, call, listenerTopic(ag.TeamID, ag.UserID, l.ID)); err != nil {
+	if native {
+		err = a.endNative(ctx, call.User, l.ID)
+	} else {
+		_, err = a.messages().Unsubscribe(ctx, call, MessageArgs{Listener: l.ID})
+	}
+	if err != nil {
 		return nil, nil, err
 	}
 	if !l.Closed {

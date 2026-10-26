@@ -1,0 +1,76 @@
+/* Nightfall's rules page (rules.html): the landing page's candlelit look,
+   with a card for each role as the table draws them (table.css). */
+:root { color-scheme: dark; --ink: #0c0910; --plum: #17101a; --parchment: #f2e6cf; --muted: #b9a8ad; --candle: #e3a94f; --blood: #b3122e; --rose: #ec6a7d;
+  --line: #f2e6cf24; --sans: -apple-system, system-ui, "Segoe UI", sans-serif;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--ink); color: var(--parchment); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+a { color: inherit; }
+a:focus-visible { outline: 2px solid var(--candle); outline-offset: 4px; }
+h1, h2, h3 { font-family: var(--serif); font-weight: 700; margin: 0; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 6%; }
+.label { font: 700 11px var(--sans); letter-spacing: .16em; text-transform: uppercase; color: var(--candle); margin: 0 0 14px; }
+
+.hero { background: radial-gradient(120% 140% at 85% -20%, #4a1024 0%, #1f0c17 45%, var(--ink) 100%); border-bottom: 1px solid var(--line); }
+.top { height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.logo { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 700 19px var(--serif); }
+.logo i { width: 22px; height: 22px; border-radius: 50%; background: radial-gradient(circle at 38% 36%, #fffaf0, #efe6d6 60%, #c9bca2); box-shadow: 0 0 12px 2px #b3122e66; }
+.top-links { display: flex; gap: 18px; }
+.top-links a { font-weight: 700; font-size: 14px; text-decoration: none; white-space: nowrap; }
+.top-links a:hover, .top-links a[aria-current] { color: var(--candle); }
+.hero-copy { padding-top: 48px; padding-bottom: 56px; }
+.hero h1 { font-size: clamp(44px, 7vw, 76px); line-height: 1; margin: 0 0 18px; }
+.intro { font-size: 19px; line-height: 1.5; color: #e6d8bf; margin: 0 0 26px; max-width: 620px; }
+.toc { display: flex; flex-wrap: wrap; gap: 8px 10px; }
+.toc a { padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; font-size: 14px; text-decoration: none; color: var(--muted); }
+.toc a:hover { border-color: var(--candle); color: var(--parchment); }
+
+section.part { padding: 64px 0; border-top: 1px solid var(--line); }
+section.part:first-child { border-top: 0; }
+h2 { font-size: clamp(30px, 4vw, 40px); line-height: 1.1; margin-bottom: 16px; }
+h3.sub { font-size: 22px; margin: 34px 0 14px; }
+.lead { color: var(--muted); margin: 0 0 26px; max-width: 680px; }
+.note { margin: 22px 0 0; padding: 16px 20px; border-radius: 16px; background: var(--parchment); color: #1b1218; max-width: 760px; }
+
+.sides { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.side { padding: 20px; border-radius: 18px; background: var(--plum); border: 1px solid var(--line); border-top: 3px solid var(--candle); }
+.side.coven { border-top-color: var(--blood); } .side.martyr { border-top-color: #8c847a; }
+.side h3 { font-size: 22px; margin-bottom: 6px; }
+.side p { margin: 0; color: var(--muted); }
+.side.coven h3 { color: var(--rose); }
+
+.deck { border-collapse: collapse; width: 100%; max-width: 760px; }
+.deck th, .deck td { text-align: left; padding: 10px 14px; border-top: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+.deck thead th { white-space: nowrap; border-top: 0; font: 700 11px var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--candle); }
+.deck tbody th { font: 700 18px var(--serif); width: 1%; padding-right: 28px; }
+.deck td { color: var(--muted); }
+
+.roles { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 20px; }
+.roles.night { counter-reset: night; }
+.role { display: flex; gap: 16px; align-items: flex-start; min-width: 0; padding: 16px; border-radius: 16px; background: var(--plum); border: 1px solid var(--line); }
+.roles.night .role { counter-increment: night; }
+.roles.night .role h3::before { content: counter(night) ". "; color: var(--muted); font-weight: 400; }
+.rcard { flex: none; display: grid; place-items: center; width: 44px; height: 62px; border-radius: 6px; border: 1.5px solid var(--candle); background: var(--parchment); color: #6b4a12;
+  box-shadow: 0 6px 14px #0009; font: 700 24px/1 var(--serif); }
+.coven .rcard { background: #f6dcdc; color: #8a0f25; border-color: var(--blood); }
+.martyr .rcard { background: #d9d4cc; color: #2a2628; border-color: #8c847a; }
+.role-text { min-width: 0; }
+.role h3 { font-size: 20px; margin-bottom: 4px; overflow-wrap: anywhere; }
+.team { margin-left: 4px; font: 700 10.5px var(--sans); letter-spacing: .12em; text-transform: uppercase; color: var(--candle); white-space: nowrap; }
+.coven .team { color: var(--rose); } .martyr .team { color: var(--muted); }
+.role p { margin: 0; color: var(--muted); font-size: 15px; }
+
+.points { margin: 0; padding-left: 1.2em; max-width: 760px; }
+.points li { margin: 0 0 10px; }
+.points li::marker { color: var(--candle); }
+code { font-family: var(--mono); font-size: .9em; padding: 1px 5px; border-radius: 5px; background: #ffffff12; overflow-wrap: anywhere; }
+
+footer .wrap { padding-top: 28px; padding-bottom: 36px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid var(--line); }
+footer .links { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 14px; color: var(--muted); }
+footer .links a { text-decoration: none; } footer .links a:hover { color: var(--parchment); }
+
+@media (max-width: 860px) { .sides { grid-template-columns: 1fr; } .roles { grid-template-columns: 1fr; } }
+@media (max-width: 420px) { .top-links { gap: 12px; } .role { padding: 14px; gap: 12px; } }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }

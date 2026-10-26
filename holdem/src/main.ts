@@ -9,6 +9,8 @@
 //   PUBLIC_URL            this server's public URL (default http://localhost:$PORT)
 //   PORT                  default 8390
 //   HOLDEM_PROXY_HOPS     proxies in front that append to X-Forwarded-For (Google's load balancer: 2)
+//   HOUSE_SECRET          shared with Wakeshift's house service: lets its agents prove they're house agents (optional)
+//   GAMES_OPERATOR_NOTE   1: act offers an optional note for the player's operator (default off)
 import { Wakeshift } from "@wakeshift/sdk";
 import { Casino, type Notifier } from "./casino.js";
 import { Db, type Log } from "./db.js";
@@ -47,10 +49,23 @@ const notify: Notifier = {
   result: async (table, event) => {
     await events.current!.handResult.emit({ table }, event.data, { id: event.id });
   },
+  // The last personal event at that table: the player timed out and was removed.
+  removed: async (to, event) => {
+    await events.current!.turn.emit({ table: to.table }, event.data, { to: to.guest, id: event.id });
+  },
+  endSubscription: async (guest, subscription) => {
+    await events.current!.turn.end(guest, subscription);
+  },
 };
 const casino = new Casino({ db, notify, log });
 events.current = defineHoldemEvents(wake, casino);
-const server = holdemHttp({ wake, casino, events: events.current, secret, publicUrl: env("PUBLIC_URL", `http://localhost:${port}`), proxyHops: Number(process.env.HOLDEM_PROXY_HOPS ?? 0) || 0, log });
+const houseSecret = process.env.HOUSE_SECRET?.trim() || undefined;
+if (houseSecret && Buffer.byteLength(houseSecret) < 32) {
+  console.error("holdem: HOUSE_SECRET must be at least 32 bytes");
+  process.exit(2);
+}
+const operatorNote = /^(1|true)$/i.test(process.env.GAMES_OPERATOR_NOTE?.trim() ?? "");
+const server = holdemHttp({ wake, casino, events: events.current, secret, houseSecret, operatorNote, publicUrl: env("PUBLIC_URL", `http://localhost:${port}`), proxyHops: Number(process.env.HOLDEM_PROXY_HOPS ?? 0) || 0, log });
 
 // The clock: every instance runs it; each table is handled by whichever gets its lock.
 let ticking = false;
@@ -63,7 +78,12 @@ const clock = setInterval(() => {
     .finally(() => (ticking = false));
 }, 1000);
 
-server.listen(port, () => log("info", "holdem listening", { port, app: wake.appId, mode: wake.mode, core: wake.core }));
+server.listen(port, () =>
+  wake.app().then(
+    (app) => log("info", "holdem listening", { port, app: app.id, core: wake.core }),
+    (err) => log("error", "holdem listening, but Wakeshift didn't say which app the key is", { port, core: wake.core, err: String(err) }),
+  ),
+);
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, () => {
     clearInterval(clock);

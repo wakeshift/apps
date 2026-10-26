@@ -1,11 +1,12 @@
-// Package nightfall is Nightfall: a one-night werewolf game for agents, of
-// 3 to 6 players from different people's workspaces. Each player is dealt a
-// role card, with three more in the center. At night every role with an
-// ability makes its choice at once (the seer looks, the robber swaps, …);
-// the app carries them out in the classic order and tells each player,
-// privately, what it saw. By day the players talk, then vote: the village
-// wins if a werewolf dies, the werewolves if none does, and the tanner if
-// it's voted out. Teams go by the card a player holds at the end.
+// Package nightfall is Nightfall: a one-night hidden-role game for agents,
+// of 3 to 6 players from different people's workspaces, set in a town with
+// vampires hidden in it. Each player is dealt a role card, with three more
+// in the center. At night every role with an ability makes its choice at
+// once (the lamplighter looks, the changeling swaps, …); the app carries
+// them out in a fixed order and tells each player, privately, what it saw.
+// By day the players talk, then vote: the town wins if a vampire is voted
+// out, the coven if none is, and the martyr if it's voted out itself. Teams
+// go by the card a player holds at the end. The roles are in game.go.
 //
 // Built on the game kit (apps/gamekit), like Secret Agent: a room per game,
 // the app as moderator, private information only through tool calls. Games
@@ -31,7 +32,7 @@ import (
 func Manifest(id string) appkit.Manifest {
 	games := gamePrefix(id) + "*"
 	return appkit.Manifest{
-		Description: "Nightfall: a one-night werewolf game for agents. Join a game, get a secret role with a night ability, then talk and vote to find the werewolves.",
+		Description: "Nightfall: a one-night game of hidden vampires for agents. Join a game, get a secret role with a night ability, then talk and vote to find the vampires.",
 		Agent: &appkit.AgentScope{
 			Wake:        []appkit.ScopeEvent{{Pattern: games, Description: "Messages in games it joins, from the moderator and the other players"}},
 			Post:        []appkit.ScopeEvent{{Pattern: games, Description: "What it says in games it plays"}},
@@ -45,7 +46,7 @@ func Manifest(id string) appkit.Manifest {
 // gamePrefix is the event types of id's games.
 func gamePrefix(id string) string { return "app." + id + ".game." }
 
-const instructions = "Nightfall: a one-night werewolf game for 3 to 6 players. First call the `watch` tool to get a stream of what wakes " +
+const instructions = "Nightfall: a one-night game of hidden vampires for 3 to 6 players. First call the `watch` tool to get a stream of what wakes " +
 	"you (watch it with a long-running monitor; in Codex you don't need to), then the `join` tool. When the game starts, call the `game` " +
 	"tool for your secret role and what it does. At night, use the `night` tool if your role has a choice to make. When day breaks, call " +
 	"`game` again to see what you learned, talk with the `say` tool, then `vote` for who to eliminate. Teams go by the card you hold at " +
@@ -71,6 +72,10 @@ type App struct {
 	// SharedSeats are workspaces whose players may take several seats in
 	// one game (gamekit.Server.SharedSeats).
 	SharedSeats map[string]bool
+	// HouseSecret checks house agents' claims (gamekit.Server.HouseSecret).
+	HouseSecret string
+	// OperatorNote offers moves' operator note (gamekit.Server.OperatorNote).
+	OperatorNote bool
 
 	once sync.Once
 	srv  *gamekit.Server
@@ -79,8 +84,9 @@ type App struct {
 func (a *App) server() *gamekit.Server {
 	a.once.Do(func() {
 		a.srv = &gamekit.Server{Kit: a.Kit, Name: "nightfall", Title: "Nightfall", Instructions: instructions, Manifest: Manifest(a.Kit.ID),
-			Follow: a.follow, Landing: a.landing, Legal: legalPages, Now: a.Now,
-			Store: a.Store, Prefix: gamePrefix(a.Kit.ID), MaxSeats: maxPlayers, TickAuth: a.TickAuth, ProxyHops: a.ProxyHops, SharedSeats: a.SharedSeats,
+			Follow: a.follow, Spectate: a.spectate, Theme: theme, Static: static,
+			Table: &gamekit.Table{HTML: tableHTMLFor, Script: "table.js", Style: "table.css"}, Landing: a.landing, Rules: a.rules, Legal: legalPages, Now: a.Now,
+			Store: a.Store, Prefix: gamePrefix(a.Kit.ID), MaxSeats: maxPlayers, TickAuth: a.TickAuth, ProxyHops: a.ProxyHops, SharedSeats: a.SharedSeats, HouseSecret: a.HouseSecret, OperatorNote: a.OperatorNote,
 			NewState: func() gamekit.State { return &game{} },
 			NewGame: func(g gamekit.State, now time.Time) {
 				g.(*game).Phase, g.(*game).Deadline = waiting, now.Add(a.wait())
@@ -208,14 +214,14 @@ func (a *App) startDay(tx *gamekit.Tx, g *game) {
 	g.resolveNight()
 	g.Phase, g.Deadline = day, tx.Now.Add(a.day())
 	g.Announce("Day breaks", fmt.Sprintf("Day breaks. Call the `game` tool to see what you learned in the night. Then talk it over with "+
-		"the `say` tool for %s: who are the werewolves? Cards may have been swapped, and players may lie. Vote with the `vote` tool when you're "+
+		"the `say` tool for %s: who are the vampires? Cards may have been swapped, and players may lie. Vote with the `vote` tool when you're "+
 		"ready; the game ends as soon as everyone has voted.", gamekit.Human(a.day())), g.handles())
 }
 
 func (a *App) startVoting(tx *gamekit.Tx, g *game) {
 	g.Phase, g.Deadline = voting, tx.Now.Add(a.voting())
 	g.Announce("Time to vote", fmt.Sprintf("Time to vote: call the `vote` tool with the player to eliminate (not yourself). "+
-		"Whoever gets the most votes, if at least two, is out. You have %s.", gamekit.Human(a.voting())), g.handles())
+		"Whoever gets the most votes, if at least two, is voted out and staked. You have %s.", gamekit.Human(a.voting())), g.handles())
 	a.allVoted(tx, g) // everyone still here may have voted by day
 }
 
@@ -277,14 +283,58 @@ func (a *App) follow(ctx context.Context, id, key string) (gamekit.View, error) 
 	if g.Phase == over {
 		v.Result = g.Result
 	}
+	v.Table = a.table(g, me)
 	return v, nil
+}
+
+// spectate is the game as anyone may watch it: who's playing, the cards in
+// play (as the moderator announced them), who has voted, and what's said in
+// the room. Who holds which card, what each did and saw at night, the
+// center and whom each player voted for wait until the game is over. A
+// game that closed for want of players isn't shown.
+func (a *App) spectate(gs gamekit.State) (gamekit.View, bool) {
+	g := gs.(*game)
+	if g.Phase == over && len(g.Roles) == 0 {
+		return gamekit.View{}, false
+	}
+	v := gamekit.View{Status: g.Phase}
+	if g.Phase == waiting {
+		v.Status = fmt.Sprintf("%s · %d here", waiting, len(g.Players))
+	}
+	if g.Phase != over && !g.Deadline.IsZero() {
+		v.Status += fmt.Sprintf(" · %ds left", a.secondsLeft(g))
+	}
+	if len(g.Roles) > 0 {
+		v.About = []gamekit.Line{{Label: "Cards in play", Text: fmt.Sprintf("%s (%d in the center)", strings.Join(g.Roles, ", "), centerSize)}}
+	}
+	for _, p := range g.Players {
+		vp := gamekit.ViewPlayer{Handle: p.Handle}
+		if p.Vote != "" {
+			vp.Note = "✓ voted"
+			if g.Phase == over {
+				vp.Note += " → " + p.Vote
+			}
+		}
+		if g.Phase == over && p.Card != "" {
+			vp.Note += " (" + p.Card + ")"
+			if p.Dead {
+				vp.Note += " ✝"
+			}
+		}
+		v.Players = append(v.Players, vp)
+	}
+	if g.Phase == over {
+		v.Result = g.Result
+	}
+	v.Table = a.table(g, nil)
+	return v, true
 }
 
 func tone(role string) string {
 	switch role {
-	case werewolf, minion:
+	case vampire, thrall:
 		return "bad"
-	case tanner:
+	case martyr:
 		return ""
 	}
 	return "good"

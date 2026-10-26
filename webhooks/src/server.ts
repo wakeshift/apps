@@ -11,6 +11,7 @@ import { checkSignature, MAX_BODY, toEvent } from "./events.js";
 import { isCheck, isPasted, Links, MAX_PASTED, type Check, type Link, type PastedCheck } from "./links.js";
 import { legalDocsFor, legalPage } from "./legal.js";
 import { checkNames, css, curlFor, homePage, linkPage, logoSvg, messagePage, type PageLimits } from "./page.js";
+import { pickerAssets } from "./agentpicker/picker.js";
 import { State, type Limits, type McpSession } from "./state.js";
 
 const DAY = 24 * 3600_000;
@@ -83,7 +84,7 @@ class Busy extends Error {
 }
 
 /** The try server: call listen() on the result. */
-export function tryServer(o: Options): Server & { stop(): Promise<void> } {
+export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(): Promise<void> } {
   const wake = o.wake;
   const received = webhookEvent(wake);
   const links = new Links(o.secret);
@@ -160,7 +161,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
     // webhook.received for native MCP Events clients (events/list,
     // events/subscribe), and subscribe_events, unsubscribe_events and
     // list_subscriptions for every client. The link's webhook is the user.
-    wake.serveEvents(server, { user: () => l.hook });
+    wake.attach(server, { identify: () => ({ user: l.hook }) });
     // The call as Wakeshift needs it: the client's name (from the server),
     // the webhook as the user, and the arguments wake.args adds.
     const callOf = (extra: Parameters<typeof wake.call>[0], args: Record<string, unknown>) => wake.call(extra, { server, user: l.hook, args });
@@ -413,7 +414,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
       res.setHeader("Retry-After", String(wait));
       return apiError(res, 429, "rate_limited", `Too many posts to this webhook URL. Try again in ${wait}s.`);
     }
-    await quietly(state.touch(w.hook));
+    if ((await quietly(state.touch(w.hook))) === false) return apiError(res, 410, "expired", `This webhook's link expired after ${idleDays} days without use. Get a new one at ${base}.`);
     // A service posting to a checked URL is the URL to tell the agent about.
     if (w.check !== "open") await quietly(state.pick(w.hook, { check: w.check, url }));
     const ev = toEvent(w.hook, incoming, w.check);
@@ -480,7 +481,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff",
-      "Content-Security-Policy": `default-src 'none'; style-src 'self'; img-src 'self'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+      "Content-Security-Policy": `default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self' 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
     });
     res.end(render(nonce));
   }
@@ -492,13 +493,13 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
       else jsonRpcError(res, 404, "No such webhook link.");
       return undefined;
     }
-    if (!(await alive(l))) {
+    // touch is false if the link expired as we looked (the sweep took it just now).
+    if (!(await alive(l)) || (await quietly(state.touch(l.hook))) === false) {
       const msg = `This link expired after ${idleDays} days without use.`;
       if (kind === "page") page(res, 410, (n) => messagePage(n, "This link expired", msg + " Get a new one below."));
       else jsonRpcError(res, 410, msg + ` Get a new one at ${base}.`);
       return undefined;
     }
-    await quietly(state.touch(l.hook));
     return l;
   }
 
@@ -651,6 +652,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
       return apiError(res, 405, "method_not_allowed", "GET this page.");
     }
     if (p === "/static/try.css") return asset(res, "text/css; charset=utf-8", css);
+    if (Object.hasOwn(pickerAssets, p) && (m === "GET" || m === "HEAD")) return asset(res, pickerAssets[p].type, pickerAssets[p].body);
     if (p === "/static/wakeshift.svg" || p === "/favicon.ico") return asset(res, "image/svg+xml", logoSvg);
     if ((match = p.match(/^\/in\/([A-Za-z0-9_-]+)\/?$/))) return webhook(req, res, match[1]);
     if ((match = p.match(/^\/t\/([A-Za-z0-9_-]+)\/mcp\/?$/))) {
@@ -715,11 +717,24 @@ export function tryServer(o: Options): Server & { stop(): Promise<void> } {
       else res.end();
     });
   });
-  const sweep = setInterval(() => {
-    state.sweep(idleDays * DAY, idleDays * DAY).catch((err) => log("warn", "sweep failed", { err: String(err) }));
-  }, 10 * 60_000);
+  // What's kept goes as the privacy policy says (state.sweep); then
+  // Wakeshift forgets the webhooks whose links expired, retried on later
+  // passes until it has.
+  async function retain(): Promise<void> {
+    await state.sweep(idleDays * DAY, idleDays * DAY).catch((err) => log("warn", "sweep failed", { err: String(err) }));
+    try {
+      const { forgotten, failed } = await state.forgetExpired((hook) => wake.forgetUser(hook));
+      if (forgotten > 0) log("info", "expired webhooks forgotten in Wakeshift", { count: forgotten });
+      if (failed > 0) log("warn", "forgetting expired webhooks in Wakeshift failed (retried later)", { count: failed });
+    } catch (err) {
+      log("warn", "forgetting expired webhooks failed", { err: String(err) });
+    }
+  }
+  const sweep = setInterval(() => void retain(), 10 * 60_000);
   sweep.unref();
   return Object.assign(server, {
+    /** One pass of the retention work (it runs every 10 minutes): for tests. */
+    retain,
     async stop() {
       clearInterval(sweep);
       server.closeAllConnections();

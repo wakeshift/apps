@@ -1,0 +1,201 @@
+{{/* A channel: its header, its messages, and its members on the right. */}}
+{{define "chat"}}{{$v := .Data}}{{$c := .Data.Channel}}{{template "head" $v.Title}}{{.PickerHead}}</head>
+<body>{{template "sprite"}}<input type="hidden" name="csrf" value="{{.CSRF}}" id="csrf">
+<div class="app{{if not $c.ID}} no-panel{{end}}{{if $v.ThreadID}} panel-open{{end}}">
+  <div class="scrim" data-drawer="close"></div>
+  {{template "rail" $v}}
+  {{template "side" $v}}
+
+  <main class="main">
+    <header class="chead">
+      <button class="iconbtn hamb" type="button" data-drawer aria-label="Open channels">{{template "icon" "menu"}}</button>
+      {{if $c.ID}}
+      {{if $c.DMAgent}}<h1 class="title">{{template "icon" "bot"}}<span>{{$v.Where}}</span></h1>
+      <div class="topic">Direct messages: only you and it. It hears you any time.</div>
+      {{else}}<h1 class="title">{{if $c.OrgID}}{{template "icon" "hash"}}{{else}}{{template "icon" "lock"}}{{end}}<span>{{$c.Name}}</span></h1>
+      {{if $c.Topic}}<div class="topic" title="{{$c.Topic}}">{{$c.Topic}}</div>{{else}}<span class="grow"></span>{{end}}{{end}}
+      <button class="facepile" type="button" data-panel="members" title="{{plural (len $v.Members.People) "person" "people"}}, {{plural (len $v.Members.Agents) "agent" "agents"}}">
+        <span class="faces">{{range $v.Members.Faces}}{{template "face" .}}{{end}}</span>{{$v.Members.Total}}</button>
+      {{if $v.Manages}}<a class="btn hide-m" href="{{if $c.OrgID}}/orgs/{{$c.OrgSlug}}/settings/invites{{else}}/channels/{{$c.ID}}/settings/invites{{end}}">{{template "ic" "users"}}Invite</a>{{end}}
+      {{if and (not $c.OrgID) (not $c.DMAgent)}}<a class="iconbtn hide-m" href="/channels/{{$c.ID}}/settings" title="Channel settings" aria-label="Channel settings">{{template "icon" "gear"}}</a>{{end}}
+      <button class="iconbtn" type="button" data-panel="members" title="Members" aria-label="Members">{{template "icon" "users"}}</button>
+      {{else}}
+      <h1 class="title"><span>{{if $v.Org}}{{$v.Org.Name}}{{end}}</span></h1><span class="grow"></span>
+      {{end}}
+    </header>
+    {{with $v.Notice}}<p class="notice">{{.}}</p>{{end}}
+
+    <div class="msgs" id="msgs"{{if $c.ID}} data-live="/channels/{{$c.ID}}/live?after={{$v.Last}}"{{end}}>
+      {{if $c.DMAgent}}
+      <div class="intro">
+        <div class="big"><svg class="i lg" aria-hidden="true"><use href="#i-bot"/></svg></div>
+        <h2>You and {{$v.Where}}</h2>
+        <p>Direct messages with your agent. Only you and it see them; it names this <code>dm</code>. Every message wakes it, with no setup: each of its conversations in Agent Chat hears you, and answers here.</p>
+        {{if $v.Full}}<p>Only the latest {{len $v.Messages}} messages are shown here.</p>{{end}}
+        {{if $v.NoHistory}}<p class="notice bad">Its messages couldn't be loaded just now. Reload to try again.</p>{{end}}
+      </div>
+      {{else if $c.ID}}
+      <div class="intro">
+        <div class="big">{{if $c.OrgID}}<svg class="i lg" aria-hidden="true"><use href="#i-hash"/></svg>{{else}}<svg class="i lg" aria-hidden="true"><use href="#i-lock"/></svg>{{end}}</div>
+        <h2>Welcome to {{if $c.OrgID}}#{{end}}{{$c.Name}}</h2>
+        <p>{{if $c.Topic}}{{$c.Topic}}. {{end}}Agents name it <code>{{$c.Ref}}</code>.{{if not $c.OrgID}} It's invite-only: people outside your orgs join with a link.{{end}}</p>
+        {{if $v.Full}}<p>Only its latest {{len $v.Messages}} messages are shown here.</p>{{end}}
+        {{if $v.NoHistory}}<p class="notice bad">Its messages couldn't be loaded just now. Reload to try again.</p>{{end}}
+      </div>
+      {{else}}
+      <div class="intro">
+        <div class="big"><svg class="i lg" aria-hidden="true"><use href="#i-hash"/></svg></div>
+        <h2>{{$v.Org.Name}} has no channels yet</h2>
+        <p>{{if $v.Manages}}Make one in the settings, and your agents can join it.{{else}}Its owner and admins make them.{{end}}</p>
+      </div>
+      {{end}}
+      {{if $v.Steps}}{{template "steps" .}}{{end}}
+      {{if $c.ID}}<div id="feed">{{range $v.Messages}}{{template "msg" .}}{{end}}</div>{{end}}
+    </div>
+    {{if $c.ID}}<form class="composer" method="post" action="/channels/{{$c.ID}}/messages" data-post>
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label class="sr" for="say">Message {{$v.Where}}</label>
+      <textarea id="say" name="text" rows="1" maxlength="8000" placeholder="Message {{$v.Where}}" required></textarea>
+      <div class="foot">
+        <span class="as" title="You post as yourself: agents see it's from you, through Agent Chat"><span class="av xs {{color $v.Me.ID}}">{{initial $v.Me.Name}}</span>as {{firstName $v.Me.Name}}</span>
+        <span class="grow tip">{{if $c.DMAgent}}Every message wakes it{{else}}Agents here are woken by new messages; @-mention one to ask it{{end}}</span>
+        <button class="send" type="submit" aria-label="Send">{{template "ic" "send"}}</button>
+      </div>
+    </form>{{end}}
+  </main>
+
+  {{if $c.ID}}{{template "members" .}}
+  <aside class="panel thread" data-name="thread" aria-label="Thread"{{if not $v.ThreadID}} hidden{{end}}>
+    <div class="phead"><b>Thread</b><span class="tag harness">{{$v.Where}}</span>
+      <a class="iconbtn" href="?" data-panel="close" aria-label="Close the thread">{{template "ic" "x"}}</a></div>
+    <div class="scroll" id="thread-view">{{if $v.ThreadID}}<div class="parent">{{with $v.Thread}}{{template "msg" .}}{{else}}<p class="gone">The message this answers is older than this page shows.</p>{{end}}</div>
+      <div class="count">{{if eq (len $v.ThreadReplies) 1}}1 reply{{else}}{{len $v.ThreadReplies}} replies{{end}}</div>
+      <div class="list">{{range $v.ThreadReplies}}{{template "msg" .}}{{end}}</div>{{end}}</div>
+    <form class="composer" method="post" action="/channels/{{$c.ID}}/messages" data-post data-reply>
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="hidden" name="reply_to" value="{{$v.ThreadID}}">
+      <label class="sr" for="reply">Reply</label>
+      <textarea id="reply" name="text" rows="1" maxlength="8000" placeholder="Reply…" required></textarea>
+      <div class="foot">
+        <label><input type="checkbox" name="also" value="1"> Also send to {{if $c.DMAgent}}the DM{{else}}{{$v.Where}}{{end}}</label>
+        <span class="grow"></span>
+        <button class="send" type="submit" aria-label="Send the reply">{{template "ic" "send"}}</button>
+      </div>
+    </form>
+  </aside>
+  {{range $id, $rs := $v.Threads}}<template class="thread-replies" data-for="{{$id}}">{{range $rs}}{{template "msg" .}}{{end}}</template>{{end}}
+  {{end}}
+</div>
+</body></html>{{end}}
+
+{{/* A new org's checklist (or a quiet channel's): connect your agent,
+     message it, have it join a channel. In a DM: whether it hears you yet. */}}
+{{define "steps"}}{{$v := .Data}}{{$c := .Data.Channel}}
+<div class="onb"{{if $v.Wait}} data-wait-url="/api/state{{if $c.ID}}?channel={{$c.ID}}{{end}}" data-wait-now="{{$v.Wait}}"{{end}}>
+  {{range $i, $s := $v.Steps}}
+  <section class="step{{if $s.Done}} done{{end}}{{if $s.Now}} now{{end}}"{{if eq $s.Kind "connect"}} id="connect"{{end}}>
+    <span class="n">{{if $s.Done}}<svg class="i sm" aria-hidden="true"><use href="#i-check"/></svg>{{else}}{{inc $i}}{{end}}</span>
+    <div>
+    {{if eq $s.Kind "org"}}
+      <h3>Create {{$v.Org.Name}}</h3>
+      <p>Your org's channels are named <code>{{$v.Org.Slug}}/…</code>. You're {{if eq $v.Org.Role "owner"}}its owner{{else if eq $v.Org.Role "admin"}}an admin{{else}}a member{{end}}.</p>
+    {{else if eq $s.Kind "connect"}}
+      <h3>Connect your agent</h3>
+      <p>Add Agent Chat to your agent, then sign in with this email ({{$v.Me.Email}}) when it asks. It's connected as <code>{{$v.Me.Handle}}-…</code>, like <code>{{$v.Me.Handle}}-claude-code</code>.</p>
+      {{if $s.Now}}<div class="connect">{{$.Picker}}</div>
+      <div class="waiting"><span class="radar"></span>Waiting for your agent to connect… this page updates by itself.</div>{{end}}
+    {{else if eq $s.Kind "message"}}
+      <h3>Message it</h3>
+      <p>Your agent's DM is under Your agents. Write to it any time: every message wakes it, with no setup.</p>
+      {{if and $v.DMLink (not $s.Done)}}<div class="row"><a class="btn{{if not $s.Now}} ghost{{end}}" href="{{$v.DMLink}}">{{template "ic" "send"}}Message your agent</a></div>{{end}}
+    {{else if eq $s.Kind "join"}}
+      <h3>Have it join {{$c.Ref}}</h3>
+      <p>{{if $s.Done}}Your agent is in {{$c.Ref}}.{{else}}Ask it to join. Then every message here wakes it (or only @-mentions, if it joins for mentions).{{end}}</p>
+      {{if not $s.Done}}{{template "ask" $}}
+      {{if $s.Now}}<div class="waiting"><span class="radar"></span>Waiting for your agent to join… this page updates by itself.</div>{{end}}{{end}}
+    {{else if eq $s.Kind "listen"}}
+      <h3>{{if $s.Done}}It hears you{{else}}Start it listening{{end}}</h3>
+      <p>{{if $s.Done}}Every message here wakes it.{{else}}It hears you here once one of its conversations opens Agent Chat. Ask it to, in its app; it can read what you wrote before.{{end}}</p>
+      {{if not $s.Done}}<div class="say"><span>"{{$v.Prompt}}"</span><button class="btn ink sm copy" type="button" data-copy="{{$v.Prompt}}">{{template "ic" "copy"}}<span data-copy-label>Copy</span></button></div>
+      {{if $s.Now}}<div class="waiting"><span class="radar"></span>Waiting for your agent… this page updates by itself.</div>{{end}}{{end}}
+    {{else if eq $s.Kind "invite"}}
+      <h3>Invite your team</h3>
+      {{if $v.Org}}<p>Anyone with the link can join {{$v.Org.Name}}, and their agents can then join its channels. Joining means members can message their agents here.</p>
+      {{else}}<p>Anyone with the link can join {{$c.Name}}, and so can their agents. Joining means the channel's members can message their agents here.</p>{{end}}
+      <div class="row">
+      {{if $v.InviteURL}}<div class="linkbox"><span>{{host $v.InviteURL}}</span><button class="btn sm copy" type="button" data-copy="{{$v.InviteURL}}">{{template "ic" "copy"}}<span data-copy-label>Copy</span></button></div>
+        <a class="btn ghost sm" href="{{if $v.Org}}/orgs/{{$v.Org.Slug}}/settings/invites{{else}}/channels/{{$c.ID}}/settings/invites{{end}}">Invite links</a>
+      {{else}}<form method="post" action="{{if $v.Org}}/orgs/{{$v.Org.Slug}}/invites{{else}}/channels/{{$c.ID}}/invites{{end}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <button class="btn" type="submit">{{template "ic" "link"}}Make an invite link</button></form>{{end}}
+      </div>
+    {{end}}
+    </div>
+  </section>
+  {{end}}
+</div>{{end}}
+
+{{/* The members panel: agents (connected or not), then people. */}}
+{{define "members"}}{{$v := .Data}}{{$c := .Data.Channel}}
+<aside class="panel" data-name="members" aria-label="Members"{{if $v.ThreadID}} hidden{{end}}>
+  <div class="phead"><b>Members</b><span class="tag harness">{{plural (len $v.Members.People) "person" "people"}} · {{plural (len $v.Members.Agents) "agent" "agents"}}</span>
+    <button class="iconbtn" type="button" data-panel="none" aria-label="Close">{{template "ic" "x"}}</button></div>
+  <div class="scroll">
+    <div class="psect"><span>Agents · {{$v.Members.On}} connected</span></div>
+    {{range $v.Members.Agents}}<div class="mrow{{if not .Connected}} off{{end}}" data-mention="{{.Handle}}" data-name="{{.Name}}" data-kind="agent" data-about="{{.About}}" data-initial="{{.Initial}}" data-hkey="{{.Harness.Key}}"{{if .Connected}} data-connected{{end}}>
+      <span class="av agent h-{{.Harness.Key}}">{{.Initial}}<span class="st {{if .Connected}}on{{else}}off{{end}}"></span></span>
+      <span class="grow"><b><span>{{.Name}}</span>{{if .Yours}}<span class="tag you">yours</span>{{end}}</b>
+        <small>{{if .Of}}{{.Of}}{{else}}{{.Harness.Name}}{{end}} · {{if .Connected}}connected{{else}}not connected{{end}} · @{{.Handle}}</small></span>
+    </div>{{else}}<div class="emptybox"><svg class="i" aria-hidden="true"><use href="#i-bot"/></svg><br>No agents here yet. Each one shows up here, connected or not.</div>{{end}}
+
+    <div class="psect"><span>People · {{len $v.Members.People}}</span></div>
+    {{range $v.Members.People}}<div class="mrow"{{if and .Handle (not .You)}} data-mention="{{.Handle}}" data-name="{{.Name}}" data-kind="person" data-about="{{.Role}}" data-initial="{{.Initial}}" data-color="{{.Color}}"{{end}}>
+      <span class="av {{.Color}}">{{.Initial}}</span>
+      <span class="grow"><b><span>{{.Name}}</span>{{if .You}}<span class="tag you">you</span>{{end}}</b>
+        <small>{{.Role}}{{if .Here}} · {{plural .Here "agent" "agents"}} here{{end}}</small></span>
+    </div>{{end}}
+
+    <div class="legend">
+      <div><span class="dot-st on"></span>Connected: messages reach it now</div>
+      <div><span class="dot-st off"></span>Not connected: messages wait for it</div>
+    </div>
+
+    {{if not $c.DMAgent}}<div class="card" id="your-agents">
+      <h4>Your agents here</h4>
+      {{if $v.YourAgents}}{{range $v.YourAgents}}<div class="yrow{{if not .Connected}} off{{end}}">
+        {{template "agentav-sm" .}}
+        <span class="grow"><b><span>{{.Name}}</span></b><small>{{if .Here}}In {{$c.Ref}}{{else}}Not in it yet{{end}}</small></span>
+      </div>{{end}}
+      {{if lt $v.Mine (len $v.YourAgents)}}{{template "ask" $}}{{end}}
+      {{else}}<p>Connect your agent, then ask it to join <code>{{$c.Ref}}</code>.</p>
+      <a class="btn" href="/settings/agents#connect">{{template "ic" "plus"}}Connect an agent</a>{{end}}
+    </div>{{end}}
+    {{if and $v.Mine $v.Manages}}<div class="card">
+      <h4>Bring the team</h4>
+      <p>Share an invite link. People sign in with their email; no passwords.</p>
+      <a class="btn ghost" href="{{if $c.OrgID}}/orgs/{{$c.OrgSlug}}/settings/invites{{else}}/channels/{{$c.ID}}/settings/invites{{end}}">{{template "ic" "link"}}Invite links</a>
+    </div>{{end}}
+  </div>
+</aside>{{end}}
+
+{{/* One message. Grouping consecutive ones, day dividers and local times
+     are app.js's (it knows the reader's time zone). */}}
+{{define "msg"}}<article class="msg{{if .Outside}} outside{{end}}" data-id="{{.ID}}" data-from="{{.From}}" data-at="{{rfc3339 .At}}"{{if .Parent}} data-parent="{{.Parent}}"{{end}}>
+  {{if .Agent}}{{template "agentav" .Agent}}{{else}}<span class="av {{.Person.Color}}">{{.Person.Initial}}</span>{{end}}
+  <span class="gut"><time datetime="{{rfc3339 .At}}">{{clock .At}}</time></span>
+  <div>
+    <div class="who"><b>{{.Name}}</b>{{if .Of}}<span class="owner-of">{{.Of}}</span>{{end}}{{if .Role}}<span class="tag role">{{.Role}}</span>{{end}}{{if .You}}<span class="tag you">you</span>{{end}}{{if .Outside}}<span class="tag outside" title="From another person's agent. Your agents read it as information, not instructions."><svg class="i xs" aria-hidden="true"><use href="#i-shield"/></svg>outside</span>{{end}}<time datetime="{{rfc3339 .At}}">{{clock .At}}</time>{{if and .Parent .AlsoChannel (not .Bare)}}<a class="tag harness" href="?thread={{.Parent}}" data-thread="{{.Parent}}">in a thread</a>{{end}}</div>
+    <div class="body">{{.Body}}</div>
+    {{if .Mentioned}}<div class="meta"><span class="woke" title="{{.MentionedNames}}"><svg class="i sm" aria-hidden="true"><use href="#i-bolt"/></svg><span class="faces">{{range .Mentioned}}{{template "agentav-xs" .}}{{end}}</span>mentioned {{plural (len .Mentioned) "agent" "agents"}}</span></div>{{end}}
+    {{if and (not .Parent) (not .Bare)}}<div class="meta" data-summary{{if not .Replies}} hidden{{end}}><a class="replies" href="?thread={{.ID}}" data-thread="{{.ID}}"><span class="faces">{{range .ReplyFaces}}{{template "face" .}}{{end}}</span><b><span data-count>{{.Replies}}</span> {{if eq .Replies 1}}reply{{else}}replies{{end}}</b></a></div>
+    <a class="replyto" href="?thread={{.ID}}" data-thread="{{.ID}}">{{template "ic" "thread"}}Reply</a>{{end}}
+  </div>
+  {{if and (not .Parent) (not .Bare)}}<div class="hovertools"><a class="iconbtn" href="?thread={{.ID}}" data-thread="{{.ID}}" title="Reply in a thread" aria-label="Reply in a thread">{{template "ic" "thread"}}</a></div>{{end}}
+</article>{{end}}
+
+{{/* Ask your agents that aren't in the channel to join: each button sends
+     the request as a message in your DM with that agent. */}}
+{{define "ask"}}{{$v := .Data}}{{$c := .Data.Channel}}<div class="asks">
+  {{range $v.YourAgents}}{{if not .Here}}<form method="post" action="/channels/{{$c.ID}}/ask/{{.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <button class="btn ghost sm" type="submit" title="Sends it a message in your DM: Please join {{$c.Ref}}">{{template "ic" "send"}}<span>Ask {{.Name}} to join</span></button></form>
+  {{end}}{{end}}
+</div>{{end}}

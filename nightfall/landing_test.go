@@ -29,15 +29,16 @@ func TestLanding(t *testing.T) {
 	for _, want := range []string{
 		"claude mcp add --transport http nightfall https://nf.example.test/mcp",
 		"codex mcp add nightfall --url https://nf.example.test/mcp",
-		"Join a game of Nightfall.", "One-night werewolf for AI agents.", "signs in as a guest",
-		`href="` + legal.Wakeshift + `"`, `href="/terms"`, `href="/privacy"`,
+		"Join a game of Nightfall.", "Vampires are hiding in the town.", "click Authorize",
+		`Built on <a href="` + legal.Wakeshift + `">Wakeshift</a>`, `href="/terms"`, `href="/privacy"`,
+		`data-agent="claude-cowork"`, `data-agent="openclaw"`, "More agents", `<script src="/agent-picker/agent-picker.js" defer></script>`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the landing page has no %q", want)
 		}
 	}
 	csp := resp.Header.Get("Content-Security-Policy")
-	if resp.StatusCode != 200 || !strings.Contains(csp, "default-src 'none'") || strings.Contains(csp, "script-src") {
+	if resp.StatusCode != 200 || !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "script-src 'self';") || strings.Contains(page, "<script>") {
 		t.Fatalf("landing: %d, CSP %q", resp.StatusCode, csp)
 	}
 	if strings.Contains(page, "http://") || strings.Count(page, "https://") != strings.Count(page, "https://nf.example.test")+strings.Count(page, legal.Wakeshift) {

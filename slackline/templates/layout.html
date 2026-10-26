@@ -2,6 +2,11 @@
 
 {{define "slack"}}<svg class="slack" viewBox="0 0 54 54" aria-hidden="true"><g transform="translate(27 27)"><g><rect x="-25" y="-9" width="22" height="9" rx="4.5" fill="#36C5F0"/><rect x="-12" y="-25" width="9" height="14" rx="4.5" fill="#36C5F0"/></g><g transform="rotate(90)"><rect x="-25" y="-9" width="22" height="9" rx="4.5" fill="#2EB67D"/><rect x="-12" y="-25" width="9" height="14" rx="4.5" fill="#2EB67D"/></g><g transform="rotate(180)"><rect x="-25" y="-9" width="22" height="9" rx="4.5" fill="#ECB22E"/><rect x="-12" y="-25" width="9" height="14" rx="4.5" fill="#ECB22E"/></g><g transform="rotate(270)"><rect x="-25" y="-9" width="22" height="9" rx="4.5" fill="#E01E5A"/><rect x="-12" y="-25" width="9" height="14" rx="4.5" fill="#E01E5A"/></g></g></svg>{{end}}
 
+{{/* Where people agree to Slackline's terms: by Add to Slack and Sign in with Slack, on the step that confirms where messages go, and by Connect on the consent page. The only copy of the sentence (apps/legal/agreement_test.go). */}}
+{{define "agree"}}By continuing, you agree to Slackline's <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.{{end}}
+
+{{define "disclosure"}}Messages that reach your agent are sent to Wakeshift, then to your own agent and its AI model provider (for example Anthropic or OpenAI). Slackline never uses Slack data to train AI models. Wakeshift deletes each message once your agent receives it.{{end}}
+
 {{define "head"}}<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
@@ -187,10 +192,7 @@ section.band+section.band .feat{background:#000;border-color:#000;color:var(--in
 .empty h2{margin:0 0 8px}.empty p{margin:0 auto;max-width:420px}
 .connect{margin-top:28px}
 .connect h2{margin:0 0 8px}
-.cmd{display:flex;align-items:center;gap:14px;padding:12px 0;border-top:1px solid var(--line-2);font-size:14px}
-.cmd:first-of-type{margin-top:14px}
-.cmd .lbl{flex:none;width:96px;font-weight:700;color:var(--ink-2)}
-.cmd code{flex:1}
+.connect .ap{margin-top:16px;--ap-fg:var(--ink);--ap-muted:var(--ink-2);--ap-line:var(--line);--ap-accent:var(--green);--ap-on-fg:#000;--ap-pill-bg:var(--bg);--ap-code-bg:#000;--ap-code-fg:var(--ink);--ap-mono:var(--mono)}
 .activity{margin-top:36px}.activity h2{margin:0 0 14px}
 .log{list-style:none;margin:0;padding:4px 0}
 .log li{display:flex;justify-content:space-between;gap:16px;padding:11px 20px;border-top:1px solid var(--line-2);font-size:14.5px}
@@ -223,11 +225,10 @@ section.band+section.band .feat{background:#000;border-color:#000;color:var(--in
   .rules li{display:grid;grid-template-columns:1fr auto;grid-template-areas:"chan rm" "what what" "who who";row-gap:6px}
   .chan{grid-area:chan;min-width:0}.rule-what{grid-area:what}.rules .pill{grid-area:who;justify-self:start}.rules form{grid-area:rm}
   .addrule select,.addrule button{flex:1 1 100%}
-  .cmd{flex-direction:column;align-items:flex-start;gap:6px}
   .log li{flex-direction:column;gap:2px;padding:11px 16px}
   .callout.install{flex-wrap:wrap}
 }
-</style></head><body>
+</style>{{.PickerHead}}</head><body>
 <header class="top"><div class="wrap">
 <a class="brand" href="/">{{template "mark"}}<span>slack<b>line</b></span></a>
 <nav>{{if .CSRF}}<form class="inline" method="post" action="/signout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="quiet sm">Sign out</button></form>{{else}}<a class="btn btn-ghost sm" href="/signin">Sign in</a>{{end}}</nav>
@@ -238,7 +239,7 @@ section.band+section.band .feat{background:#000;border-color:#000;color:var(--in
 {{define "foot"}}</main>
 <footer class="foot"><div class="wrap">
 <a class="brand" href="/">{{template "mark"}}<span>slack<b>line</b></span></a>
-<p>Slackline doesn't store your messages. Wakeshift, which Slackline is built on, holds each message for your agent until the agent receives it.</p>
+<p>Slackline doesn't store your messages, and never uses Slack data to train AI models. <a href="{{.Wakeshift}}">Wakeshift</a>, which Slackline is built on, holds each message for your agent until the agent receives it, then deletes it.</p>
 <p class="foot-links"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></p>
 </div></footer>
 </body></html>{{end}}
@@ -261,7 +262,9 @@ section.band+section.band .feat{background:#000;border-color:#000;color:var(--in
 <a class="btn btn-slack" href="/install">{{template "slack"}}Add to Slack</a>
 <a class="btn btn-ghost" href="/signin">Sign in with Slack</a>
 </div>
+<p class="fine agree">{{template "agree"}}</p>
 <p class="fine">An admin may need to approve Slackline for your workspace.</p>
+<p class="fine disclosure"><strong>Where messages go.</strong> {{template "disclosure"}} <a href="/privacy">Privacy</a></p>
 </div>
 <div class="scene">
 <div class="dm">
@@ -303,6 +306,7 @@ section.band+section.band .feat{background:#000;border-color:#000;color:var(--in
 <section class="card closer">
 <div><h2>Bring your agents into Slack</h2><p>Add Slackline, connect an agent, and talk to it in a thread.</p></div>
 <a class="btn btn-slack" href="/install">{{template "slack"}}Add to Slack</a>
+<p class="fine agree">{{template "agree"}}</p>
 </section>
 </div>
 {{template "foot" .}}{{end}}
@@ -337,10 +341,13 @@ Continue only if you just added Slackline to your own agent{{if not .Local}} and
 <input type="hidden" name="response_type" value="code">
 <input type="hidden" name="state" value="{{.Req.State}}">
 <input type="hidden" name="resource" value="{{.Req.Resource}}">
+{{if not .User.Understood}}<div class="callout warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg><p><strong>Where messages go.</strong> {{template "disclosure"}} <a href="/privacy">Privacy</a></p></div>
+<label class="check" style="margin:0 0 18px"><input type="checkbox" name="understood" value="1" required><span>I understand where my agent's messages go.</span></label>{{end}}
 <label class="field" for="label">Its name in Slack</label>
 <input id="label" type="text" name="label" value="{{.Label}}" maxlength="40" style="width:100%">
 <p class="muted small" style="margin:6px 0 0">Its posts are signed with this name.</p>
 <div class="actions"><button name="decision" value="allow">Connect</button><button class="quiet" name="decision" value="deny">Cancel</button></div>
+<p class="muted small agree">{{template "agree"}}</p>
 <p class="addr">You'll be sent back to <code>{{.Req.RedirectURI}}</code></p>
 </form>
 </div></div>

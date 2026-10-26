@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { checkSignature, githubText, toEvent } from "../src/events.js";
 import { Links } from "../src/links.js";
-import { askLine, connectedText, cursorDeeplink, esc, harnessTabs, linkPage, shq } from "../src/page.js";
+import { askLine, connectedText, esc, linkPage, shq } from "../src/page.js";
+import { pickerHtml, SCRIPT_PATH, STYLE_PATH } from "../src/agentpicker/picker.js";
 import { inline, legalDocsFor, markdown, siteFor, WAKESHIFT } from "../src/legal.js";
 import { State } from "../src/state.js";
 import { addressKey, logLine, MAX_DRAIN, sseWrite, tryServer } from "../src/server.js";
@@ -454,6 +456,79 @@ test("state: a watcher whose subscription ended stops keeping a webhook's activi
   assert.deepEqual(await st.posts("h", 10), []);
 });
 
+test("state: an expired link's webhook is forgotten in Wakeshift, retried until it is", async (t) => {
+  let now = Date.parse("2026-10-18T10:00:00Z");
+  const url = await testDatabase(t);
+  const st = new State(openDb(t, url), { perHour: 5, perDay: 5, globalPerHour: 5 }, () => now);
+  const DAY = 24 * 3600_000;
+  for (const h of ["old", "flaky", "live"]) await st.touch(h);
+  const asked: string[] = [];
+  let fail = true;
+  const forget = async (hook: string) => {
+    asked.push(hook);
+    if (hook === "flaky" && fail) throw new Error("wakeshift unavailable");
+    return true;
+  };
+  // Nothing has expired: nothing is forgotten.
+  await st.sweep(7 * DAY, 7 * DAY);
+  assert.deepEqual(await st.forgetExpired(forget), { forgotten: 0, failed: 0 });
+  // "live" stays in use; the others expire.
+  now += 6 * DAY;
+  await st.touch("live");
+  now += DAY + 1000;
+  await st.sweep(7 * DAY, 7 * DAY);
+  // Queued, it stays expired: its use isn't written again, even by an instance that wrote it lately.
+  assert.equal(await st.touch("flaky"), false);
+  const cached = new State(openDb(t, url), { perHour: 5, perDay: 5, globalPerHour: 5 }, () => now);
+  (cached as any).touched.set("flaky", now);
+  assert.equal(await cached.touch("flaky"), false);
+  await st.pick("flaky", { check: "github", url: "https://x/in/flaky" });
+  assert.equal(await st.lastUse("flaky"), 0);
+  assert.equal(await st.checked("flaky"), undefined);
+  assert.deepEqual(await st.forgetExpired(forget), { forgotten: 1, failed: 1 });
+  assert.deepEqual(asked.sort(), ["flaky", "old"]);
+  // The failure waits for its backoff (a minute), then is tried again,
+  // and again after twice as long, until it works.
+  asked.length = 0;
+  assert.deepEqual(await st.forgetExpired(forget), { forgotten: 0, failed: 0 });
+  now += 60_000;
+  assert.deepEqual(await st.forgetExpired(forget), { forgotten: 0, failed: 1 });
+  now += 60_000;
+  assert.deepEqual(await st.forgetExpired(forget), { forgotten: 0, failed: 0 }, "backing off: two minutes now");
+  now += 60_000;
+  fail = false;
+  // Survives a restart: the queue is in the database.
+  const st2 = new State(openDb(t, url), { perHour: 5, perDay: 5, globalPerHour: 5 }, () => now);
+  assert.deepEqual(await st2.forgetExpired(forget), { forgotten: 1, failed: 0 });
+  assert.deepEqual(asked, ["flaky", "flaky"]);
+  // Done, it still can't come back in use for a day; then nothing is left of it.
+  assert.equal(await st2.touch("old"), false);
+  assert.equal(await st2.lastUse("old"), 0);
+  // Never asked again, and the link still in use never was.
+  now += DAY + 1000;
+  await st2.sweep(7 * DAY, 7 * DAY);
+  asked.length = 0;
+  assert.deepEqual(await st2.forgetExpired(forget), { forgotten: 0, failed: 0 });
+  assert.deepEqual(asked, []);
+  const left = await openDb(t, url).query("SELECT hook FROM forgets");
+  assert.deepEqual(left.rows, []);
+});
+
+test("state: a webhook in use again isn't forgotten", async (t) => {
+  let now = Date.parse("2026-10-18T10:00:00Z");
+  const url = await testDatabase(t);
+  const st = new State(openDb(t, url), { perHour: 5, perDay: 5, globalPerHour: 5 }, () => now);
+  const DAY = 24 * 3600_000;
+  await st.touch("h");
+  now += 7 * DAY + 1000;
+  // A post that passed the expiry check just before the sweep wrote its use as the sweep queued it.
+  await st.sweep(7 * DAY, 7 * DAY);
+  await openDb(t, url).query("INSERT INTO hooks (hook, last_use) VALUES ('h', $1)", [new Date(now)]);
+  const asked: string[] = [];
+  assert.deepEqual(await st.forgetExpired(async (h) => asked.push(h)), { forgotten: 0, failed: 0 });
+  assert.deepEqual(asked, []);
+});
+
 test("the page says whether an agent is connected, and how", () => {
   const via = { stream: 0, poll: 0, hooks: 0 };
   assert.equal(connectedText({ subscriptions: 0, connected: 0, via }), "No agent is watching right now.");
@@ -481,7 +556,7 @@ test("the page says whether an agent is connected, and how", () => {
   assert.ok(html.includes('"/status"'));
 });
 
-test("the page has a tab for every harness, each with the link's MCP URL, escaped", () => {
+test("the page shows how to connect every agent, each with the link's MCP URL, escaped", () => {
   // A URL with characters that need escaping, as a hostile base could give.
   const mcpUrl = `https://h/t/c"<b>&'/mcp`;
   const html = linkPage("n", {
@@ -495,46 +570,46 @@ test("the page has a tab for every harness, each with the link's MCP URL, escape
     limits: { perHour: 60, perDay: 500, idleDays: 7 },
   });
   assert.ok(!html.includes(`"<b>`), "the URL is escaped everywhere");
-  const u = esc(mcpUrl);
-  const tabs = harnessTabs(mcpUrl);
-  assert.deepEqual(
-    tabs.map((h) => h.label),
-    ["Claude Code", "Codex", "Cursor", "Antigravity", "opencode", "Copilot CLI", "OpenClaw", "Hermes Agent", "Other MCP clients"],
-  );
-  for (const h of tabs) {
-    assert.ok(html.includes(`href="#agent-${h.id}" data-agent="${h.id}" role="tab">${esc(h.label)}</a>`), h.id + " tab");
-    assert.ok(html.includes(`<div class="agent" id="agent-${h.id}" role="tabpanel">`), h.id + " panel");
-    assert.ok(h.add.includes(h.id === "cursor" ? esc(JSON.stringify(mcpUrl)) : u), h.id + " has the URL");
-    assert.ok(h.wakes.length > 0, h.id + " says what happens");
+  const u = mcpUrl.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&#34;").replace(/'/g, "&#39;");
+  const pills = [...html.matchAll(/<button type="button" class="ap-pill" data-agent="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(pills, ["claude-code", "codex", "claude-cowork", "cursor", "opencode", "antigravity", "chatgpt", "hermes", "openclaw", "copilot", "other"]);
+  for (const id of pills) assert.ok(html.includes(`<section class="ap-panel" id="ap-${id}" data-agent="${id}"`), id + " panel");
+  for (const cmd of [
+    `claude mcp add --transport http webhooks ${u}`,
+    `codex mcp add webhooks --url ${u}`,
+    `opencode mcp add webhooks --url ${u}`,
+    `agy mcp add webhooks ${u}`,
+    `copilot mcp add --transport http webhooks ${u}`,
+    `openclaw mcp add webhooks --url ${u} --transport streamable-http`,
+    `mcp_servers:\n  webhooks:\n    url: ${u}`,
+  ]) {
+    assert.ok(html.includes(`<code>${cmd}</code>`), cmd);
   }
-  const code = (id: string) => html.match(new RegExp(`<code id="${id}">([^<]*)</code>`))![1];
-  assert.equal(code("cc"), `claude mcp add --transport http webhooks ${u}`);
-  assert.equal(code("cx"), `codex mcp add webhooks --url ${u}`);
-  assert.equal(code("ag"), `agy mcp add webhooks ${u}`);
-  assert.equal(code("oc"), `opencode mcp add webhooks --url ${u}`);
-  assert.equal(code("co"), `copilot mcp add --transport http webhooks ${u}`);
-  assert.equal(code("ocl"), `openclaw mcp add webhooks --url ${u} --transport streamable-http`);
-  assert.equal(code("hm"), `mcp_servers:\n  webhooks:\n    url: ${u}`);
-  assert.ok(html.includes(`hermes mcp add webhooks --url ${u}`));
-  for (const id of ["openclaw", "hermes"]) {
-    const w = tabs.find((h) => h.id === id)!.wakes.join(" ");
-    assert.match(w, /one-time install of Wakeshift's plugin/, id);
-    assert.match(w, /within a second/, id);
-    assert.match(w, /next turn, so send any reply/, id);
-  }
-  assert.equal(code("mcp"), u);
-  assert.equal(code("cu"), esc(JSON.stringify({ mcpServers: { webhooks: { url: mcpUrl } } }, null, 2)));
-  assert.equal(html.split(`<q>${esc(askLine)}</q>`).length - 1, tabs.length, "every tab says what to ask");
+  assert.match(html, /choose No authentication/);
+  assert.ok(!html.includes("OAuth"));
+  assert.ok(!html.includes("/mcp, choose"), "no sign-in steps for a webhook");
+  assert.match(html, /Each post wakes the agent/);
+  assert.equal(html.split(`<q>${esc(askLine)}</q>`).length - 1, pills.length, "every agent says what to ask");
 
   // Add to Cursor: the deeplink Cursor's cursor-deeplink extension reads.
-  const link = new URL(cursorDeeplink(mcpUrl));
+  const href = html.match(/<a class="ap-btn" href="([^"]+)">/)![1].replace(/&amp;/g, "&");
+  const link = new URL(href);
   assert.equal(link.protocol + link.host + link.pathname, "cursor:anysphere.cursor-deeplink/mcp/install");
   assert.equal(link.searchParams.get("name"), "webhooks");
   assert.deepEqual(JSON.parse(Buffer.from(link.searchParams.get("config")!, "base64").toString("utf8")), { url: mcpUrl });
-  assert.ok(html.includes(`<a class="btn sm" href="${esc(cursorDeeplink(mcpUrl))}">Add to Cursor</a>`));
 
-  // The script shows one tab and remembers the choice.
-  assert.ok(html.includes(`localStorage.setItem("agent", t.dataset.agent)`));
+  // The picker's script and stylesheet come from this server, not inline.
+  assert.ok(html.includes(`<script src="${SCRIPT_PATH}" defer></script>`));
+  assert.ok(html.includes(`<link rel="stylesheet" href="${STYLE_PATH}">`));
+});
+
+test("the agent picker writes the same markup as the Go apps' (apps/agentpicker/testdata)", () => {
+  const golden = (f: string) => readFileSync(new URL(`../../../agentpicker/testdata/${f}`, import.meta.url), "utf8");
+  assert.equal(
+    pickerHtml({ name: "demo", url: `https://h.example/t/a"<b>&'+/mcp`, ask: `Ask & <say> "it"`, each: "each post", signIn: `Sign "in" & <go>.`, interactive: true }),
+    golden("interactive.html"),
+  );
+  assert.equal(pickerHtml({ name: "webhooks", url: "https://try.example/t/abc/mcp", ask: "Watch.", each: "each post", noAuth: true }), golden("noauth.html"));
 });
 
 test("pages escape what they're given", () => {
@@ -650,12 +725,20 @@ const codeIn = (html: string, id: string) => {
   return m ? unescapeHtml(m[1]) : undefined;
 };
 
+// The SDK internals these tests replace. They're left out of the SDK's
+// published types (stripInternal), so reach them through this view.
+type WakeInternals = {
+  emitEvent(e: { payload: unknown; text: string; id?: string }): Promise<{ matched: number; duplicate: boolean }>;
+  requestApp(method: string, path: string, body?: unknown): Promise<unknown>;
+};
+const internals = (w: Wakeshift) => w as unknown as WakeInternals;
+
 async function webhookFixture(t: { after: (fn: () => Promise<void>) => void }, perHour = 3) {
   const wake = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
   const published: { text: string; data?: unknown; id?: string }[] = [];
   const ids = new Set<string>();
   // Core's dedupe, in miniature: webhook.received's emit, as what was published (its summary is the text).
-  wake.emitEvent = async (e) => {
+  internals(wake).emitEvent = async (e) => {
     const { summary: _summary, ...data } = e.payload as Record<string, unknown>;
     const duplicate = !!e.id && ids.has(e.id);
     if (e.id) ids.add(e.id);
@@ -826,9 +909,9 @@ async function instance(
   o: { now?: () => number; limits?: Record<string, number>; capacity?: { requests?: number; streams?: number }; calls?: Call[]; harness?: string } = {},
 ): Promise<Instance> {
   const wake = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
-  wake.emitEvent = async () => ({ matched: 1, duplicate: false });
+  internals(wake).emitEvent = async () => ({ matched: 1, duplicate: false });
   // The event-subscription calls watch and unwatch make (webhook.received).
-  wake.requestApp = (async (_method: string, path: string, body: any) => {
+  internals(wake).requestApp = (async (_method: string, path: string, body: any) => {
     if (path === "/event-subscriptions") {
       o.calls?.push(body.call as Call);
       return {
@@ -840,7 +923,7 @@ async function instance(
     }
     if (path === "/event-subscriptions/unsubscribe") return { ended: true };
     return {};
-  }) as typeof wake.requestApp;
+  }) as WakeInternals["requestApp"];
   const db = new Db(dbUrl);
   const app = tryServer({ wake, db, secret, publicUrl: "http://127.0.0.1", limits: { perDay: 100, ...o.limits }, capacity: o.capacity, now: o.now, log: () => {} });
   await new Promise<void>((r) => app.listen(0, "127.0.0.1", () => r()));
@@ -1159,15 +1242,15 @@ test("overload: a stream counts as a request until it's admitted, then gives its
 
 // ── Legal pages ──────────────────────────────────────────────────────────
 
-test("legal: /terms, /tos and /privacy are Webhooks' own, linking to Wakeshift's for the platform", async (t) => {
+test("legal: /terms, /tos and /privacy are Webhooks' own, linking to the shared terms for our apps and our privacy policy", async (t) => {
   const wake = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
   const app = tryServer({ wake, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", log: () => {} });
   await new Promise<void>((r) => app.listen(0, "127.0.0.1", () => r()));
   t.after(() => app.stop());
   const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
   for (const [path, title, wakeshift] of [
-    ["/terms", "Terms of Service", "/terms"],
-    ["/tos", "Terms of Service", "/terms"],
+    ["/terms", "Terms of Service", "/app-terms"],
+    ["/tos", "Terms of Service", "/app-terms"],
     ["/privacy", "Privacy Policy", "/privacy"],
   ]) {
     const resp = await fetch(base + path);
@@ -1176,7 +1259,8 @@ test("legal: /terms, /tos and /privacy are Webhooks' own, linking to Wakeshift's
     assert.match(resp.headers.get("content-type") ?? "", /^text\/html/);
     assert.ok(html.includes(`<title>${title} · Wakeshift webhooks</title>`), path);
     assert.ok(html.includes(`<h1>Webhooks ${title}</h1>`), path);
-    assert.ok(html.includes("<strong>Draft.</strong>"), path);
+    assert.ok(!html.includes("<strong>Draft.</strong>") && !html.includes("not yet in effect"), path);
+    assert.ok(html.includes("Last updated ") && !html.includes("[date]") && !html.includes("Legal review"), path);
     assert.ok(html.includes(`<a href="${WAKESHIFT}${wakeshift}">`), path);
     assert.ok(html.includes("runs on Wakeshift"), path);
     assert.ok(!html.includes("${") && !html.includes("**"), path);
@@ -1186,10 +1270,23 @@ test("legal: /terms, /tos and /privacy are Webhooks' own, linking to Wakeshift's
   // Every page links to them.
   const home = await (await fetch(base + "/")).text();
   assert.ok(home.includes('<a href="/terms">Terms</a>') && home.includes('<a href="/privacy">Privacy</a>'));
+  // Its footer and nav link Wakeshift's homepage for this environment (the word, not the sentence).
+  assert.ok(home.includes(`A dev tool for trying <a href="${WAKESHIFT}">Wakeshift</a>, built`), "the footer links Wakeshift");
+  assert.ok(home.includes(`<a class="navlink" href="${WAKESHIFT}">`), "the nav links Wakeshift");
+  // Getting a link has no sign-in, so the line by its button is where people agree.
+  assert.ok(home.includes(`By getting a link, you agree to Webhooks' <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.`));
   const post = await fetch(base + "/terms", { method: "POST" });
   assert.equal(post.status, 405);
   assert.equal(post.headers.get("allow"), "GET, HEAD");
   assert.equal((await fetch(base + "/terms/x")).status, 404);
+  // The agent picker's script and stylesheet, which the page's CSP allows from 'self'.
+  for (const [path, type] of [[SCRIPT_PATH, /^text\/javascript/], [STYLE_PATH, /^text\/css/]] as const) {
+    const resp = await fetch(base + path);
+    assert.equal(resp.status, 200, path);
+    assert.match(resp.headers.get("content-type") ?? "", type);
+    assert.ok((await resp.text()).length > 100, path);
+  }
+  assert.match((await fetch(base + "/")).headers.get("content-security-policy") ?? "", /script-src 'self' 'nonce-/);
 });
 
 test("legal: Wakeshift's documents are on the site for the Wakeshift this runs on", () => {
@@ -1453,6 +1550,10 @@ test("legal: the documents state the limits in use, the preview kept and how a p
   assert.ok(!/paste[^\n]*: not stored/.test(privacy));
   assert.ok(privacy.includes("links to 3 an hour"));
   assert.ok(!privacy.includes("7 days"));
+  // Wakeshift's copy goes with the link (State.forgetExpired), not "until we delete Webhooks".
+  assert.ok(privacy.includes("When the link expires, Webhooks instructs Wakeshift to delete everything Wakeshift keeps for the webhook"), privacy);
+  assert.ok(!privacy.includes("until we delete Webhooks"));
+  assert.ok(terms.includes("Webhooks also instructs Wakeshift to delete what Wakeshift keeps for the webhook"));
   // The server serves them with its own limits.
   const a = await instance(t, await testDatabase(t), { limits: { perHour: 9, perDay: 90, linksPerHour: 4 } });
   const html = await (await fetch(a.base + "/terms")).text();

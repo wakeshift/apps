@@ -1,0 +1,25 @@
+{
+  "comment": "House-agent claims (X-Wakeshift-House), checked by apps/holdem/src/house.ts and apps/gamekit/house.go, and signed by Wakeshift's house service, so the three agree. now is unix seconds; token is the bearer token the request carries (a case's own token overrides it).",
+  "secret": "house-test-secret-0123456789abcdef0123456789",
+  "token": "house-guest-access-token.eyJ3IjoiaG91c2UifQ.c2lnbmF0dXJl",
+  "now": 1792499700,
+  "valid": [
+    { "game": "holdem", "agent": "h01", "model": "Haiku 4.5", "header": "v2.h01.SGFpa3UgNC41.1792500000.dZ9NlZ01xYR9ko_D4xxLC48AXGs8ZjaDo8jQOHVtO5k" },
+    { "game": "secret-agent", "agent": "h02", "model": "GPT-6 Luna", "header": "v2.h02.R1BULTYgTHVuYQ.1792500000.QtIpqKqruevlECsc4-H8preRc2FnHZc5SByYotrXg_o" },
+    { "game": "nightfall", "agent": "h03", "model": "Haiku 4.5", "header": "v2.h03.SGFpa3UgNC41.1792500000.dQzvT2wE9yrNgwxQXNYxTOZDdwQYITFe4n_R52_huUQ" }
+  ],
+  "invalid": [
+    { "why": "another guest's token (a leaked claim)", "game": "holdem", "now": 1792499700, "token": "another-guest-access-token", "header": "v2.h01.SGFpa3UgNC41.1792500000.dZ9NlZ01xYR9ko_D4xxLC48AXGs8ZjaDo8jQOHVtO5k" },
+    { "why": "no token", "game": "holdem", "now": 1792499700, "token": "", "header": "v2.h01.SGFpa3UgNC41.1792500000.dZ9NlZ01xYR9ko_D4xxLC48AXGs8ZjaDo8jQOHVtO5k" },
+    { "why": "another game's claim", "game": "secret-agent", "now": 1792499700, "header": "v2.h01.SGFpa3UgNC41.1792500000.dZ9NlZ01xYR9ko_D4xxLC48AXGs8ZjaDo8jQOHVtO5k" },
+    { "why": "expired", "game": "holdem", "now": 1792500001, "header": "v2.h01.SGFpa3UgNC41.1792500000.dZ9NlZ01xYR9ko_D4xxLC48AXGs8ZjaDo8jQOHVtO5k" },
+    { "why": "expires too far ahead", "game": "holdem", "now": 1792499099, "header": "v2.h01.SGFpa3UgNC41.1792500000.dZ9NlZ01xYR9ko_D4xxLC48AXGs8ZjaDo8jQOHVtO5k" },
+    { "why": "model changed", "game": "holdem", "now": 1792499700, "header": "v2.h01.R1BULTYgTHVuYQ.1792500000.dZ9NlZ01xYR9ko_D4xxLC48AXGs8ZjaDo8jQOHVtO5k" },
+    { "why": "agent changed", "game": "holdem", "now": 1792499700, "header": "v2.h09.SGFpa3UgNC41.1792500000.dZ9NlZ01xYR9ko_D4xxLC48AXGs8ZjaDo8jQOHVtO5k" },
+    { "why": "signature cut short", "game": "holdem", "now": 1792499700, "header": "v2.h01.SGFpa3UgNC41.1792500000.dZ9NlZ01xYR9ko_D4xxLC48AXGs8ZjaDo8jQOHVtO5" },
+    { "why": "the old version, bound to no token", "game": "holdem", "now": 1792499700, "header": "v1.h01.SGFpa3UgNC41.1792500000.I_CPXRgR3segi3o3M9qbexXTz5dG09nucCuOkNNMb2k" },
+    { "why": "another version", "game": "holdem", "now": 1792499700, "header": "v3.h01.SGFpa3UgNC41.1792500000.dZ9NlZ01xYR9ko_D4xxLC48AXGs8ZjaDo8jQOHVtO5k" },
+    { "why": "too few parts", "game": "holdem", "now": 1792499700, "header": "v2.h01.SGFpa3UgNC41.1792500000" },
+    { "why": "empty", "game": "holdem", "now": 1792499700, "header": "" }
+  ]
+}

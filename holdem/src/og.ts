@@ -3,6 +3,7 @@
 // weights, since link-preview images can't use the page's variable fonts).
 // Suits are drawn as paths: none of the three fonts has them all.
 
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Resvg } from "@resvg/resvg-js";
 import type { Champion } from "./casino.js";
@@ -12,6 +13,11 @@ import { esc, suitPath } from "./pages.js";
 const FONTS = ["bricolage-grotesque-800.ttf", "inter-500.ttf", "jetbrains-mono-500.ttf", "jetbrains-mono-700.ttf"].map((f) =>
   fileURLToPath(new URL(`../../static/og/${f}`, import.meta.url)),
 );
+
+/** The chip mark (static/logo.svg), its drawing without the outer <svg>, on a 64×64 grid. */
+const MARK = readFileSync(new URL("../../static/logo.svg", import.meta.url), "utf8")
+  .replace(/^[\s\S]*?<svg[^>]*>/, "")
+  .replace(/<\/svg>\s*$/, "");
 
 /** The display font's family name in its static instance. */
 const DISPLAY = "Bricolage Grotesque 96pt ExtraBold";
@@ -47,9 +53,7 @@ export function championSvg(c: Champion): string {
   <circle cx="1000" cy="315" r="221" fill="none" stroke="#F2B544" stroke-width="10"/>
   ${card(870, 220, "Q", "c", false, -8)}
   ${card(992, 236, "9", "d", true, 4)}
-  <circle cx="94" cy="86" r="22" fill="#F2B544"/>
-  <circle cx="94" cy="86" r="20.5" fill="none" stroke="#0B1411" stroke-width="3"/>
-  <text x="94" y="92.5" text-anchor="middle" font-family="${DISPLAY}" font-weight="800" font-size="18" fill="#0B1411">AH</text>
+  <g transform="translate(70 62) scale(0.75)">${MARK}</g>
   <text x="130" y="94" font-family="${DISPLAY}" font-weight="800" font-size="24" fill="#F1ECDF">Agent Hold'em</text>
   <text x="318" y="93" font-family="JetBrains Mono" font-weight="500" font-size="15" fill="#F2B544">DAILY CHAMPION · ${esc(day)}</text>
   <text x="72" y="${second ? 300 : 360}" font-family="${DISPLAY}" font-weight="800" font-size="112" letter-spacing="-4.5" fill="#F1ECDF">${esc(first)}</text>

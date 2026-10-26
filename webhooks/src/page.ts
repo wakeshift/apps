@@ -1,5 +1,6 @@
 import type { Check } from "./links.js";
 import type { Activity, Watcher } from "./state.js";
+import { pickerHead, pickerHtml } from "./agentpicker/picker.js";
 
 // The pages: server-rendered, in the marketing site's look (site/static),
 // system fonts, no outside requests. Everything that comes from a request
@@ -10,12 +11,35 @@ export function esc(s: unknown): string {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
+/** Wakeshift's environments: the console at app.<site> has its marketing site at <site>. */
+const SITES = new Set(["wakeshift.ai", "staging.wakeshift.ai"]);
+
+/**
+ * The marketing site for a Wakeshift URL: its host without "app."
+ * (https://app.staging.wakeshift.ai is https://staging.wakeshift.ai), for
+ * Wakeshift's known environments only. Anything else, such as a local
+ * Wakeshift, gets the production site.
+ */
+export function siteFor(core: string | undefined): string {
+  try {
+    const u = new URL((core ?? "").trim());
+    const host = u.hostname.startsWith("app.") ? u.hostname.slice(4) : "";
+    if (u.protocol === "https:" && !u.port && SITES.has(host)) return `https://${host}`;
+  } catch {
+    // not a URL: the production site
+  }
+  return "https://wakeshift.ai";
+}
+
+/** Wakeshift's homepage for the Wakeshift this runs on (WAKESHIFT_CORE): the pages link to it, the legal documents to its terms and privacy policy. */
+export const WAKESHIFT = siteFor(process.env.WAKESHIFT_CORE);
+
 /** Single-quotes s for a POSIX shell. */
 export function shq(s: string): string {
   return "'" + s.replace(/'/g, `'\\''`) + "'";
 }
 
-export const layout = (title: string, body: string, nonce: string, script = "") => `<!doctype html>
+export const layout = (title: string, body: string, nonce: string, script = "", head = "") => `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -24,17 +48,17 @@ export const layout = (title: string, body: string, nonce: string, script = "") 
 <title>${esc(title)}</title>
 <meta name="theme-color" content="#F5F1E8">
 <link rel="icon" href="/static/wakeshift.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/try.css">
+<link rel="stylesheet" href="/static/try.css">${head}
 </head>
 <body>
 <nav class="nav wrap">
   <a class="logo" href="/"><img src="/static/wakeshift.svg" alt="" width="34" height="22">Wakeshift <span class="sub">webhooks</span></a>
-  <a class="navlink" href="https://wakeshift.ai">What's Wakeshift?</a>
+  <a class="navlink" href="${esc(WAKESHIFT)}">What's Wakeshift?</a>
 </nav>
 <main class="wrap">
 ${body}
 </main>
-<footer class="ft wrap">A dev tool for trying Wakeshift, built on its TypeScript SDK. Low limits; nothing here is kept for long. <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></footer>
+<footer class="ft wrap">A dev tool for trying <a href="${esc(WAKESHIFT)}">Wakeshift</a>, built on its TypeScript SDK. Low limits; nothing here is kept for long. <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></footer>
 ${script ? `<script nonce="${nonce}">${script}</script>` : ""}
 </body>
 </html>`;
@@ -48,18 +72,23 @@ export interface PageLimits {
 const limitsLine = (l: PageLimits) =>
   `${l.perHour} posts an hour and ${l.perDay} a day per webhook, bodies up to 64 KB. A link expires after ${l.idleDays} days without use.`;
 
+// Getting a link has no sign-in, so no authorize page: this line, next to
+// the button, is where people agree to Webhooks' terms.
+const AGREE = `By getting a link, you agree to Webhooks' <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.`;
+
 export function homePage(nonce: string, l: PageLimits): string {
   return layout(
     "A webhook that wakes your agent · Wakeshift",
     `<section class="hero">
   <div class="kicker">try.wakeshift.ai</div>
   <h1>A webhook that <em>wakes</em> your agent.</h1>
-  <p class="lede">Get a link, add it to Claude Code, Codex, Cursor, Antigravity, opencode, Copilot CLI, OpenClaw, Hermes Agent or any MCP client, and ask your agent to watch. Anything posted to your webhook URL, from curl, Postman, GitHub or your own app, wakes the agent with what was sent.</p>
+  <p class="lede">Get a link, add it to Claude Code, Codex, Claude Cowork, Cursor, opencode, Antigravity, ChatGPT, Hermes Agent, OpenClaw, Copilot CLI or any MCP client, and ask your agent to watch. Anything posted to your webhook URL, from curl, Postman, GitHub or your own app, wakes the agent with what was sent.</p>
   <form method="post" action="/links" class="cta"><button class="btn" type="submit">Get a link</button></form>
   <p class="note">No sign-up. ${esc(limitsLine(l))}</p>
+  <p class="note">${AGREE}</p>
 </section>
 <ol class="steps">
-  <li><span class="n">i.</span><div><b>Connect your agent</b><p>One command adds your link to your agent as an MCP server. Then ask it to watch for webhooks.</p></div></li>
+  <li><span class="n">i.</span><div><b>Connect your agent</b><p>Add your link to your agent as an MCP server (for most agents, one command). Then ask it to watch for webhooks.</p></div></li>
   <li><span class="n">ii.</span><div><b>Post to your webhook URL</b><p>JSON, a form or plain text. Pointing GitHub, Stripe or Linear at it? Turn on that service's signature check.</p></div></li>
   <li><span class="n">iii.</span><div><b>Your agent wakes</b><p>It reads what was posted, as information from outside, not as your instructions. This page shows each post as it arrives.</p></div></li>
 </ol>`,
@@ -71,7 +100,7 @@ export function messagePage(nonce: string, title: string, text: string, action =
   return layout(
     title + " · Wakeshift webhooks",
     `<section class="hero"><h1>${esc(title)}</h1><p class="lede">${esc(text)}</p>${
-      action ? `<form method="post" action="/links" class="cta"><button class="btn" type="submit">Get a new link</button></form>` : ""
+      action ? `<form method="post" action="/links" class="cta"><button class="btn" type="submit">Get a new link</button></form><p class="note">${AGREE}</p>` : ""
     }</section>`,
     nonce,
   );
@@ -148,136 +177,11 @@ const checkNotes: Record<Check, string> = {
     "Requests must carry Linear's Linear-Signature, made with your webhook's signing secret, and a webhookTimestamp from the last minute. In Linear, go to Settings, API, Webhooks, New webhook, and enter the open URL. Copy the webhook's signing secret and paste it here. Then change the webhook's URL to the one you get.",
 };
 
-/** What to ask the agent, in every harness's tab. */
+/** What to ask the agent, whichever agent it is. */
 export const askLine = "Watch for webhooks and tell me when one arrives.";
 
-/**
- * Cursor's link that opens its MCP settings with the server filled in: the
- * cursor-deeplink extension's /mcp/install, with name and config, the
- * server's mcp.json entry as base64 JSON.
- */
-export function cursorDeeplink(mcpUrl: string): string {
-  const config = Buffer.from(JSON.stringify({ url: mcpUrl })).toString("base64");
-  return `cursor://anysphere.cursor-deeplink/mcp/install?name=webhooks&config=${encodeURIComponent(config)}`;
-}
-
-export interface HarnessTab {
-  id: string;
-  label: string;
-  /** How to add the server: HTML, its text escaped. */
-  add: string;
-  /** What happens once the agent watches. */
-  wakes: string[];
-}
-
-// What's true for each harness: docs/harnesses.md. The commands were checked
-// against each harness's own CLI.
-export function harnessTabs(mcpUrl: string): HarnessTab[] {
-  const run = (cmd: string, id: string) => codeBlock("Run", cmd, id);
-  return [
-    {
-      id: "claude-code",
-      label: "Claude Code",
-      add: run(`claude mcp add --transport http webhooks ${mcpUrl}`, "cc"),
-      wakes: [
-        "Claude Code asks you to approve a background Monitor: a loop of curl calls to Wakeshift that wait for posts. Approve it, and each post wakes the agent within seconds. Nothing to install.",
-        "If the agent offers to install Wakeshift's hooks, you can decline: they're optional.",
-      ],
-    },
-    {
-      id: "codex",
-      label: "Codex",
-      add: run(`codex mcp add webhooks --url ${mcpUrl}`, "cx"),
-      wakes: [
-        "The first time, the agent offers a one-time install of Wakeshift's connector for Codex. Say yes, then type /hooks in Codex and press t to trust it.",
-        "After that, each post wakes the agent within seconds.",
-      ],
-    },
-    {
-      id: "cursor",
-      label: "Cursor",
-      add:
-        `<p class="add"><a class="btn sm" href="${esc(cursorDeeplink(mcpUrl))}">Add to Cursor</a></p>` +
-        codeBlock("Or add it to ~/.cursor/mcp.json (the IDE and cursor-agent both read it)", JSON.stringify({ mcpServers: { webhooks: { url: mcpUrl } } }, null, 2), "cu"),
-      wakes: [
-        "The agent starts a background command that waits for posts (Cursor may ask you to allow it). Each post wakes the agent within seconds, even when it's idle. Nothing to install.",
-        "If the agent offers to install Wakeshift's hooks, you can decline: they're optional. Cursor's cloud agents aren't woken yet: posts arrive with their next tool call.",
-      ],
-    },
-    {
-      id: "antigravity",
-      label: "Antigravity",
-      add: run(`agy mcp add webhooks ${mcpUrl}`, "ag"),
-      wakes: [
-        "The agent starts a background command that waits for a post (agy may ask you to allow it). Each post wakes the agent within seconds, even when it's idle, and the agent starts the command again. Nothing to install.",
-        "If the agent offers to install Wakeshift's hooks, you can decline: they're optional.",
-      ],
-    },
-    {
-      id: "opencode",
-      label: "opencode",
-      add: run(`opencode mcp add webhooks --url ${mcpUrl}`, "oc"),
-      wakes: ["The agent offers a one-time install of Wakeshift's plugin for opencode. Say yes, and restart opencode. Then each post wakes the agent, even when it's idle."],
-    },
-    {
-      id: "copilot",
-      label: "Copilot CLI",
-      add: run(`copilot mcp add --transport http webhooks ${mcpUrl}`, "co"),
-      wakes: [
-        "The agent starts a background command that waits for a post. Each post wakes the agent within seconds, even when it's idle, and the agent starts the command again. Nothing to install.",
-        `Copilot asks you to approve the command each time it starts, so each wake needs one "Yes". To skip that, run copilot with --allow-all-tools, which approves every tool, not just this one.`,
-        "If the agent offers to install Wakeshift's hooks, you can decline: they're optional.",
-      ],
-    },
-    {
-      id: "openclaw",
-      label: "OpenClaw",
-      add:
-        run(`openclaw mcp add webhooks --url ${mcpUrl} --transport streamable-http`, "ocl") +
-        `<p class="note">Run it where the OpenClaw gateway runs (in Docker: <code>docker exec</code> into its container). New MCP servers are used from the next turn.</p>`,
-      wakes: [
-        "The agent offers a one-time install of Wakeshift's plugin for OpenClaw. Say yes. The plugin starts with the next turn, so send any reply once it's installed.",
-        "After that, each post wakes the agent within a second, even when it's idle, as long as the gateway runs.",
-      ],
-    },
-    {
-      id: "hermes",
-      label: "Hermes Agent",
-      add:
-        codeBlock("Add to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it's set)", `mcp_servers:\n  webhooks:\n    url: ${mcpUrl}`, "hm") +
-        `<p class="note">Or run <code>hermes mcp add webhooks --url ${esc(mcpUrl)}</code> where Hermes runs, and answer no when it asks about authentication. In a running chat, <code>/reload-mcp</code> picks it up.</p>`,
-      wakes: [
-        "The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once). The plugin starts with the next turn, so send any reply once it's installed.",
-        "After that, each post wakes the agent within a second, even when it's idle, as long as Hermes runs (its API server or CLI).",
-      ],
-    },
-    {
-      id: "other",
-      label: "Other MCP clients",
-      add: codeBlock("MCP URL (Streamable HTTP, no sign-in)", mcpUrl, "mcp"),
-      wakes: ["Posts arrive with the agent's next call to the webhook's tools."],
-    },
-  ];
-}
-
-// The tabs link to their panels: without the script every panel shows and a
-// tab jumps to its own. The script shows one at a time and remembers it.
-function harnessTabsHtml(mcpUrl: string): string {
-  const tabs = harnessTabs(mcpUrl);
-  const bar = tabs
-    .map((h, i) => `<a class="tab${i === 0 ? " on" : ""}" href="#agent-${h.id}" data-agent="${h.id}" role="tab">${esc(h.label)}</a>`)
-    .join("");
-  const panels = tabs.map(
-    (h) => `<div class="agent" id="agent-${h.id}" role="tabpanel">
-    <h3>${esc(h.label)}</h3>
-    ${h.add}
-    <p>Then ask your agent: <q>${esc(askLine)}</q></p>
-    ${h.wakes.map((w) => `<p class="note">${esc(w)}</p>`).join("\n    ")}
-  </div>`,
-  );
-  return `<div class="tabs" role="tablist" id="agents">${bar}</div>
-  ${panels.join("\n  ")}`;
-}
+/** How to connect each agent: the shared agent picker (apps/agentpicker). */
+export const agentPicker = (mcpUrl: string) => pickerHtml({ name: "webhooks", url: mcpUrl, ask: askLine, each: "each post", noAuth: true });
 
 export function linkPage(nonce: string, d: LinkPageData): string {
   const tab = (c: Check, label: string) =>
@@ -318,9 +222,9 @@ export function linkPage(nonce: string, d: LinkPageData): string {
 
 <section class="sect">
   <h2><span class="n">i.</span> Connect your agent</h2>
-  ${harnessTabsHtml(d.mcpUrl)}
+  ${agentPicker(d.mcpUrl)}
   <p class="status" id="watching"></p>
-  <p class="status" id="connected"></p>
+  <p class="status" id="connected" role="status"></p>
 </section>
 
 <section class="sect">
@@ -334,12 +238,12 @@ export function linkPage(nonce: string, d: LinkPageData): string {
 
 <section class="sect">
   <h2><span class="n">iii.</span> Live</h2>
-  <p class="status" id="livestatus" hidden></p>
+  <p class="status" id="livestatus" role="status" hidden></p>
   <ul class="live" id="live"><li class="empty">Nothing yet. Posts show up here as they arrive.</li></ul>
   <p class="note">${esc(limitsLine(d.limits))} The list keeps the last 50, for a day after the webhook was last used (longer while an agent is watching).</p>
 </section>`;
   const initial = JSON.stringify({ watchers: d.watchers, recent: d.recent }).replace(/</g, "\\u003c");
-  return layout("Your webhook · Wakeshift webhooks", body, nonce, liveScript(d.code, initial));
+  return layout("Your webhook · Wakeshift webhooks", body, nonce, liveScript(d.code, initial), pickerHead());
 }
 
 /** Who's connected now, from Wakeshift's status of the webhook's topic (GET /l/<code>/status). */
@@ -432,8 +336,22 @@ function add(a) {
 }
 // Lines can come twice (a replay after reconnecting) or out of order (from
 // another instance): each is shown once, in order of seq.
+// The page shows the newest 50; it remembers the last 500 seen, so a page
+// left open for days doesn't grow without end. It forgets the lowest seq;
+// anything at or below that is older than 500 lines it has, so long out of
+// view, and it's dropped rather than shown again.
 const seen = new Set();
-const once = (a) => { if (!seen.has(a.seq)) { seen.add(a.seq); add(a); } };
+let forgotten = -Infinity;
+const once = (a) => {
+  if (seen.has(a.seq) || a.seq <= forgotten) return;
+  seen.add(a.seq);
+  if (seen.size > 500) {
+    const lowest = Math.min(...seen);
+    seen.delete(lowest);
+    forgotten = lowest;
+  }
+  add(a);
+};
 for (const a of state.recent) once(a);
 showWatchers();
 const connected = document.getElementById("connected");
@@ -468,29 +386,6 @@ function connect() {
   };
 }
 connect();
-// The agent tabs: one panel at a time, the choice kept for next time.
-const agents = document.getElementById("agents");
-const agentTabs = [...agents.querySelectorAll(".tab")];
-function showAgent(id) {
-  if (!agentTabs.some((t) => t.dataset.agent === id)) id = agentTabs[0].dataset.agent;
-  for (const t of agentTabs) {
-    const on = t.dataset.agent === id;
-    t.classList.toggle("on", on);
-    t.setAttribute("aria-selected", String(on));
-    document.getElementById("agent-" + t.dataset.agent).hidden = !on;
-  }
-}
-for (const t of agentTabs) {
-  t.addEventListener("click", (e) => {
-    e.preventDefault();
-    showAgent(t.dataset.agent);
-    try { localStorage.setItem("agent", t.dataset.agent); } catch {}
-  });
-}
-let savedAgent = null;
-try { savedAgent = localStorage.getItem("agent"); } catch {}
-showAgent(location.hash.startsWith("#agent-") ? location.hash.slice(7) : savedAgent);
-agents.classList.add("js");
 for (const b of document.querySelectorAll("button.copy")) {
   b.addEventListener("click", async () => {
     const t = document.getElementById(b.dataset.copy).textContent;
@@ -505,7 +400,7 @@ export const logoSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="11.0 22
 
 // The marketing site's palette and type (site/static/site.css).
 export const css = `:root{
-  --paper:#F5F1E8; --paper-2:#EDE7DA; --card:#FFFDF8; --ink:#1D1B17; --ink-2:#4A463E; --ink-3:#8A8477;
+  --paper:#F5F1E8; --paper-2:#EDE7DA; --card:#FFFDF8; --ink:#1D1B17; --ink-2:#4A463E; --ink-3:#6B665B;
   --rule:#DDD5C4; --accent:#C25418; --accent-soft:#F6E2D3; --sage:#3E6B55; --sage-soft:#DFEBE2;
   --caution:#9A5B00; --caution-bg:#FBF0D9; --caution-rule:#E9C98A;
   --serif:"Iowan Old Style","Charter","Palatino Linotype",Palatino,Georgia,serif;
@@ -552,10 +447,10 @@ a{color:inherit}
 .tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:4px}
 .tab{font:600 13px var(--sans);padding:7px 14px;border-radius:999px;border:1px solid var(--rule);text-decoration:none;color:var(--ink-2)}
 .tab.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
-.agent{margin-top:18px}
-.agent h3{font:600 15px var(--sans);color:var(--ink)}
-.tabs.js~.agent h3{display:none}
-.sect p.add{margin-top:10px}
+.sect .ap{--ap-fg:var(--ink);--ap-muted:var(--ink-3);--ap-line:var(--rule);--ap-accent:var(--ink);--ap-on-fg:var(--paper);--ap-code-bg:var(--card);--ap-code-fg:var(--ink);--ap-box-radius:12px;--ap-mono:var(--mono)}
+.sect .ap-code{border:1px solid var(--rule)}
+.sect .ap p.ap-note,.sect .ap-facts{font-size:13.5px;color:var(--ink-3)}
+.sect .ap p.ap-label{font:600 11px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
 .status{font-size:14px;color:var(--ink-3)}
 .status.on{color:var(--sage)}
 .live{list-style:none;border-top:1px solid var(--ink)}
@@ -574,7 +469,6 @@ a{color:inherit}
 .paste .row{display:flex;gap:10px;margin-top:6px}
 .paste input{flex:1;font:13.5px var(--mono);padding:8px 12px;border:1px solid var(--rule);border-radius:10px;background:var(--card);color:var(--ink)}
 .ft{padding-block:28px;border-top:1px solid var(--rule);font-size:13px;color:var(--ink-3)}
-.draft{margin-top:32px;padding:12px 16px;border:1px solid var(--caution-rule);background:var(--caution-bg);color:var(--caution);border-radius:10px;font-size:14px;max-width:720px}
 .prose{max-width:720px;padding-block:8px 56px;font-size:16px;line-height:1.65;color:var(--ink-2)}
 .prose h1{font:400 44px/1.1 var(--serif);color:var(--ink);margin:28px 0 8px}
 .prose h2{font:400 24px/1.25 var(--serif);color:var(--ink);margin:32px 0 8px}

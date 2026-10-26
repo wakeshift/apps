@@ -1,5 +1,5 @@
-// End to end against a real core: run with scripts/e2e.sh, which starts one
-// (TestSDKHarness in internal/coretest) with a self-serve app and points
+// End to end against a real core: run with scripts/e2e.sh in Wakeshift's own
+// repository, which starts one with a self-serve app and points
 // WAKESHIFT_SDK_HARNESS at its URL and test key. Skipped without it.
 //
 // The try server runs in this process; agents connect to it over HTTP as
@@ -186,8 +186,10 @@ test("try against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (
   const code = pagePath.match(/^\/l\/([A-Za-z0-9_-]+)$/)![1];
   const page = await (await fetch(base + pagePath)).text();
   const mcpUrl = `${base}/t/${code}/mcp`;
-  assert.equal(codeById(page, "cc"), `claude mcp add --transport http webhooks ${mcpUrl}`);
-  assert.equal(codeById(page, "cx"), `codex mcp add webhooks --url ${mcpUrl}`);
+  // The agent picker's commands, in its code blocks.
+  const commands = [...page.matchAll(/<pre class="ap-code"><code>([^<]*)<\/code><\/pre>/g)].map((m) => m[1]!.replace(/&#34;/g, '"').replace(/&#43;/g, "+").replace(/&amp;/g, "&"));
+  assert.ok(commands.includes(`claude mcp add --transport http webhooks ${mcpUrl}`), commands.join("\n"));
+  assert.ok(commands.includes(`codex mcp add webhooks --url ${mcpUrl}`), commands.join("\n"));
   const hookUrl = codeById(page, "url");
   assert.ok(hookUrl.startsWith(base + "/in/"), hookUrl);
   assert.ok(codeById(page, "curl").startsWith(`curl -X POST '${hookUrl}'`));
@@ -508,4 +510,46 @@ test("try against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (
   assert.match(notClaudeSaid, /To give you the right instructions, call this again with harness and conversation_id\./, notClaudeSaid);
   assert.match(notClaudeSaid, /Shell tool/, notClaudeSaid);
   assert.doesNotMatch(notClaudeSaid, /Monitor tool/, notClaudeSaid);
+});
+
+test("an expired link's webhook is forgotten in Wakeshift, and only that one", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (scripts/e2e.sh)" }, async (t) => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core });
+  const DAY = 24 * 3600_000;
+  let skew = 0;
+  const app = tryServer({ wake, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", now: () => Date.now() + skew, log: () => {} });
+  await new Promise<void>((r) => app.listen(0, "127.0.0.1", () => r()));
+  const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
+  const clients: Client[] = [];
+  t.after(async () => {
+    await Promise.all(clients.map((c) => c.close().catch(() => {})));
+    await app.stop();
+  });
+  const links = new Links(secret);
+  // Two links, each watched by a conversation: Wakeshift keeps a workspace for each webhook.
+  const watch = async () => {
+    const made = await fetch(base + "/links", { method: "POST", redirect: "manual" });
+    const code = made.headers.get("location")!.slice(3);
+    const client = new Client({ name: "claude-code", version: "1.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/t/${code}/mcp`)));
+    clients.push(client);
+    assert.match(textOf((await client.callTool({ name: "watch", arguments: {} })) as CallToolResult), /^Watching your webhook\./);
+    return { code, hook: links.parse(code)!.hook };
+  };
+  const expiring = await watch();
+  const kept = await watch();
+  const subs = async (hook: string) => (await wake.topicStatus(`ev/webhook.received/${hook}`)).subscriptions;
+  assert.equal(await subs(expiring.hook), 1);
+  assert.equal(await subs(kept.hook), 1);
+  // Six days on, one of them is used; a day and a bit later the other has expired.
+  skew = 6 * DAY;
+  assert.equal((await fetch(`${base}/l/${kept.code}`)).status, 200);
+  skew = 7 * DAY + 3600_000;
+  assert.equal((await fetch(`${base}/l/${expiring.code}`)).status, 410);
+  await app.retain();
+  // Wakeshift has forgotten the expired webhook (there's nothing left to forget) ...
+  assert.equal(await subs(expiring.hook), 0);
+  assert.equal(await wake.forgetUser(expiring.hook), false);
+  // ... and kept the other.
+  assert.equal(await subs(kept.hook), 1);
 });

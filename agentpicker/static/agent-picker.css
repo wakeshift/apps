@@ -1,0 +1,69 @@
+/* The agent picker (apps/agentpicker). Each app sets the variables on .ap
+   (or an ancestor) to match its own look. Without the script, every agent's
+   steps show, one after another, and the buttons stay hidden. */
+.ap {
+  --ap-fg: inherit;
+  --ap-muted: #6b6b6b;
+  --ap-line: rgba(127, 127, 127, 0.35);
+  --ap-accent: #c25418;
+  --ap-on-fg: #fff;
+  --ap-pill-bg: transparent;
+  --ap-code-bg: rgba(127, 127, 127, 0.12);
+  --ap-code-fg: inherit;
+  --ap-radius: 999px;
+  --ap-box-radius: 10px;
+  --ap-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--ap-fg);
+}
+.ap-pills { display: none; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+.ap-js .ap-pills { display: flex; }
+.ap-js .ap-more-list:not(.ap-open) { display: none; }
+.ap-more-list { padding-top: 2px; }
+.ap .ap-pill {
+  font: inherit; font-size: 14px; font-weight: 600; line-height: 1;
+  min-height: 40px; padding: 0 16px; border-radius: var(--ap-radius);
+  border: 1px solid var(--ap-line); background: var(--ap-pill-bg); color: var(--ap-fg);
+  cursor: pointer;
+}
+.ap .ap-pill:hover { border-color: var(--ap-accent); }
+.ap .ap-pill:focus-visible { outline: 2px solid var(--ap-accent); outline-offset: 2px; }
+.ap .ap-pill[aria-pressed="true"] { background: var(--ap-accent); border-color: var(--ap-accent); color: var(--ap-on-fg); }
+.ap .ap-pill.ap-more { color: var(--ap-muted); }
+.ap .ap-pill.ap-more::after { content: " +"; }
+.ap .ap-pill.ap-more[aria-expanded="true"]::after { content: " \2212"; }
+.ap-panel { padding: 14px 0 6px; border-top: 1px solid var(--ap-line); }
+.ap-panel + .ap-panel { margin-top: 12px; }
+.ap-js .ap-panel { border-top: 0; padding-top: 6px; }
+.ap-js .ap-panel:not(.ap-on) { display: none; }
+.ap-js .ap-panel + .ap-panel { margin-top: 0; }
+.ap-title { margin: 0 0 8px; font-size: 16px; }
+.ap-js .ap-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.ap-label { margin: 10px 0 4px; font-size: 13px; color: var(--ap-muted); }
+.ap-codewrap { position: relative; }
+/* The page's own code styles stay off the code inside the block. */
+.ap .ap-code code { font: inherit; color: inherit; background: none; border: 0; padding: 0; border-radius: 0; word-break: normal; }
+.ap-code {
+  margin: 0; padding: 12px 14px; border-radius: var(--ap-box-radius);
+  background: var(--ap-code-bg); color: var(--ap-code-fg);
+  font-family: var(--ap-mono); font-size: 13px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.ap .ap-copy {
+  position: absolute; top: 6px; right: 6px;
+  font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px;
+  border: 1px solid var(--ap-line); background: var(--ap-pill-bg); color: var(--ap-muted); cursor: pointer;
+}
+.ap .ap-copy:focus-visible { outline: 2px solid var(--ap-accent); outline-offset: 2px; }
+.ap-code.ap-has-copy { padding-right: 76px; }
+.ap-note { margin: 8px 0; font-size: 14px; color: var(--ap-muted); }
+.ap-btn {
+  display: inline-flex; align-items: center; min-height: 40px; padding: 0 16px;
+  border-radius: var(--ap-radius); background: var(--ap-accent); color: var(--ap-on-fg);
+  font-weight: 600; font-size: 14px; text-decoration: none; margin: 4px 0;
+}
+.ap-say { margin: 12px 0 6px; }
+.ap-facts { margin: 6px 0 0; padding-left: 18px; font-size: 14px; color: var(--ap-muted); }
+.ap-facts li { margin: 4px 0; }
+@media (prefers-reduced-motion: no-preference) {
+  .ap-pill { transition: background-color 120ms, border-color 120ms, color 120ms; }
+}

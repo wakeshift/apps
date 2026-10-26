@@ -1,0 +1,289 @@
+// Live tables: what a table page's script animates from, and the stream that
+// sends it. Each change to a table (its row or its talk) sends a snapshot:
+// the parts of the page as HTML (so the page looks the same as when it was
+// served) and the facts the script animates between (bets, folds, the board,
+// who's shown what, the last move and its message).
+//
+// Every instance can serve any table's stream: an instance polls the table's
+// version in Postgres (one query per table, however many watch) and sends a
+// snapshot when it changes, so a move made on another instance shows up here
+// within a poll. Streams are bounded: a few per address, a cap overall, a
+// heartbeat, and a fresh connection every few minutes (the browser reconnects
+// by itself).
+//
+// A watch link's stream adds that player's own cards, read for that player
+// only; a public stream never has hole cards that haven't been shown.
+
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { DAILY_BANKROLL, type Casino, type SpectatorView } from "./casino.js";
+import type { Log } from "./db.js";
+import { card, tableBody, thinkingList, type Mine } from "./pages.js";
+
+export interface Snapshot {
+  table: string;
+  hand: null | { id: string; number: number; street: string; board: string[]; pot: number; complete: boolean; toAct: number | null; button: number };
+  players: { seat: number; name: string; stack: number; committed: number; folded: boolean; allIn: boolean }[];
+  seats: ({ seat: number; name: string; stack: number } | null)[];
+  shown: { seat: number; cards: string[]; hand: string }[];
+  /** The hand's actions so far (how many), and the last one with its message. */
+  actions: number;
+  last: null | { seat: number | null; who: string; what: string; kind: string; note: string | null };
+  /** When the hand is over: who won what, by seat. */
+  winners: { seats: number[]; who: string; amount: number; hand: string | null }[];
+  /** mine and thinking: a watch page's own player's cards and private reasoning; never on a public stream. */
+  html: ReturnType<typeof tableBody> & { mine?: string; thinking?: string };
+  mine: null | { seat: number | null; cards: string[] };
+}
+
+/** What a page animates from. mine: a watch page's player (their cards); null on public pages. */
+export function snapshot(v: SpectatorView, mine: Mine | null = null): Snapshot {
+  const h = v.hand;
+  const seatOf = new Map<string, number>();
+  v.seats.forEach((s) => s && seatOf.set(s.name, s.seat));
+  const items = h?.actions ?? [];
+  const lastMove = [...items].reverse().find((a) => a.kind !== "deal" && a.kind !== "win") ?? null;
+  const shownHand = new Map((h?.shown ?? []).map((x) => [x.name, x.hand]));
+  return {
+    table: v.id,
+    hand: h ? { id: h.id, number: h.number, street: h.street, board: h.board, pot: h.pot, complete: h.complete, toAct: h.toAct?.seat ?? null, button: h.button } : null,
+    players: h ? h.players.map((p) => ({ seat: p.seat, name: p.name, stack: p.stack, committed: p.committed, folded: p.folded, allIn: p.allIn })) : [],
+    seats: v.seats.map((s) => (s ? { seat: s.seat, name: s.name, stack: s.stack } : null)),
+    shown: (h?.shown ?? []).map((x) => ({ seat: x.seat, cards: x.cards, hand: x.hand })),
+    actions: items.length,
+    last: lastMove ? { seat: seatOf.get(lastMove.who) ?? null, who: lastMove.who, what: lastMove.what, kind: lastMove.kind, note: lastMove.note ?? null } : null,
+    winners: items
+      .filter((a) => a.kind === "win")
+      .map((a) => {
+        const names = a.who.split(" and ");
+        return { seats: names.flatMap((n) => (seatOf.has(n) ? [seatOf.get(n)!] : [])), who: a.who, amount: Number(a.what.replace(/[^0-9]/g, "")) || 0, hand: shownHand.get(names[0]!) ?? null };
+      }),
+    html: {
+      ...tableBody(v, mine),
+      ...(mine
+        ? { mine: mine.cards.length ? mine.cards.map((c) => card(c, "lg")).join("") : `<p class="hint">Dealt when the next hand starts.</p>`, thinking: thinkingList(mine.thinking) }
+        : {}),
+    },
+    mine: mine ? { seat: mine.seat, cards: mine.cards } : null,
+  };
+}
+
+export interface LiveOptions {
+  casino: Casino;
+  log: Log;
+  /** How often an instance checks a watched table for changes. */
+  pollMs?: number;
+  heartbeatMs?: number;
+  /** A stream ends after this, and the browser opens a new one (Cloud Run ends requests after its timeout). */
+  maxStreamMs?: number;
+  perAddress?: number;
+  total?: number;
+}
+
+interface Client {
+  res: ServerResponse;
+  address: string;
+  /** Headers sent and the first snapshot written: polls write to it from then on. */
+  ready: boolean;
+  /** A change came in before it was ready: send it a fresh snapshot once it is. */
+  stale: boolean;
+  /** A watch link's stream: its seat's hash, and the player it shows. */
+  watch?: { hash: string; player: string };
+}
+
+/** The streams one instance serves, by table. */
+export class LiveHub {
+  private readonly o: Required<LiveOptions>;
+  private readonly tables = new Map<string, { clients: Set<Client>; version: string | undefined; timer: NodeJS.Timeout; busy: boolean }>();
+  private readonly perAddress = new Map<string, number>();
+  private count = 0;
+
+  constructor(o: LiveOptions) {
+    this.o = { pollMs: 700, heartbeatMs: 15_000, maxStreamMs: 240_000, perAddress: 8, total: 2000, ...o };
+  }
+
+  get size(): number {
+    return this.count;
+  }
+
+  /**
+   * Streams a table to a browser: a snapshot now, then one per change.
+   * watch: a watch link's seat (its hash) and player; the stream ends if the
+   * link stops working (the player left, or the day turned).
+   */
+  async open(res: ServerResponse, table: string, address: string, watch?: { hash: string; player: string }): Promise<void> {
+    if (this.count >= this.o.total || (this.perAddress.get(address) ?? 0) >= this.o.perAddress) {
+      res.writeHead(429, { "Content-Type": "text/plain", "Retry-After": "10", "Cache-Control": "no-store" });
+      res.end("Too many live streams from here. Close a tab and try again.");
+      return;
+    }
+    // Registered before its first snapshot is read, so no change between the
+    // two is missed (a poll marks it stale until it's ready).
+    const c: Client = { res, address, watch, ready: false, stale: false };
+    this.count++;
+    this.perAddress.set(address, (this.perAddress.get(address) ?? 0) + 1);
+    let t = this.tables.get(table);
+    if (!t) {
+      t = { clients: new Set(), version: undefined, timer: setInterval(() => void this.poll(table), this.o.pollMs), busy: false };
+      t.timer.unref();
+      this.tables.set(table, t);
+    }
+    t.clients.add(c);
+    // Listened for at once: a browser that goes while the first snapshot is
+    // read gives its place back then (its close comes only once).
+    let closed = false;
+    let beat: NodeJS.Timeout | undefined;
+    let end: NodeJS.Timeout | undefined;
+    const close = () => {
+      closed = true;
+      clearInterval(beat);
+      clearTimeout(end);
+      this.drop(table, c);
+    };
+    res.on("close", close);
+    let first: Snapshot | undefined;
+    try {
+      first = await this.payload(table, watch);
+    } catch (err) {
+      this.drop(table, c);
+      throw err;
+    }
+    if (closed) return;
+    if (!first) {
+      this.drop(table, c);
+      res.writeHead(404, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+      res.end("Not here.");
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": watch ? "no-referrer" : "same-origin",
+    });
+    res.write(`retry: 2000\n\n`);
+    this.send(c, first);
+    c.ready = true;
+    if (c.stale) {
+      c.stale = false;
+      const fresh = await this.payload(table, watch).catch(() => undefined);
+      if (closed) return;
+      if (fresh) this.send(c, fresh);
+    }
+    beat = setInterval(() => res.write(`: hb\n\n`), this.o.heartbeatMs);
+    beat.unref();
+    end = setTimeout(() => res.end(), this.o.maxStreamMs);
+    end.unref();
+  }
+
+  /** Stops every stream (shutdown). */
+  close(): void {
+    for (const [, t] of this.tables) {
+      clearInterval(t.timer);
+      for (const c of t.clients) c.res.end();
+    }
+    this.tables.clear();
+  }
+
+  private drop(table: string, c: Client) {
+    const t = this.tables.get(table);
+    if (!t || !t.clients.delete(c)) return;
+    this.count--;
+    const n = (this.perAddress.get(c.address) ?? 1) - 1;
+    if (n <= 0) this.perAddress.delete(c.address);
+    else this.perAddress.set(c.address, n);
+    if (!t.clients.size) {
+      clearInterval(t.timer);
+      this.tables.delete(table);
+    }
+  }
+
+  private async poll(table: string): Promise<void> {
+    const t = this.tables.get(table);
+    if (!t || t.busy) return;
+    t.busy = true;
+    try {
+      const v = await this.o.casino.version(table);
+      if (v === t.version) return;
+      t.version = v;
+      if (v === undefined) {
+        for (const c of [...t.clients]) c.res.end();
+        return;
+      }
+      // One read of the table for every public stream; a watch stream also reads its own player's cards.
+      const view = await this.o.casino.spectate(table);
+      if (!view) return;
+      const shared = JSON.stringify(snapshot(view));
+      for (const c of [...t.clients]) {
+        if (!c.ready) {
+          c.stale = true;
+          continue;
+        }
+        if (!c.watch) {
+          c.res.write(`event: snap\ndata: ${shared}\n\n`);
+          continue;
+        }
+        const s = await this.payload(table, c.watch, view);
+        if (!s) {
+          // The link died with this change (the player busted or left, or the
+          // day turned): show the table as it is now first, so the page never
+          // freezes on a moment that's gone (a seat and stack that no longer
+          // exist), then say why it ended.
+          c.res.write(`event: snap\ndata: ${shared}\n\n`);
+          c.res.write(`event: gone\ndata: ${JSON.stringify({ message: await this.endedMessage(c.watch.player) })}\n\n`);
+          c.res.end();
+        } else this.send(c, s);
+      }
+    } catch (err) {
+      this.o.log("warn", "live poll failed", { err: String(err) });
+    } finally {
+      t.busy = false;
+    }
+  }
+
+  /** The watch page's last word when its link ends. */
+  private async endedMessage(player: string): Promise<string> {
+    try {
+      return watchEndedMessage(await this.o.casino.watchEnded(player));
+    } catch {
+      return "This watch link has stopped working. Ask your agent for a new one.";
+    }
+  }
+
+  private send(c: Client, s: Snapshot) {
+    c.res.write(`event: snap\ndata: ${JSON.stringify(s)}\n\n`);
+  }
+
+  /** A stream's snapshot; undefined if the table's gone, or a watch link no longer works. */
+  private async payload(table: string, watch?: { hash: string; player: string }, view?: SpectatorView): Promise<Snapshot | undefined> {
+    if (watch) {
+      const target = await this.o.casino.watchTarget(watch.hash);
+      if (!target || target.player !== watch.player || target.table !== table) return undefined;
+    }
+    const v = view ?? (await this.o.casino.spectate(table));
+    if (!v) return undefined;
+    return snapshot(v, watch ? await this.o.casino.holeCards(table, watch.player) : null);
+  }
+}
+
+/** Why a watch link ended, in a line for its page. */
+export function watchEndedMessage(e: { name: string; seated: boolean; balance: number }): string {
+  if (e.seated) return `This watch link has expired. ${e.name} is still playing: ask your agent for a new link.`;
+  if (e.balance <= 0) return `${e.name} is out of chips for today and has left the table. Everyone starts again with $${DAILY_BANKROLL} at 00:00 UTC.`;
+  return `${e.name} has left the table; $${e.balance} is back in today's bankroll.`;
+}
+
+/** The client's address, counting proxyHops proxies that append to X-Forwarded-For (Google's load balancer appends two). */
+export function clientAddress(req: IncomingMessage, proxyHops: number): string {
+  const direct = req.socket.remoteAddress ?? "";
+  if (proxyHops <= 0) return direct;
+  const xff = String(req.headers["x-forwarded-for"] ?? "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const ip = xff[xff.length - proxyHops];
+  if (!ip || !/^[0-9a-fA-F:.]{2,45}$/.test(ip)) return direct;
+  // An IPv6 address counts by its /64, like guest sign-in's limits.
+  return ip.includes(":") ? ip.split(":").slice(0, 4).join(":") : ip;
+}

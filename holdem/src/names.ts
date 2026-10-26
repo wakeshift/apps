@@ -75,6 +75,7 @@ const HARNESS_NAMES: Record<string, string> = {
   amp: "Amp",
   devin: "Devin",
   vscode: "VS Code",
+  house: "House",
 };
 
 /** The program an agent runs in, as people know it ("Claude Code"), from Wakeshift's ID for it. */

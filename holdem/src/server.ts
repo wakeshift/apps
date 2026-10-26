@@ -1,11 +1,16 @@
 // Agent Hold'em's HTTP server: guest sign-in and the MCP server for agents,
-// the pages for people, a small JSON API the live table polls, the static
-// files, and the champion's share card.
+// the pages for people (with a live stream per table, live.ts), players'
+// watch links (watch.ts), the static files, and the champion's share card.
+// A watch link's secret is in its path: it's never logged (Cloud Run's request
+// logs for the service are excluded, and this server's own log lines take it
+// out).
 
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { GuestAuth, type Wakeshift } from "@wakeshift/sdk";
+import { AuthorizePage } from "./authorize.js";
+import { pickerAssets } from "./agentpicker/picker.js";
 import type { Casino, Champion } from "./casino.js";
 import { MIN_HANDS } from "./casino.js";
 import type { Log } from "./db.js";
@@ -20,13 +25,14 @@ import {
   lobbyPage,
   messagePage,
   streetsOf,
-  tableBody,
   tablePage,
   untilReset,
 } from "./pages.js";
 import { holdemServer } from "./tools.js";
 import type { HoldemEvents } from "./events.js";
 import { tableName } from "./names.js";
+import { clientAddress, LiveHub, snapshot } from "./live.js";
+import { loggable, WATCH_PATH, watchHash } from "./watch.js";
 
 export interface ServerOptions {
   wake: Wakeshift;
@@ -35,12 +41,18 @@ export interface ServerOptions {
   events: HoldemEvents;
   /** HOLDEM_SECRET. */
   secret: string;
+  /** HOUSE_SECRET: lets house agents (house.ts) prove they are. Unset: no house agents. */
+  houseSecret?: string;
+  /** GAMES_OPERATOR_NOTE: act offers an optional note for the player's operator. */
+  operatorNote?: boolean;
   /** This server's public URL, e.g. https://holdem.wakeshift.ai. */
   publicUrl: string;
   /** Proxies in front that append to X-Forwarded-For (Google's load balancer: 2). */
   proxyHops?: number;
   log: Log;
   now?: () => number;
+  /** Live-stream tuning (tests). */
+  live?: { pollMs?: number; heartbeatMs?: number; maxStreamMs?: number; perAddress?: number; total?: number };
 }
 
 const STATIC: Record<string, string> = {
@@ -48,11 +60,14 @@ const STATIC: Record<string, string> = {
   "table.js": "text/javascript; charset=utf-8",
   "replay.js": "text/javascript; charset=utf-8",
   "verify.js": "text/javascript; charset=utf-8",
-  "connect.js": "text/javascript; charset=utf-8",
   "clock.js": "text/javascript; charset=utf-8",
   "filters.js": "text/javascript; charset=utf-8",
   "copy.js": "text/javascript; charset=utf-8",
-  "chip.svg": "image/svg+xml",
+  "logo.svg": "image/svg+xml",
+  "logo-small.svg": "image/svg+xml",
+  "favicon-16.png": "image/png",
+  "favicon-32.png": "image/png",
+  "apple-touch-icon.png": "image/png",
   "fonts/bricolage-grotesque.woff2": "font/woff2",
   "fonts/inter.woff2": "font/woff2",
   "fonts/jetbrains-mono.woff2": "font/woff2",
@@ -65,9 +80,14 @@ export function holdemHttp(o: ServerOptions): Server {
   const base = o.publicUrl.replace(/\/+$/, "");
   const now = o.now ?? Date.now;
   const guests = new GuestAuth({ wake: o.wake, mcpUrl: base + "/mcp", proxyHops: o.proxyHops ?? 0, onError: (err) => o.log("warn", "sign-in error", { err: String(err) }) });
+  // Signing in shows the authorize page (authorize.ts): authorizing is
+  // agreeing to Agent Hold'em's terms and privacy policy, so the pages and
+  // tools don't repeat it.
+  const authorize = new AuthorizePage({ guests, secret: o.secret, base, name: "Agent Hold'em", logo: "/static/logo-small.svg", now });
   const files = new Map<string, Buffer>();
   for (const f of Object.keys(STATIC)) files.set(f, readFileSync(new URL(`../../static/${f}`, import.meta.url)));
   const cards = new Map<string, Buffer>();
+  const live = new LiveHub({ casino: o.casino, log: o.log, ...o.live });
   // The landing page and the leaderboard read every player of the day: each
   // instance reuses what it read for a few seconds.
   const recent = new Map<string, { at: number; value: Promise<unknown> }>();
@@ -91,7 +111,7 @@ export function holdemHttp(o: ServerOptions): Server {
 
   async function mcp(req: IncomingMessage, res: ServerResponse) {
     if (!guests.authenticate(req, res)) return;
-    const server = holdemServer({ wake: o.wake, casino: o.casino, events: o.events, secret: o.secret, publicUrl: base, log: o.log });
+    const server = holdemServer({ wake: o.wake, casino: o.casino, events: o.events, secret: o.secret, publicUrl: base, log: o.log, houseSecret: o.houseSecret, operatorNote: o.operatorNote });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       transport.close().catch(() => {});
@@ -104,6 +124,7 @@ export function holdemHttp(o: ServerOptions): Server {
   async function route(req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url ?? "/", "http://x");
     const path = url.pathname;
+    if (await authorize.handle(req, res)) return;
     if (await guests.handle(req, res)) return;
     if (path === "/mcp") return mcp(req, res);
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -111,6 +132,9 @@ export function holdemHttp(o: ServerOptions): Server {
       return send(res, 405, "text/plain", "Method not allowed.");
     }
     if (path === "/health") return send(res, 200, "text/plain", "ok", { "Cache-Control": "no-store" });
+    if (path === "/api/lobby") return json(res, 200, { tables: await cached("houseLobby", () => o.casino.houseLobby()) });
+    if (path === "/favicon.ico") return send(res, 200, "image/png", files.get("favicon-32.png")!, { "Cache-Control": "public, max-age=86400" });
+    if (Object.hasOwn(pickerAssets, path)) return send(res, 200, pickerAssets[path]!.type, pickerAssets[path]!.body, { "Cache-Control": "public, max-age=300" });
     if (path.startsWith("/static/")) {
       const f = path.slice(8);
       const body = files.get(f);
@@ -119,26 +143,49 @@ export function holdemHttp(o: ServerOptions): Server {
     }
     if (path === "/terms" || path === "/tos" || path === "/privacy") {
       const d = legalDoc(path);
-      return page(res, 200, legalPageHtml(d.title, d.draft, d.html), "public, max-age=300");
+      return page(res, 200, legalPageHtml(d.title, d.html), "public, max-age=300");
     }
     if (path === "/") {
       const [top, lobby] = await Promise.all([cached("top", () => o.casino.leaderboard(o.casino.today(), 4)), cached("lobby", () => o.casino.lobby())]);
       const featured = lobby[0] ? ((await o.casino.spectate(lobby[0].id)) ?? null) : null;
-      return page(res, 200, landingPage({ mcpUrl: base + "/mcp", liveTables: lobby.length, resetIn: untilReset(now()), top, featured }));
+      return page(res, 200, landingPage({ mcpUrl: base + "/mcp", liveTables: lobby.length, tables: lobby, resetIn: untilReset(now()), top, featured }));
     }
     if (path === "/tables") return page(res, 200, lobbyPage(await cached("lobby", () => o.casino.lobby())));
     let m = path.match(/^\/tables\/(t[0-9a-f]{12}(?:[0-9a-f]{20})?)$/);
     if (m) {
       const v = await o.casino.spectate(m[1]!);
       if (!v) return notFound(res);
-      return page(res, 200, tablePage(v, { url: `${base}/tables/${v.id}`, recent: await o.casino.hands(v.id, 6) }));
+      return page(res, 200, tablePage(v, { url: `${base}/tables/${v.id}`, recent: await o.casino.hands(v.id, 6), live: `/api/tables/${v.id}/live` }));
     }
-    m = path.match(/^\/api\/tables\/(t[0-9a-f]{12}(?:[0-9a-f]{20})?)$/);
+    m = path.match(/^\/api\/tables\/(t[0-9a-f]{12}(?:[0-9a-f]{20})?)(\/live)?$/);
     if (m) {
+      if (m[2]) return live.open(res, m[1]!, clientAddress(req, o.proxyHops ?? 0));
       const v = await o.casino.spectate(m[1]!);
       if (!v) return json(res, 404, { error: { code: "not_found", message: "No such table." } });
-      const b = tableBody(v);
-      return json(res, 200, { name: tableName(v.id), hand: v.hand ? { number: v.hand.number, id: v.hand.id } : null, html: b });
+      // The same snapshot the live stream sends, for browsers without one.
+      return json(res, 200, { name: tableName(v.id), ...snapshot(v) });
+    }
+    m = path.match(WATCH_PATH);
+    if (m) {
+      const hash = watchHash(m[1]!);
+      const target = await o.casino.watchTarget(hash);
+      if (!target) {
+        if (path.startsWith("/api/")) return send(res, 404, "text/plain", "Not here.", { "Cache-Control": "no-store" });
+        return page(res, 404, messagePage("This link has stopped working", "A watch link works while its agent is at the table, until 00:00 UTC. Ask your agent for a new one.", "404"), "no-store");
+      }
+      if (path.startsWith("/api/")) return live.open(res, target.table, clientAddress(req, o.proxyHops ?? 0), { hash, player: target.player });
+      const v = await o.casino.spectate(target.table);
+      if (!v) return notFound(res);
+      const mine = await o.casino.holeCards(target.table, target.player);
+      const html = tablePage(v, { url: `${base}/tables/${v.id}`, recent: await o.casino.hands(v.id, 6), live: `/api/watch/${m[1]}/live`, mine });
+      return send(res, 200, "text/html; charset=utf-8", html, {
+        "Content-Security-Policy": CSP,
+        "Cache-Control": "no-store",
+        "X-Frame-Options": "DENY",
+        // The path is the secret: never sent on as a referrer, never indexed.
+        "Referrer-Policy": "no-referrer",
+        "X-Robots-Tag": "noindex, nofollow",
+      });
     }
     m = path.match(/^\/hands\/([a-z0-9-]{3,48})(\.json)?$/);
     if (m) {
@@ -195,13 +242,15 @@ export function holdemHttp(o: ServerOptions): Server {
     return png;
   }
 
-  return createServer((req, res) => {
+  const server = createServer((req, res) => {
     route(req, res).catch((err) => {
-      o.log("error", "request failed", { path: (req.url ?? "").split("?")[0], err: String(err) });
+      o.log("error", "request failed", { path: loggable((req.url ?? "").split("?")[0]!), err: String(err) });
       if (!res.headersSent) page(res, 500, messagePage("Something went wrong", "That didn't work on our side. Try again in a moment.", "500"));
       else res.end();
     });
   });
+  server.on("close", () => live.close());
+  return server;
 }
 
 /** What a player took from a hand's pots. */

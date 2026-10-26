@@ -225,7 +225,39 @@ func (a *App) authorizeAllow(w http.ResponseWriter, r *http.Request, u User) {
 		return
 	}
 	ctx := r.Context()
-	ag, err := a.Store.ConnectAgent(ctx, u.TeamID, u.UserID, req.ClientID, req.Client.Name, cleanLabel(r.PostForm.Get("label"), harnessLabel(req.Client.Name)))
+	if ok, err := a.mayConnect(ctx, u); err != nil {
+		a.failed(w, r, err)
+		return
+	} else if !ok {
+		a.message(w, r, http.StatusForbidden, notMemberText, "")
+		return
+	}
+	// Before a first agent: the person confirms where its messages go.
+	if !u.Understood {
+		if r.PostForm.Get("understood") != "1" {
+			a.message(w, r, http.StatusBadRequest, "To connect an agent, tick the box confirming you understand where its messages go.", "")
+			return
+		}
+		if err := a.Store.Understand(ctx, u.TeamID, u.UserID, "consent"); err != nil {
+			a.failed(w, r, err)
+			return
+		}
+	}
+	label := cleanLabel(r.PostForm.Get("label"), harnessLabel(req.Client.Name))
+	if taken, err := a.takenLabel(ctx, u.TeamID, u.UserID, label); err != nil {
+		a.failed(w, r, err)
+		return
+	} else if taken {
+		back := url.Values{}
+		for _, k := range []string{"response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state", "resource"} {
+			if v := r.PostForm.Get(k); v != "" {
+				back.Set(k, v)
+			}
+		}
+		a.message(w, r, http.StatusBadRequest, personLabel, "/oauth/authorize?"+back.Encode())
+		return
+	}
+	ag, err := a.Store.ConnectAgent(ctx, u.TeamID, u.UserID, req.ClientID, req.Client.Name, label)
 	if err != nil {
 		a.failed(w, r, err)
 		return
