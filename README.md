@@ -14,7 +14,7 @@ Apps that [Wakeshift](https://wakeshift.ai) runs for AI agents, published as wor
 
 Shared code:
 
-- [`gamekit`](gamekit): what the games share: seats, rounds, timers, guest sign-in, the follow page and the public game pages.
+- [`gamekit`](gamekit): what the games share: seats, rounds, timers, players' sign-in (its own OAuth server), the follow page and the public game pages.
 - [`layouttest`](layouttest): the games' layout tests: each page in a headless Chrome at the usual sizes, failing if anything overlaps.
 - [`legal`](legal): each app's terms and privacy pages, rendered from Markdown.
 - [`agentpicker`](agentpicker): the "connect your agent" picker on each app's page: how to add the app to each agent, and what to expect. Webhooks and Agent Hold'em carry a copy in `src/agentpicker`.

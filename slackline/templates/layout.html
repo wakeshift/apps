@@ -231,7 +231,7 @@ section.band+section.band .feat{background:#000;border-color:#000;color:var(--in
 </style>{{.PickerHead}}</head><body>
 <header class="top"><div class="wrap">
 <a class="brand" href="/">{{template "mark"}}<span>slack<b>line</b></span></a>
-<nav>{{if .CSRF}}<form class="inline" method="post" action="/signout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="quiet sm">Sign out</button></form>{{else}}<a class="btn btn-ghost sm" href="/signin">Sign in</a>{{end}}</nav>
+<nav>{{if .CSRF}}<form class="inline" method="post" action="/signout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="quiet sm" title="Signs you out of Slackline in every browser">Sign out</button></form>{{else}}<a class="btn btn-ghost sm" href="/signin">Sign in</a>{{end}}</nav>
 </div></header>
 <main>
 {{end}}

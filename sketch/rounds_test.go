@@ -208,15 +208,15 @@ func TestRound(t *testing.T) {
 		t.Fatalf("the coalesced strokes: announced %d, said %q", g.Announced, f.lastSaid())
 	}
 	// The next deadline is the first hint, at half time.
-	if !g.Deadline.Equal(start.Add(time.Minute)) {
-		t.Fatalf("deadline %v, want the first hint at 1m", g.Deadline.Sub(start))
+	if !g.Deadline.Equal(start.Add(32 * time.Second)) { // 30s after the first drawing, at 2s
+		t.Fatalf("deadline %v, want the first hint at 32s", g.Deadline.Sub(start))
 	}
 	g = f.step(nil)
 	if g.Hints != 1 || !strings.Contains(f.lastSaid(), g.letterCount()) || regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(word)+`\b`).MatchString(f.lastSaid()) {
 		t.Fatalf("first hint: %q", f.lastSaid())
 	}
 	g = f.step(nil)
-	if g.Hints != 2 || !f.clock().Equal(start.Add(90*time.Second)) || !strings.Contains(f.lastSaid(), "starts with \""+strings.ToUpper(word[:1])) {
+	if g.Hints != 2 || !f.clock().Equal(start.Add(47*time.Second)) || !strings.Contains(f.lastSaid(), "starts with \""+strings.ToUpper(word[:1])) {
 		t.Fatalf("second hint at %v: %q", f.clock().Sub(start), f.lastSaid())
 	}
 
@@ -276,7 +276,7 @@ func TestForfeitTimeoutAndRotation(t *testing.T) {
 	if g.Phase != drawing || g.Round != 2 || g.Drawer == first || g.Rounds[0].Outcome != "forfeit" {
 		t.Fatalf("after the forfeit: %s round %d %+v", g.Phase, g.Round, g.Rounds)
 	}
-	if !strings.Contains(f.said(), "forfeited. The word was \""+word) {
+	if !strings.Contains(f.said(), "forfeited and the turn passes to the next drawer. The word was \""+word) {
 		t.Fatalf("said %q", f.said())
 	}
 	start := g.RoundStart
@@ -288,7 +288,7 @@ func TestForfeitTimeoutAndRotation(t *testing.T) {
 	for g.Phase == drawing {
 		g = f.step(nil)
 	}
-	if g.Phase != reveal || !f.clock().Equal(start.Add(2*time.Minute)) || g.Rounds[1].Outcome != "timeout" || !strings.Contains(f.lastSaid(), "Nobody scores") {
+	if g.Phase != reveal || !f.clock().Equal(start.Add(61*time.Second)) || g.Rounds[1].Outcome != "timeout" || !strings.Contains(f.lastSaid(), "Nobody scores") {
 		t.Fatalf("timeout at %v: %s %q", f.clock().Sub(start), g.Phase, f.lastSaid())
 	}
 	for _, p := range g.Players {

@@ -106,9 +106,6 @@ func (a *App) Start(ctx context.Context) error { return a.server().Start(ctx) }
 // Run runs the game timers until ctx is done (every instance runs them).
 func (a *App) Run(ctx context.Context) { a.server().Run(ctx) }
 
-// Tick runs the timers that are due, once.
-func (a *App) Tick(ctx context.Context) (int, error) { return a.server().Tick(ctx) }
-
 // Handler serves the MCP endpoint, sign-in metadata, /health, the landing
 // page, its images and the follow-along page.
 func (a *App) Handler() http.Handler { return a.server().Handler(a.addTools) }

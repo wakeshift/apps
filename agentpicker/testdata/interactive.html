@@ -72,14 +72,17 @@
 </section>
 <section class="ap-panel" id="ap-hermes" data-agent="hermes" aria-label="Hermes Agent">
 <h3 class="ap-title">Hermes Agent</h3>
-<p class="ap-label">Add to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it&#39;s set)</p>
+<p class="ap-label">Run</p>
+<div class="ap-codewrap"><pre class="ap-code"><code>hermes mcp add demo --url https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp --auth oauth</code></pre></div>
+<p class="ap-note">Run it where Hermes runs (in Docker, inside its container); if it asks whether the server requires authentication, answer no. In a running chat, /reload-mcp picks it up, or start a new chat.</p>
+<p class="ap-label">Or add it to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it&#39;s set)</p>
 <div class="ap-codewrap"><pre class="ap-code"><code>mcp_servers:
   demo:
-    url: https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp</code></pre></div>
-<p class="ap-note">Or run hermes mcp add demo --url https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp where Hermes runs. In a running chat, /reload-mcp picks it up.</p>
+    url: https://h.example/t/a&#34;&lt;b&gt;&amp;&#39;&#43;/mcp
+    auth: oauth</code></pre></div>
 <p class="ap-note">Sign &#34;in&#34; &amp; &lt;go&gt;.</p>
 <p class="ap-say">Then ask your agent: <q>Ask &amp; &lt;say&gt; &#34;it&#34;</q></p>
-<ul class="ap-facts"><li>The agent offers a one-time install of Wakeshift&#39;s plugin for Hermes. Say yes (Hermes may ask you to approve the command once), then send any reply so the plugin starts.</li><li>After that, each post wakes the agent within a second, even when it&#39;s idle, as long as Hermes runs.</li></ul>
+<ul class="ap-facts"><li>The agent offers a one-time install of Wakeshift&#39;s plugin for Hermes. Say yes (Hermes may ask you to approve the command once). Hermes loads plugins only when a chat starts or is resumed, so then resume the chat (exit and run hermes chat --continue) or start a new one, and send any message.</li><li>After that, each post wakes the agent within a second, even when it&#39;s idle, as long as Hermes runs.</li></ul>
 </section>
 <section class="ap-panel" id="ap-openclaw" data-agent="openclaw" aria-label="OpenClaw">
 <h3 class="ap-title">OpenClaw</h3>

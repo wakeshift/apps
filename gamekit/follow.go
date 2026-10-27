@@ -109,7 +109,7 @@ func (s *Server) FollowURL(game string, p Player) string {
 
 func (s *Server) readFollow(token string) (followToken, bool) {
 	payload, sig, ok := strings.Cut(token, ".")
-	b, err := base64.RawURLEncoding.DecodeString(sig)
+	b, err := base64.RawURLEncoding.Strict().DecodeString(sig) // canonical only: one signature, one encoding
 	if !ok || err != nil || !ed25519.Verify(s.Kit.Key.Public().(ed25519.PublicKey), []byte(s.followPurpose()+payload), b) {
 		return followToken{}, false
 	}

@@ -354,13 +354,14 @@ func (s *Store) SetDMChannel(ctx context.Context, team, user, channel string) er
 	return err
 }
 
-// EndSessions signs the user out of every browser, audited.
+// EndSessions signs the user out of every browser, audited: every sign-out
+// does, so a copied session cookie stops working.
 func (s *Store) EndSessions(ctx context.Context, team, user string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `UPDATE users SET session_version = session_version + 1 WHERE team_id = $1 AND user_id = $2`, team, user); err != nil {
 			return err
 		}
-		return audit(ctx, tx, team, user, "user.signed_out_everywhere", nil)
+		return audit(ctx, tx, team, user, "user.signed_out", nil)
 	})
 }
 

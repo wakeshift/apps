@@ -117,9 +117,9 @@ func (a *App) nextRound(tx *gamekit.Tx, g *game) error {
 		gamekit.Shuffle(g.Order)
 		g.Turn = -1
 		g.Announce("The room is playing", fmt.Sprintf("Sketch Stadium room %s is playing, with %s. Rounds go on without end: the drawer rotates through everyone here, "+
-			"and players can join or leave at any time. Each round lasts %s. The drawer gets a secret word and draws it; everyone else looks with the `canvas` tool and guesses with `guess`. "+
+			"and players can join or leave at any time. The drawer gets a secret word and has %s to start drawing it, or the turn passes to the next drawer; the round then lasts %s from its first drawing. Everyone else looks with the `canvas` tool and guesses with `guess`. "+
 			"The first right guess scores for the guesser and the drawer: 1, 2 or 3 points by the word's difficulty. Scores count the last %d rounds.",
-			g.ID, strings.Join(g.handles(), ", "), gamekit.Human(a.round()), scoreWindow), g.handles())
+			g.ID, strings.Join(g.handles(), ", "), gamekit.Human(a.grace()), gamekit.Human(a.round()), scoreWindow), g.handles())
 	}
 	next := g.nextDrawer()
 	if next < 0 { // can't happen: prune puts everyone here in the rotation
@@ -132,15 +132,18 @@ func (a *App) nextRound(tx *gamekit.Tx, g *game) error {
 	}
 	g.Turn, g.Round = next, g.Round+1
 	g.Phase, g.Word, g.Tier, g.Drawer = drawing, w.Word, w.Tier, drawer.Key()
-	g.RoundStart, g.RoundEnd = tx.Now, tx.Now.Add(a.round())
+	// Until the drawer draws, the round ends at its deadline to start; its
+	// first drawing starts the round's clock (drew).
+	g.RoundStart, g.DrawnAt, g.RoundEnd = tx.Now, time.Time{}, tx.Now.Add(a.grace())
 	g.Strokes, g.Drawn, g.Hints, g.Announced, g.LastFlush, g.FlushAt, g.Guesses, g.Outcome = nil, false, 0, 0, time.Time{}, time.Time{}, nil, ""
 	g.Shown, g.RoundOver, g.Until, g.Draws, g.HintTimes = time.Time{}, time.Time{}, time.Time{}, nil, nil
 	for _, p := range g.Players {
 		p.Guessed, p.LastGuess = 0, time.Time{}
 	}
 	g.Announce(fmt.Sprintf("Round %d: %s draws", g.Round, drawer.Handle), fmt.Sprintf("Round %d: %s is drawing a %s word, worth %s. %s: call the `game` tool for your word, "+
-		"and start drawing it with `draw` within %s, or you forfeit the round. Everyone else: you'll be woken as the drawing arrives; look with the `canvas` tool and `guess` the word. "+
-		"You have %s.", g.Round, drawer.Handle, w.Tier, plural(tierPoints(w.Tier), "point", "points"), drawer.Handle, gamekit.Human(a.grace()), gamekit.Human(a.round())), g.handles())
+		"and start drawing it with `draw` within %s, or the turn passes to the next drawer. The round lasts %s from the first drawing. "+
+		"Everyone else: you'll be woken as the drawing arrives; look with the `canvas` tool and `guess` the word.", g.Round, drawer.Handle, w.Tier,
+		plural(tierPoints(w.Tier), "point", "points"), drawer.Handle, gamekit.Human(a.grace()), gamekit.Human(a.round())), g.handles())
 	if err := a.queueTurn(tx, g, drawer); err != nil {
 		return err
 	}
@@ -153,7 +156,7 @@ func (a *App) nextRound(tx *gamekit.Tx, g *game) error {
 func (a *App) idle(tx *gamekit.Tx, g *game) error {
 	g.Phase, g.Word, g.Tier, g.Drawer, g.Outcome = waiting, "", "", "", ""
 	g.Strokes, g.Drawn, g.Hints, g.Announced, g.LastFlush, g.FlushAt, g.Guesses = nil, false, 0, 0, time.Time{}, time.Time{}, nil
-	g.Shown, g.RoundOver, g.Draws, g.HintTimes = time.Time{}, time.Time{}, nil, nil
+	g.Shown, g.RoundOver, g.Draws, g.HintTimes, g.DrawnAt = time.Time{}, time.Time{}, nil, nil, time.Time{}
 	a.waitForPlayers(tx, g)
 	g.changed()
 	here := "Nobody is here"
@@ -393,17 +396,19 @@ func (a *App) schedule(g *game) {
 		soon(g.RoundStart.Add(a.grace()))
 	}
 	soon(g.FlushAt)
-	if g.Hints < 2 {
+	if g.Drawn && g.Hints < 2 {
 		soon(a.hintAt(g, g.Hints+1))
 	}
 	g.Deadline = d
 }
 
-// hintAt is when hint n comes: the length halfway through, the first
-// letter three quarters of the way.
+// hintAt is when hint n comes, once the drawer has drawn: the length
+// halfway through the round's clock, the first letter three quarters of
+// the way (30 s and 45 s after the first drawing, by default).
 func (a *App) hintAt(g *game, n int) time.Time {
 	frac := map[int]float64{1: 0.5, 2: 0.75}[n]
-	return g.RoundStart.Add(time.Duration(float64(g.RoundEnd.Sub(g.RoundStart)) * frac))
+	start := g.clockStart()
+	return start.Add(time.Duration(float64(g.RoundEnd.Sub(start)) * frac))
 }
 
 // drawingStep is a deadline in a round: whatever's due, in order.
@@ -414,8 +419,8 @@ func (a *App) drawingStep(tx *gamekit.Tx, g *game) error {
 		return a.endRound(tx, g, nil, "void", fmt.Sprintf("The drawer left, so round %d is void. The word was %q.", g.Round, g.Word))
 	}
 	if !g.Drawn && !now.Before(g.RoundStart.Add(a.grace())) {
-		// The next drawer starts at once, and this one was away for the
-		// round (checkAway).
+		// The turn passes: the next drawer starts at once, and this one was
+		// away for the round (checkAway).
 		last, err := seen(tx, g)
 		if err != nil {
 			return err
@@ -424,7 +429,7 @@ func (a *App) drawingStep(tx *gamekit.Tx, g *game) error {
 		if last[d.Key()].Before(g.RoundStart) {
 			why = "didn't respond" // not even for its word
 		}
-		if err := a.endRound(tx, g, nil, "forfeit", fmt.Sprintf("%s %s within %s, so round %d is forfeited. The word was %q. Nobody scores.",
+		if err := a.endRound(tx, g, nil, "forfeit", fmt.Sprintf("%s %s within %s, so round %d is forfeited and the turn passes to the next drawer. The word was %q. Nobody scores.",
 			d.Handle, why, gamekit.Human(a.grace()), g.Round, g.Word)); err != nil {
 			return err
 		}
@@ -436,7 +441,7 @@ func (a *App) drawingStep(tx *gamekit.Tx, g *game) error {
 	if !g.FlushAt.IsZero() && !now.Before(g.FlushAt) {
 		a.flush(tx, g)
 	}
-	for g.Hints < 2 && !now.Before(a.hintAt(g, g.Hints+1)) {
+	for g.Drawn && g.Hints < 2 && !now.Before(a.hintAt(g, g.Hints+1)) {
 		g.Hints++
 		g.HintTimes = append(g.HintTimes, now)
 		text := fmt.Sprintf("Hint: the word has %s: %s", g.letterCount(), g.hint())
@@ -454,6 +459,10 @@ func (a *App) drawingStep(tx *gamekit.Tx, g *game) error {
 func (a *App) drew(tx *gamekit.Tx, g *game, strokes []stroke) {
 	g.Strokes = append(g.Strokes, strokes...)
 	g.Draws = append(g.Draws, drawCallAt{At: tx.Now, Marks: len(strokes)})
+	if !g.Drawn {
+		// The first drawing starts the round's clock.
+		g.DrawnAt, g.RoundEnd = tx.Now, tx.Now.Add(a.round())
+	}
 	g.Drawn = true
 	g.changed()
 	if next := g.LastFlush.Add(a.coalesce()); g.LastFlush.IsZero() || !tx.Now.Before(next) {
@@ -509,7 +518,7 @@ func (a *App) endRound(tx *gamekit.Tx, g *game, winner *player, outcome, text st
 	}
 	if winner != nil {
 		s.Winner, s.WinnerKey, s.Points = winner.Handle, winner.Key(), tierPoints(g.Tier)
-		s.Seconds = int(tx.Now.Sub(g.RoundStart).Seconds())
+		s.Seconds = int(tx.Now.Sub(g.clockStart()).Seconds()) // from the first drawing
 	}
 	g.Rounds = append(g.Rounds, s)
 	if n := len(g.Rounds); n > scoreWindow {
@@ -559,7 +568,7 @@ func (a *App) rightGuess(tx *gamekit.Tx, g *game, p *player, text string, owner 
 		dh = d.Handle
 	}
 	return a.endRound(tx, g, p, "guessed", fmt.Sprintf("%s guessed it in %s: the word was %q! %s each for %s and %s.",
-		by, gamekit.Human(tx.Now.Sub(g.RoundStart)), g.Word, plural(tierPoints(g.Tier), "point", "points"), p.Handle, dh))
+		by, gamekit.Human(tx.Now.Sub(g.clockStart())), g.Word, plural(tierPoints(g.Tier), "point", "points"), p.Handle, dh))
 }
 
 // closeRoom closes the room: nobody came, or came back, in time.

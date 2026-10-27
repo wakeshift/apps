@@ -118,7 +118,10 @@ func (s *Server) tickers() int {
 }
 
 // forget deletes what players have had lately (recent) once they haven't
-// played for recentFor, and reasoning older than a day (thinking.go). It runs about once an hour per instance.
+// played for recentFor, rooms' archive IDs unused for archiveRoomIdle
+// (archive.go), reasoning older than a day (thinking.go), and players'
+// sessions idle for SessionIdle (oauth.go). It runs about once an hour per
+// instance.
 func (s *Server) forget(ctx context.Context, now time.Time) error {
 	last := s.forgotAt.Load()
 	if last != 0 && now.Sub(time.Unix(0, last)) < time.Hour || !s.forgotAt.CompareAndSwap(last, now.UnixNano()) {
@@ -127,7 +130,18 @@ func (s *Server) forget(ctx context.Context, now time.Time) error {
 	if _, err := s.Store.Pool.Exec(ctx, `DELETE FROM recent WHERE updated_at < $1`, now.Add(-recentFor)); err != nil {
 		return err
 	}
-	return s.forgetThinking(ctx, now)
+	if _, err := s.Store.Pool.Exec(ctx, `DELETE FROM archive_rooms WHERE used_at < $1`, now.Add(-archiveRoomIdle)); err != nil {
+		return err
+	}
+	if err := s.forgetThinking(ctx, now); err != nil {
+		return err
+	}
+	if n, err := s.expireSessions(ctx, now, 500); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Info(s.Name+": forgot idle sessions", "sessions", n)
+	}
+	return nil
 }
 
 // advance runs game id's due step, if it's still due (a player's move may

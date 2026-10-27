@@ -1,66 +1,34 @@
 package gamekit
 
 import (
-	"bytes"
 	"crypto/ed25519"
-	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"regexp"
 	"strings"
 	"testing"
-	"testing/fstest"
 	"time"
 
-	"github.com/wakeshift/apps/legal"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 const testChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
 type authorizeApp struct {
-	t        *testing.T
-	s        *Server
-	srv      *httptest.Server
+	*signInApp
 	clientID string
 	redirect string
 }
 
-// newAuthorizeApp serves a game's guest sign-in (with terms, if legal) and
+// newAuthorizeApp serves a game's sign-in (with terms, if withLegal) and
 // registers a client.
 func newAuthorizeApp(t *testing.T, withLegal bool) *authorizeApp {
 	t.Helper()
-	_, key, _ := ed25519.GenerateKey(nil)
-	srv := httptest.NewUnstartedServer(nil)
-	s := &Server{Kit: &appkit.App{ID: "quiz", Key: key, MCPURL: "http://" + srv.Listener.Addr().String() + "/mcp"}, Title: "Agent's Quiz",
-		Static: fstest.MapFS{"logo.svg": {Data: []byte("<svg/>")}}, Logo: "logo.svg"}
-	if withLegal {
-		p, err := legal.New(legal.Config{App: "Quiz", Terms: []byte("# Terms\n"), Privacy: []byte("# Privacy\n")})
-		if err != nil {
-			t.Fatal(err)
-		}
-		s.Legal = p
-	}
-	mux := http.NewServeMux()
-	s.guestRoutes(mux)
-	srv.Config.Handler = mux
-	srv.Start()
-	t.Cleanup(srv.Close)
-	a := &authorizeApp{t: t, s: s, srv: srv, redirect: "http://127.0.0.1:9/cb"}
-	b, _ := json.Marshal(map[string]any{"client_name": "Claude Code", "redirect_uris": []string{a.redirect}})
-	resp, err := http.Post(srv.URL+"/oauth/register", "application/json", bytes.NewReader(b))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var reg struct {
-		ClientID string `json:"client_id"`
-	}
-	json.NewDecoder(resp.Body).Decode(&reg)
-	if reg.ClientID == "" {
-		t.Fatalf("registration: %d", resp.StatusCode)
+	a := &authorizeApp{signInApp: newSignInApp(t, withLegal), redirect: "http://127.0.0.1:9/cb"}
+	status, reg, _ := a.register("Claude Code", a.redirect)
+	if status != http.StatusCreated {
+		t.Fatalf("registration: %d", status)
 	}
 	a.clientID = reg.ClientID
 	return a
@@ -142,9 +110,12 @@ func TestAuthorizePage(t *testing.T) {
 		t.Fatal("no CSRF cookie")
 	}
 
-	// The SDK's own refusals pass through: no page for a bad request.
-	if resp, _ := a.get("http://evil.example/cb", ""); resp.StatusCode != 400 {
+	// No page for a bad request: an unregistered redirect.
+	if resp, _ := a.get("http://evil.example/cb", ""); resp.StatusCode != 400 || resp.Header.Get("Location") != "" {
 		t.Errorf("an unregistered redirect: %d", resp.StatusCode)
+	}
+	if a.sessions() != 0 {
+		t.Error("the page started a session")
 	}
 
 	// Refused: no token, a tampered one, no cookie, another browser's
@@ -169,11 +140,19 @@ func TestAuthorizePage(t *testing.T) {
 		}
 	}
 
-	// Authorize: the SDK redirects back with the code and the state.
+	if a.sessions() != 0 {
+		t.Error("a refused click started a session")
+	}
+
+	// Authorize: the session starts, and the browser goes back with the
+	// code and the state.
 	r := a.post(csrf, cookie)
 	loc, _ := url.Parse(r.Header.Get("Location"))
 	if r.StatusCode != http.StatusFound || !strings.HasPrefix(loc.String(), a.redirect+"?") || loc.Query().Get("code") == "" || loc.Query().Get("state") != "st" {
 		t.Fatalf("authorize: %d %s", r.StatusCode, loc)
+	}
+	if a.sessions() != 1 {
+		t.Errorf("%d sessions after Authorize", a.sessions())
 	}
 }
 
@@ -191,13 +170,34 @@ func TestAuthorizeFormKey(t *testing.T) {
 	}
 }
 
-// Without terms, the SDK's guest sign-in is unchanged: authorize redirects
-// back with the code at once.
+// Without terms, authorize starts the session and redirects back with the
+// code at once, and there's nothing to click.
 func TestAuthorizeWithoutLegal(t *testing.T) {
 	a := newAuthorizeApp(t, false)
 	resp, _ := a.get(a.redirect, "")
 	loc, _ := url.Parse(resp.Header.Get("Location"))
-	if resp.StatusCode != http.StatusFound || loc.Query().Get("code") == "" {
+	if resp.StatusCode != http.StatusFound || loc.Query().Get("code") == "" || a.sessions() != 1 {
 		t.Fatalf("authorize: %d %s", resp.StatusCode, loc)
+	}
+	if r := a.post("x", "y"); r.StatusCode != http.StatusForbidden {
+		t.Errorf("a click without terms: %d", r.StatusCode)
+	}
+}
+
+// A signature in a non-canonical encoding (the last character's unused
+// bits set) is refused, so a token has one encoding: changing a character
+// of it always breaks it.
+func TestSignaturesAreCanonical(t *testing.T) {
+	_, key, _ := ed25519.GenerateKey(nil)
+	s := &Server{Kit: &appkit.App{Key: key}}
+	tok := s.signForm(authorizeForm{Query: "x", Nonce: "AAAAAAAAAAAAAAAAAAAAAA", Expires: time.Now().Add(time.Minute).Unix()})
+	if _, ok := s.openForm(tok); !ok {
+		t.Fatal("a signed form didn't open")
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := strings.IndexByte(alphabet, tok[len(tok)-1])
+	other := tok[:len(tok)-1] + string(alphabet[last|1]) // the same bytes, decoded leniently
+	if _, ok := s.openForm(other); ok {
+		t.Fatal("a non-canonical signature opened")
 	}
 }

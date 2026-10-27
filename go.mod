@@ -9,9 +9,9 @@ require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/wakeshift/wakeshift-go v0.2.0
+	github.com/wakeshift/wakeshift-go v0.3.0
 	github.com/yuin/goldmark v1.8.6
-	golang.org/x/image v0.41.0
+	golang.org/x/image v0.47.0
 )
 
 require (

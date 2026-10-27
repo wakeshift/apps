@@ -91,7 +91,7 @@ func (a *App) server() *gamekit.Server {
 			NewGame: func(g gamekit.State, now time.Time) {
 				g.(*game).Phase, g.(*game).Deadline = waiting, now.Add(a.wait())
 			},
-			Step: func(tx *gamekit.Tx, g gamekit.State) error { a.step(tx, g.(*game)); return nil }}
+			Step: func(tx *gamekit.Tx, g gamekit.State) error { return a.step(tx, g.(*game)) }}
 	})
 	return a.srv
 }
@@ -115,9 +115,6 @@ func (a *App) Start(ctx context.Context) error { return a.server().Start(ctx) }
 
 // Run runs the game timers until ctx is done (every instance runs them).
 func (a *App) Run(ctx context.Context) { a.server().Run(ctx) }
-
-// Tick runs the timers that are due, once.
-func (a *App) Tick(ctx context.Context) (int, error) { return a.server().Tick(ctx) }
 
 // Handler serves the MCP endpoint, sign-in metadata, /health, the landing
 // page and the follow-along page.
@@ -149,12 +146,12 @@ func (a *App) find(ctx context.Context, ag *appkit.Agent, session string) (*game
 
 // step is the game's deadline passing. Called under the game's lock, as
 // is everything below that changes a game.
-func (a *App) step(tx *gamekit.Tx, g *game) {
+func (a *App) step(tx *gamekit.Tx, g *game) error {
 	switch g.Phase {
 	case waiting:
 		if len(g.Players) >= minPlayers {
 			a.startNight(tx, g)
-			return
+			return nil
 		}
 		g.Phase, g.Result = over, []string{"Not enough players joined."}
 		g.Announce("Game closed", fmt.Sprintf("Not enough players joined in %s, so this game is closed. Call the `join` tool to try again.", gamekit.Human(a.wait())), g.handles())
@@ -162,10 +159,11 @@ func (a *App) step(tx *gamekit.Tx, g *game) {
 	case night:
 		a.startDay(tx, g)
 	case day:
-		a.startVoting(tx, g)
+		return a.startVoting(tx, g)
 	case voting:
-		a.finish(g)
+		return a.finish(tx, g)
 	}
+	return nil
 }
 
 // seated runs after a player sits down: six start the game at once; three
@@ -185,6 +183,7 @@ func (a *App) seated(tx *gamekit.Tx, g *game) {
 func (a *App) startNight(tx *gamekit.Tx, g *game) {
 	g.Open = false
 	g.deal()
+	g.Started = tx.Now
 	g.Phase, g.Deadline = night, tx.Now.Add(a.night())
 	g.Announce("Night falls", fmt.Sprintf("Nightfall game %s has started with %s. The cards in play: %s (%d in the center). "+
 		"Call the `game` tool for your secret role. If it has a night ability, choose with the `night` tool within %s; day breaks then.",
@@ -203,36 +202,38 @@ func (a *App) nightDone(tx *gamekit.Tx, g *game) {
 // allVoted ends the game once every player who's still connected has
 // voted: one that dropped off doesn't hold it up (its vote, if any,
 // counts).
-func (a *App) allVoted(tx *gamekit.Tx, g *game) {
+func (a *App) allVoted(tx *gamekit.Tx, g *game) error {
 	if g.Phase != day && g.Phase != voting {
-		return
+		return nil
 	}
 	if slices.ContainsFunc(g.Players, func(p *player) bool { return p.Vote == "" && !tx.Away[p.Handle] }) {
-		return
+		return nil
 	}
-	a.finish(g)
+	return a.finish(tx, g)
 }
 
 func (a *App) startDay(tx *gamekit.Tx, g *game) {
 	g.resolveNight()
+	g.DayAt = tx.Now
 	g.Phase, g.Deadline = day, tx.Now.Add(a.day())
 	g.Announce("Day breaks", fmt.Sprintf("Day breaks. Call the `game` tool to see what you learned in the night. Then talk it over with "+
 		"the `say` tool for %s: who are the vampires? Cards may have been swapped, and players may lie. Vote with the `vote` tool when you're "+
 		"ready; the game ends as soon as everyone has voted.", gamekit.Human(a.day())), g.handles())
 }
 
-func (a *App) startVoting(tx *gamekit.Tx, g *game) {
+func (a *App) startVoting(tx *gamekit.Tx, g *game) error {
 	g.Phase, g.Deadline = voting, tx.Now.Add(a.voting())
 	g.Announce("Time to vote", fmt.Sprintf("Time to vote: call the `vote` tool with the player to eliminate (not yourself). "+
 		"Whoever gets the most votes, if at least two, is voted out and staked. You have %s.", gamekit.Human(a.voting())), g.handles())
-	a.allVoted(tx, g) // everyone still here may have voted by day
+	return a.allVoted(tx, g) // everyone still here may have voted by day
 }
 
-func (a *App) finish(g *game) {
+func (a *App) finish(tx *gamekit.Tx, g *game) error {
 	g.tally()
 	g.Phase = over
 	g.Announce("Game over", strings.Join(g.Result, " ")+" Call the `join` tool to play again.", g.handles())
 	g.End(a.linger())
+	return archive(tx, g)
 }
 
 func (a *App) secondsLeft(g *game) int { return max(0, int(time.Until(g.Deadline).Seconds())) }

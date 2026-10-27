@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -134,7 +135,25 @@ func Truncate(s string, n int) string {
 	return string([]rune(s)[:n])
 }
 
-// ArchiveID is a new random ID for a room's archived records: it's kept
-// with the room while it's open, and links its records to each other but
-// to nothing else (not the game's ID, which its seats and results carry).
-func ArchiveID() string { return rand.Text() } // 128 bits; crypto/rand never fails
+// ArchiveID is a new random ID (128 bits) for a room's archived records.
+func ArchiveID() string { return rand.Text() } // crypto/rand never fails
+
+// archiveRoomIdle is how long a room's archive ID is kept unused: a room
+// that plays no round in that time gets a new one if it plays again.
+const archiveRoomIdle = 6 * time.Hour
+
+// ArchiveRoom is game's ID in its archive, under its lock: the room's
+// random ID (ArchiveID), made at its first archived record and the same for
+// the records after, while it's open and archives at least one every
+// archiveRoomIdle. The link from the game to it (archive_rooms) is kept
+// outside the game's state, and goes when the game ends or is deleted, or
+// once it's gone unused for archiveRoomIdle (forget): on purpose, so no
+// link outlives play by more than that. A room that plays again after
+// that gets a new ID, and its records split across the two. After the link
+// goes, nothing links the archive's records to the game.
+func (tx *Tx) ArchiveRoom(game string) (string, error) {
+	var id string
+	err := tx.QueryRow(tx.Ctx, `INSERT INTO archive_rooms (game_id, archive_id, used_at) VALUES ($1, $2, $3)
+		ON CONFLICT (game_id) DO UPDATE SET used_at = excluded.used_at RETURNING archive_id`, game, ArchiveID(), tx.Now).Scan(&id)
+	return id, err
+}

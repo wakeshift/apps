@@ -62,8 +62,10 @@ export function fill(s: string, o: PickerOptions): string {
     "{each}": each,
     "{Each}": each[0].toUpperCase() + each.slice(1),
     "{auth}": o.noAuth ? "No authentication" : "OAuth",
+    "{hermesauth}": o.noAuth ? "" : " --auth oauth",
+    "{hermesauthyaml}": o.noAuth ? "" : "\n    auth: oauth",
   };
-  return s.replace(/\{name\}|\{url\}|\{each\}|\{Each\}|\{auth\}/g, (k) => vals[k]);
+  return s.replace(/\{name\}|\{url\}|\{each\}|\{Each\}|\{auth\}|\{hermesauthyaml\}|\{hermesauth\}/g, (k) => vals[k]);
 }
 
 /** Cursor's link that adds the server: its name and its mcp.json entry as base64 JSON. */

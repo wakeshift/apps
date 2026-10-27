@@ -40,7 +40,8 @@ type snap struct {
 	Points  int          `json:"points,omitempty"` // what the round's word is worth
 	Window  int          `json:"window"`           // the rounds scores count
 	Drawer  string       `json:"drawer,omitempty"`
-	EndsAt  int64        `json:"ends_at,omitempty"` // the round's end (Unix ms)
+	EndsAt  int64        `json:"ends_at,omitempty"` // the round's end, or while Waiting the drawer's deadline to start (Unix ms)
+	Waiting bool         `json:"waiting,omitempty"` // the round waits for the drawer's first drawing: its clock hasn't started
 	LeftMs  int64        `json:"left_ms,omitempty"` // and how long until then, as it's sent
 	Hint    string       `json:"hint,omitempty"`
 	Letters string       `json:"letters,omitempty"` // "10 letters", once the first hint is out
@@ -102,6 +103,10 @@ func snapshot(g *game, me *player) snap {
 	case drawing:
 		s.Round, s.Points = g.Round, tierPoints(g.Tier)
 		s.Status = fmt.Sprintf("Round %d · %s is drawing · %s", s.Round, display(d.Handle), plural(s.Points, "point", "points"))
+		if g.waitingForDrawer() {
+			s.Waiting = true
+			s.Status = fmt.Sprintf("Round %d · waiting for %s to start drawing · %s", s.Round, display(d.Handle), plural(s.Points, "point", "points"))
+		}
 		s.EndsAt = g.RoundEnd.UnixMilli()
 		s.Hint = g.hint()
 	case reveal:

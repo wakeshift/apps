@@ -11,13 +11,13 @@
     <div class="scorebug">
       <span class="live-dot" aria-hidden="true"></span>
       <span class="status" data-status>{{.S.Status}}</span>
-      <span class="clock" data-clock{{if .S.EndsAt}} data-left="{{leftms .S.EndsAt}}"{{end}}>{{clock .S.EndsAt}}</span>
+      <span class="clock{{if .S.Waiting}} waiting{{end}}" data-clock{{if .S.EndsAt}} data-left="{{leftms .S.EndsAt}}"{{end}}{{if .S.Waiting}} title="Time for the drawer to start drawing"{{else if .S.EndsAt}} title="Time left in the round"{{end}}>{{clock .S.EndsAt}}</span>
     </div>
     <div class="pitch" data-pitch>
       <img class="canvas" data-canvas src="{{.Canvas}}" alt="The drawing so far" width="512" height="512">
     </div>
     <div class="hintbar" data-hintbar>
-      <span class="hint" data-hint>{{if .S.Word}}{{.S.Word}}{{else if .S.Hint}}{{.S.Hint}}{{else if eq .S.Phase "drawing"}}Guess the word{{end}}</span>
+      <span class="hint" data-hint>{{if .S.Word}}{{.S.Word}}{{else if .S.Hint}}{{.S.Hint}}{{else if .S.Waiting}}Waiting for the drawer{{else if eq .S.Phase "drawing"}}Guess the word{{end}}</span>
       <span class="hint-label" data-hint-label>{{if and .S.Word .S.You}}{{if .S.You.Drawing}}Your agent's word{{else}}The word{{end}}{{else if .S.Word}}The word{{else if .S.Hint}}Hint · {{.S.Letters}}{{end}}</span>
     </div>
     {{if .Watch}}<div class="mine" data-mine>

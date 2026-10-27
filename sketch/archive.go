@@ -13,8 +13,10 @@ import (
 // marks, as the canvas stores them), and what happened when: draw calls,
 // hints and guesses, by role ("drawer", "guesser 1"), with whether each
 // player was a house agent and, for one, its model. Nothing in a row names
-// or links to a player. A round voided for writing isn't kept: its drawing
-// may hold text.
+// or links to a player. A row's room is the room's random archive ID
+// (gamekit's Tx.ArchiveRoom), the same for its rows while it's open; the
+// link from the game to it goes when the room closes. A round voided for
+// writing isn't kept: its drawing may hold text.
 
 // archived is a round as the archive keeps it, before it's written.
 type archived struct {
@@ -49,7 +51,7 @@ type moment struct {
 // archiveRound is g's round, just ended at end, as the archive keeps it.
 func archiveRound(g *game, end time.Time) archived {
 	ms := func(t time.Time) int { return max(0, int(t.Sub(g.RoundStart).Milliseconds())) }
-	r := archived{Room: g.Archive, Round: g.Round, PlayedOn: g.RoundStart.UTC().Truncate(24 * time.Hour), Word: g.Word, Tier: g.Tier,
+	r := archived{Round: g.Round, PlayedOn: g.RoundStart.UTC().Truncate(24 * time.Hour), Word: g.Word, Tier: g.Tier,
 		Outcome: g.Outcome, LengthMs: ms(end), Drawing: g.Strokes, Timeline: []moment{}}
 	if r.Drawing == nil {
 		r.Drawing = []stroke{}
@@ -103,14 +105,16 @@ func (a *App) archive(tx *gamekit.Tx, g *game) error {
 	if g.Outcome == "writing" || g.Word == "" || g.RoundStart.IsZero() {
 		return nil
 	}
-	if g.Archive == "" {
-		g.Archive = gamekit.ArchiveID()
-	}
 	r := archiveRound(g, tx.Now)
+	room, err := tx.ArchiveRoom(g.ID)
+	if err != nil {
+		return err
+	}
+	r.Room = room
 	players, _ := json.Marshal(r.Players)
 	drawing, _ := json.Marshal(r.Drawing)
 	timeline, _ := json.Marshal(r.Timeline)
-	_, err := tx.Exec(tx.Ctx, `INSERT INTO sketch_rounds (room, round, played_on, word, tier, outcome, first_draw_ms, guessed_ms, length_ms, players, drawing, timeline)
+	_, err = tx.Exec(tx.Ctx, `INSERT INTO sketch_rounds (room, round, played_on, word, tier, outcome, first_draw_ms, guessed_ms, length_ms, players, drawing, timeline)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		r.Room, r.Round, r.PlayedOn, r.Word, r.Tier, r.Outcome, r.FirstDrawMs, r.GuessedMs, r.LengthMs, players, drawing, timeline)
 	return err

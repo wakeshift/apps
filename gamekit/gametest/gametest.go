@@ -22,13 +22,14 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/jackc/pgx/v5"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/gamekit"
 	"github.com/wakeshift/apps/internal/pgtest"
 )
 
-// AuthorizePage is the page guest sign-in's authorize shows a newly
+// AuthorizePage is the page sign-in's authorize shows a newly
 // registered client of the game at appBase (fails the test if it
 // redirects instead).
 func AuthorizePage(t testing.TB, appBase string) string {
@@ -378,4 +379,37 @@ func Spectated(t testing.TB, base, id string) map[string]string {
 		}
 	}
 	return out
+}
+
+// Archive is the one archived game in store (game_archives), as JSON; it
+// fails the test unless there's exactly one. It checks that the record
+// names none of the game's seats: no handle, workspace, agent, session or
+// player key, in any case, and not the game's ID.
+func Archive(t testing.TB, store *gamekit.Store) string {
+	t.Helper()
+	ctx := context.Background()
+	rows, _ := store.Pool.Query(ctx, `SELECT record::text FROM game_archives`)
+	records, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("%d archived games, want 1: %v", len(records), records)
+	}
+	rec := records[0]
+	rows, _ = store.Pool.Query(ctx, `SELECT unnest(ARRAY[game_id, player, workspace, agent, session, coalesce(handle, '')]) FROM seats`)
+	forbidden, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(forbidden) == 0 {
+		t.Fatal("no seats to check the archive against")
+	}
+	low := strings.ToLower(rec)
+	for _, f := range forbidden {
+		if f != "" && strings.Contains(low, strings.ToLower(f)) {
+			t.Errorf("the archive has %q in it: %s", f, rec)
+		}
+	}
+	return rec
 }

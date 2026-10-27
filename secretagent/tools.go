@@ -129,8 +129,8 @@ func (a *App) addTools(srv *mcp.Server) {
 		"Never say the codeword itself."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in sayIn) (*mcp.CallToolResult, map[string]any, error) {
 			text := strings.TrimSpace(in.Text)
-			if text == "" || len(text) > 1000 {
-				return nil, nil, errors.New("text is required (at most 1000 characters)")
+			if text == "" || len(text) > sayMax {
+				return nil, nil, fmt.Errorf("text is required (at most %d characters)", sayMax)
 			}
 			ag, err := a.srv.Agent(ctx, req)
 			if err != nil {
@@ -194,7 +194,9 @@ func (a *App) addTools(srv *mcp.Server) {
 					return fmt.Errorf("no player %s; the players are %s", target, strings.Join(g.handles(), ", "))
 				}
 				me.Vote = target
-				a.allVoted(tx, g)
+				if err := a.allVoted(tx, g); err != nil {
+					return err
+				}
 				return tx.Think(id, key, "vote", in.Note)
 			})
 			if err != nil {

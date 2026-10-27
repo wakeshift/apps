@@ -246,8 +246,6 @@ func (p *svgParser) parse(src string) ([]shape, error) {
 	return p.shapes, nil
 }
 
-const svgNS = "http://www.w3.org/2000/svg"
-
 // svgName is an element's name as the errors give it: "svg:rect" for a
 // prefixed one (RawToken doesn't resolve prefixes), which isn't in the subset.
 func svgName(n xml.Name) string {
@@ -389,7 +387,10 @@ func (p *svgParser) element(name string, attrs []xml.Attr, parent svgStyle) (svg
 		sh.Fill = "" // a line has no inside
 	}
 	if sh.Color != "" {
-		sh.Width = round1(st.width * st.m.scale())
+		// Narrowed again after transforms: scale(100) would make an
+		// 8-wide stroke 800 wide, and each segment's render cover the
+		// whole canvas.
+		sh.Width = round1(min(st.width*st.m.scale(), svgMaxWidth))
 		if sh.Width == 0 {
 			sh.Color = ""
 		}

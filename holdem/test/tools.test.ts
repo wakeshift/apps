@@ -25,10 +25,10 @@ async function connect(t: { after: (fn: () => Promise<void>) => void }, operator
   const wake = new Wakeshift({ key: "wst_test_holdem_" + "x".repeat(43), core: "http://127.0.0.1:9" });
   const server = holdemServer({ wake, casino, events: defineHoldemEvents(wake, casino), secret: "tools-test-secret-at-least-32-bytes-long", publicUrl: "http://localhost", log: () => {}, operatorNote });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  // Signed in as a guest, as GuestAuth would have it.
+  // Signed in, as oauth.ts would have it.
   const send = clientSide.send.bind(clientSide);
   clientSide.send = (message, options) =>
-    send(message, { ...options, authInfo: { token: "t", clientId: "c", scopes: [], extra: { guest: { user: "guest:1", client: "test-agent" } } } });
+    send(message, { ...options, authInfo: { token: "t", clientId: "c", scopes: [], extra: { signedIn: { user: "p_1", client: "test-agent" } } } });
   const client = new Client({ name: "test-agent", version: "0" });
   await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
   t.after(async () => {

@@ -35,6 +35,7 @@ import {
 } from "../engine/src/index.js";
 import type { QueryResult, QueryResultRow } from "pg";
 import { cardText } from "./pages.js";
+import { archiveHand, type Known } from "./archive.js";
 import { cleanReasoning, type CleanMessage } from "./moderation.js";
 import type { Db, Log, Tx } from "./db.js";
 import { displayName, freshName, tableName } from "./names.js";
@@ -53,6 +54,19 @@ export const TALK_MAX = 280;
 export const TALK_GAP_MS = 5000;
 /** How long a move's private reasoning is kept (its watch page shows only today's). */
 export const THINKING_KEEP_MS = 2 * 86_400_000;
+/** An archived hand scrubs the names of everyone in the table's last this many hands. */
+export const ARCHIVE_FORMER_HANDS = 50;
+
+/** How long a watch link works from when it's minted. */
+export const WATCH_LINK_DAYS = 30;
+export const WATCH_LINK_MS = WATCH_LINK_DAYS * 86_400_000;
+
+/** What a player's watch link is derived from, besides the player: a new nonce and time each time one is minted. */
+export interface WatchMint {
+  nonce: number;
+  /** When it was minted (ISO, to the millisecond). */
+  mintedAt: string;
+}
 
 /** A move's private reasoning, for its player's watch page only. */
 export interface Thought {
@@ -410,52 +424,61 @@ export class Casino {
 
   // ── Watch links ────────────────────────────────────────────────────────
 
-  /** A seated player's seat, as a watch link is derived from it; undefined off the table. */
-  async watchSeat(playerId: string): Promise<{ table: string; joinedAt: string; nonce: number } | undefined> {
-    const r = await this.db.query<{ table_id: string; joined_at: Date; watch_nonce: number }>("SELECT table_id, joined_at, watch_nonce FROM seats WHERE player = $1", [playerId]);
-    const x = r.rows[0];
-    return x ? { table: x.table_id, joinedAt: x.joined_at.toISOString(), nonce: x.watch_nonce } : undefined;
-  }
-
-  /** Records a watch link's hash for the player's seat, for today. fresh: a new nonce first (the old link stops working). */
-  async recordWatch(playerId: string, hash: (seat: { table: string; joinedAt: string; nonce: number; day: string }) => string, fresh = false): Promise<{ table: string; day: string; nonce: number } | undefined> {
+  /**
+   * The player's watch link: theirs if it still works, or a new one if they
+   * have none, theirs is older than WATCH_LINK_DAYS, or fresh is set (the
+   * old one stops working). hash gives the stored hash of the link a
+   * minting derives; the link itself never reaches the database. Undefined
+   * if there's no such player.
+   */
+  async watchLink(playerId: string, hash: (w: WatchMint) => string, fresh = false): Promise<(WatchMint & { expiresAt: string }) | undefined> {
     return await this.db.tx(async (c) => {
-      // Locked, then updated once: a second update of a row this transaction
-      // already updated re-checks its foreign key, locking the table, which
-      // deadlocks with a hand in progress there (it holds the table and
-      // waits for this seat).
-      const r = await c.query<{ table_id: string; joined_at: Date; watch_nonce: number }>("SELECT table_id, joined_at, watch_nonce FROM seats WHERE player = $1 FOR UPDATE", [playerId]);
-      const x = r.rows[0];
-      if (!x) return undefined;
-      const day = this.today();
-      const seat = { table: x.table_id, joinedAt: x.joined_at.toISOString(), nonce: x.watch_nonce + (fresh ? 1 : 0), day };
-      await c.query("UPDATE seats SET watch_nonce = $2, watch_hash = $3, watch_day = $4 WHERE player = $1", [playerId, seat.nonce, hash(seat), day]);
-      return { table: seat.table, day, nonce: seat.nonce };
+      const now = this.now();
+      const mint = { nonce: 0, mintedAt: new Date(now).toISOString() };
+      const out = (w: WatchMint) => ({ ...w, expiresAt: new Date(Date.parse(w.mintedAt) + WATCH_LINK_MS).toISOString() });
+      // Only this player's link row is locked (never their seat or table):
+      // nothing here waits on a hand in progress.
+      const read = async () => (await c.query<{ nonce: number; minted_at: Date }>("SELECT nonce, minted_at FROM watch_links WHERE player = $1 FOR UPDATE", [playerId])).rows[0];
+      let x = await read();
+      if (!x) {
+        // The first link: made now, or found if another request made it first.
+        const r = await c.query(
+          "INSERT INTO watch_links (player, hash, nonce, minted_at) SELECT $1, $2, $3, $4 WHERE EXISTS (SELECT 1 FROM players WHERE id = $1) ON CONFLICT (player) DO NOTHING",
+          [playerId, hash(mint), mint.nonce, mint.mintedAt],
+        );
+        if (r.rowCount) return out(mint);
+        x = await read();
+        if (!x) return undefined;
+      }
+      if (!fresh && x.minted_at.getTime() > now - WATCH_LINK_MS) return out({ nonce: x.nonce, mintedAt: x.minted_at.toISOString() });
+      mint.nonce = x.nonce + 1;
+      await c.query("UPDATE watch_links SET hash = $2, nonce = $3, minted_at = $4 WHERE player = $1", [playerId, hash(mint), mint.nonce, mint.mintedAt]);
+      return out(mint);
     });
   }
 
-  /** Whose watch link has this hash: a player still seated, and only today. */
-  async watchTarget(hash: string): Promise<{ player: string; table: string } | undefined> {
-    const r = await this.db.query<{ player: string; table_id: string }>("SELECT player, table_id FROM seats WHERE watch_hash = $1 AND watch_day = $2", [hash, this.today()]);
+  /**
+   * Whose watch link has this hash, if it still works (minted in the last
+   * WATCH_LINK_DAYS and not replaced), and the table that player sits at
+   * now: null off the table.
+   */
+  async watchTarget(hash: string): Promise<{ player: string; table: string | null } | undefined> {
+    const r = await this.db.query<{ player: string; table_id: string | null }>(
+      "SELECT w.player, s.table_id FROM watch_links w LEFT JOIN seats s ON s.player = w.player WHERE w.hash = $1 AND w.minted_at > $2",
+      [hash, new Date(this.now() - WATCH_LINK_MS)],
+    );
     const x = r.rows[0];
     return x ? { player: x.player, table: x.table_id } : undefined;
   }
 
-  /**
-   * Why a watch link stopped working, for its page's last word: the player
-   * left their table (and what's in today's bankroll now), or is still seated
-   * and the link was replaced or expired.
-   */
-  async watchEnded(playerId: string): Promise<{ name: string; seated: boolean; balance: number }> {
-    const day = this.today();
-    const r = await this.db.query<{ name: string; seated: boolean; balance: number | null }>(
-      `SELECT p.name, EXISTS (SELECT 1 FROM seats s WHERE s.player = p.id) AS seated,
-              (SELECT d.balance FROM days d WHERE d.player = p.id AND d.day = $2) AS balance
-       FROM players p WHERE p.id = $1`,
-      [playerId, day],
+  /** A player, for their watch page while they're off the table: their name, and what's in today's bankroll. */
+  async watchAway(playerId: string): Promise<{ name: string; balance: number }> {
+    const r = await this.db.query<{ name: string; balance: number | null }>(
+      "SELECT p.name, (SELECT d.balance FROM days d WHERE d.player = p.id AND d.day = $2) AS balance FROM players p WHERE p.id = $1",
+      [playerId, this.today()],
     );
     const x = r.rows[0];
-    return { name: x?.name ?? "Your agent", seated: x?.seated ?? false, balance: x?.balance ?? DAILY_BANKROLL };
+    return { name: x?.name ?? "Your agent", balance: x?.balance ?? DAILY_BANKROLL };
   }
 
   /** A player's own hole cards at their table (for their watch page), their seat, and their own private reasoning. */
@@ -468,7 +491,7 @@ export class Casino {
 
   /**
    * A player's own private reasoning (act's reasoning) at its table today,
-   * newest first: for its watch page, which works until the day ends, and
+   * newest first: for its watch page, which shows only today's, and
    * nowhere else.
    */
   async thinking(playerId: string, limit = 8): Promise<Thought[]> {
@@ -544,13 +567,14 @@ export class Casino {
         row.state = engineAct(row.state, playerId, action);
         await c.query("UPDATE seats SET timeouts = 0 WHERE player = $1", [playerId]);
         if (note) {
-          await c.query("INSERT INTO action_notes (hand_id, idx, player, text, flagged, original) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING", [
+          await c.query("INSERT INTO action_notes (hand_id, idx, player, text, flagged, original, at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING", [
             hand,
             idx,
             playerId,
             note.text,
             note.flagged,
             note.original,
+            new Date(this.now()),
           ]);
         }
         // The move's private reasoning: for the player's own watch page only,
@@ -632,14 +656,14 @@ export class Casino {
     }
     await this.endDueSubscriptions();
     await this.recordChampions();
-    await this.forgetThinking(now);
+    await this.forgetOld(now);
     return n;
   }
 
   /**
    * Takes a player whose clock ran out (their hand already folded) off the
-   * table: their stack goes back to today's bankroll, the seat (and its watch
-   * link) goes, and they hear about it once, in a last personal event and in
+   * table: their stack goes back to today's bankroll, the seat
+   * goes (their watch link shows them off the table), and they hear about it once, in a last personal event and in
    * their next tool result. Their turn subscription for the table ends after
    * a grace period, so that event arrives first.
    */
@@ -856,6 +880,15 @@ export class Casino {
     const log = history(row.state);
     const pot = result.pots.reduce((sum, a) => sum + a.amount, 0);
     await c.query("UPDATE hands SET ended_at = $2, pot = $3, log = $4, result = $5 WHERE id = $1", [h.id, new Date(this.now()), pot, JSON.stringify(log), JSON.stringify(result)]);
+    // Keeping the hand never holds up the game: if it fails, the hand still ends.
+    await c.query("SAVEPOINT archive");
+    try {
+      await this.archive(c, row);
+      await c.query("RELEASE SAVEPOINT archive");
+    } catch (err) {
+      await c.query("ROLLBACK TO SAVEPOINT archive");
+      this.log("warn", "archiving a hand failed", { err: String(err) });
+    }
     const bb = row.state.config.bigBlind;
     const won = new Map<string, number>();
     for (const a of result.pots) for (const [who, amt] of Object.entries(a.shares)) won.set(who, (won.get(who) ?? 0) + amt);
@@ -900,6 +933,54 @@ export class Casino {
     });
   }
 
+  /**
+   * Keeps the hand just finished for good, anonymised (archive.ts), with
+   * the table talk since the table's last hand ended. Called in the
+   * transaction that finishes it.
+   */
+  private async archive(c: Tx, row: TableRow): Promise<void> {
+    const h = row.state.hand!;
+    const now = new Date(this.now());
+    const started = (await c.query<{ started_at: Date; since: Date | null }>(
+      "SELECT started_at, (SELECT max(ended_at) FROM hands WHERE table_id = $2 AND id <> $1) AS since FROM hands WHERE id = $1",
+      [h.id, row.id],
+    )).rows[0]!;
+    const notes = (await c.query<{ idx: number; text: string; at: Date }>("SELECT idx, text, at FROM action_notes WHERE hand_id = $1", [h.id])).rows;
+    const talk = (await c.query<{ player: string; text: string; at: Date }>("SELECT player, text, at FROM talk WHERE table_id = $1 AND at > $2 AND at <= $3 ORDER BY id", [
+      row.id,
+      started.since ?? new Date(started.started_at.getTime() - 1),
+      now,
+    ])).rows;
+    const seated = row.state.seats.map((x) => x?.player ?? null);
+    // Players who sat here lately and have left: their names may be in what's said too.
+    const former = (await c.query<{ player: string }>(
+      `SELECT DISTINCT p->>'player' AS player FROM (SELECT log FROM hands WHERE table_id = $1 AND log IS NOT NULL ORDER BY number DESC LIMIT $2) h,
+        jsonb_array_elements(h.log->0->'players') p`,
+      [row.id, ARCHIVE_FORMER_HANDS],
+    )).rows.map((r) => r.player);
+    const ids = [...new Set([...h.players.map((p) => p.player), ...seated.flatMap((x) => (x ? [x] : [])), ...talk.map((l) => l.player), ...former])];
+    const players = new Map(
+      (await c.query<Known>("SELECT id, name, house, model FROM players WHERE id = ANY($1)", [ids])).rows.map((p) => [p.id, p]),
+    );
+    const cfg = row.state.config;
+    const record = archiveHand({
+      h,
+      stake: row.stake,
+      pace: row.pace,
+      smallBlind: cfg.smallBlind,
+      bigBlind: cfg.bigBlind,
+      players,
+      seated,
+      former,
+      notes,
+      talk,
+      startedAt: started.started_at,
+      endedAt: now,
+      talkMax: TALK_MAX,
+    });
+    await c.query("INSERT INTO hand_archives (played_on, record) VALUES ($1, $2)", [dayOf(now.getTime()), JSON.stringify(record)]);
+  }
+
   /** Between hands: players who asked to leave go. */
   private async betweenHands(c: Tx, row: TableRow): Promise<void> {
     const going = await c.query<{ player: string }>("SELECT player FROM seats WHERE table_id = $1 AND leaving", [row.id]);
@@ -942,14 +1023,21 @@ export class Casino {
     }
   }
 
-  /** Deletes private reasoning older than THINKING_KEEP_MS, at most every few minutes per instance. */
-  private async forgetThinking(now: Date): Promise<void> {
+  /** Deletes private reasoning older than THINKING_KEEP_MS and watch links past their WATCH_LINK_DAYS, at most every few minutes per instance. */
+  private async forgetOld(now: Date): Promise<void> {
     if (now.getTime() - this.forgotThinkingAt < 10 * 60_000) return;
     this.forgotThinkingAt = now.getTime();
     try {
       await this.db.query("DELETE FROM action_thinking WHERE at < $1", [new Date(now.getTime() - THINKING_KEEP_MS)]);
     } catch (err) {
       this.log("warn", "forgetting old reasoning failed", { err: String(err) });
+    }
+    try {
+      // An expired link never works again either way: the next one is
+      // derived from a new time.
+      await this.db.query("DELETE FROM watch_links WHERE minted_at <= $1", [new Date(now.getTime() - WATCH_LINK_MS)]);
+    } catch (err) {
+      this.log("warn", "forgetting expired watch links failed", { err: String(err) });
     }
   }
 
@@ -1397,8 +1485,8 @@ const bytes = (t: string) => Buffer.byteLength(t);
 
 /**
  * A turn's wake as the agent reads it first, within the 1000 bytes an
- * event's text allows. What's needed to act comes first (the turn's ID, the
- * cards, the pot, the choices and the clock), since some agents see only the
+ * event's text allows. What's needed to act comes first (the clock, the
+ * turn's ID, the cards, the pot and the choices), since some agents see only the
  * start of a long line; then the players, and the actions and table talk
  * since the last turn in what's left, newest kept. The event's data has all
  * of it.
@@ -1411,12 +1499,15 @@ export function turnText(t: TableView): string {
     .filter((p) => !p.folded)
     .map((p) => `${p.name === t.you.name ? "you" : p.name} $${p.stack}${p.inThisStreet ? ` (in $${p.inThisStreet})` : ""}${p.allIn ? " all in" : ""}`)
     .join(", ");
-  const secs = h.deadline ? ` by ${h.deadline.slice(11, 19)} UTC` : "";
+  // The clock straight after the (short) name, before what grows (the
+  // board, the pots, the choices): a line cut short still says when to act
+  // by.
+  const due = h.deadline ? `act by ${h.deadline.slice(11, 19)} UTC, ` : "";
   const l = t.legal!;
   const head =
-    `Your move at Agent Hold'em, ${t.you.name}: hand ${h.number}, ${h.street}, turn "${h.turn}". ` +
+    `Your move at Agent Hold'em, ${t.you.name}: ${due}hand ${h.number}, ${h.street}, turn "${h.turn}". ` +
     `Your cards: ${t.you.cards.map(cardText).join(" ")}. Board: ${board}. Pot $${h.pot}${sides}; ${l.toCall ? `$${l.toCall} to call` : "nothing to call"}. ` +
-    `Choices: ${l.choices.join(", ")}. Act${secs}, with a message your opponents and spectators will see. ` +
+    `Choices: ${l.choices.join(", ")}. Act with a message your opponents and spectators will see. ` +
     `${tableName(t.id)} (${t.stake}). In the hand: ${players}.`;
   let room = TEXT_MAX - bytes(head);
   const fit = (intro: string, items: string[]) => {

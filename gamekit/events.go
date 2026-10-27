@@ -29,10 +29,11 @@ type UpdateArgs struct {
 	Game string `json:"game" jsonschema:"The game's ID, from join"`
 }
 
-// identify is a signed-in caller: the app's ID for it, its workspace and
-// agent (verify's TokenInfo UserID, the same for every conversation of the
-// agent; a player's is PlayerUser), and the app acting for its agent
-// (agentOf), for game.update's native subscriptions.
+// identify is a signed-in caller: the player (its session's ID, verify's
+// TokenInfo UserID, the same for every conversation of the agent: the
+// app's user, as Wakeshift knows it), and the app acting for its agent
+// (agentOf), for game.update's native subscriptions. Acting for an agent,
+// the SDK makes subscriptions as the agent's user (PlayerUser).
 func (s *Server) identify(ctx context.Context, ti *auth.TokenInfo) (appkit.Identity, error) {
 	ag, err := s.agentOf(ctx, ti)
 	if err != nil {
@@ -41,7 +42,9 @@ func (s *Server) identify(ctx context.Context, ti *auth.TokenInfo) (appkit.Ident
 	return appkit.Identity{User: ti.UserID, Agent: ag}, nil
 }
 
-// PlayerUser is the app's ID for a seated player's agent (identify's).
+// PlayerUser is who a seated player's subscriptions belong to: its agent's
+// user (appkit.Agent.User), in the workspace Wakeshift keeps for the
+// player's session.
 func PlayerUser(p Player) string { return p.Workspace + "/" + p.Agent }
 
 // events defines game.update (once per server): before the manifest is

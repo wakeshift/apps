@@ -11,7 +11,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { CallToolResult, ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { guestOf, speaksEvents, type CallerSubscription, type Guest, type Wakeshift } from "@wakeshift/sdk";
+import { speaksEvents, type CallerSubscription, type Wakeshift } from "@wakeshift/sdk";
+import { signedInOf, type SignedIn } from "./oauth.js";
 import { type Casino, GameError, MIN_HANDS, PACES, type Player, type PlayerState, STAKES, TALK_MAX, DAILY_BANKROLL } from "./casino.js";
 import type { Log } from "./db.js";
 import type { HoldemEvents } from "./events.js";
@@ -53,8 +54,9 @@ export function holdemServer(o: ToolOptions): McpServer {
   const server = new McpServer({ name: "agent-holdem", version: "0.1.0" });
   // holdem.turn and holdem.hand_result: events/list and events/subscribe for
   // native clients; subscribe_events, unsubscribe_events and
-  // list_subscriptions for everyone.
-  wake.attach(server);
+  // list_subscriptions for everyone. Each subscription is its sign-in's
+  // (oauth.ts).
+  wake.attach(server, { identify: (extra) => ({ user: signedInOf(extra)?.user }) });
   const base = o.publicUrl.replace(/\/+$/, "");
   const conversationKey = (guest: string, session: string) => "c_" + createHmac("sha256", o.secret).update(`holdem/conversation\0${guest}\0${session}`).digest("base64url");
 
@@ -62,8 +64,8 @@ export function holdemServer(o: ToolOptions): McpServer {
   type Args = { session_key?: string; harness?: string; conversation_id?: string };
   type JoinOptions = { stake?: string; pace?: string; table?: string; private?: boolean; buyIn?: number };
 
-  const signedIn = (extra: Extra): Guest => {
-    const guest = guestOf(extra);
+  const signedIn = (extra: Extra): SignedIn => {
+    const guest = signedInOf(extra);
     if (!guest) throw new GameError("Sign in first: add Agent Hold'em as an MCP server and let your agent sign in.");
     return guest;
   };
@@ -72,7 +74,7 @@ export function holdemServer(o: ToolOptions): McpServer {
   // A client that subscribes to events itself (MCP Events, ChatGPT): it
   // can't be subscribed from here. Known by its registered name, its
   // User-Agent, or ChatGPT's conversation ID in _meta.
-  const nativeConversation = (extra: Extra, guest: Guest): string | null => {
+  const nativeConversation = (extra: Extra, guest: SignedIn): string | null => {
     const house = houseOf(extra);
     if (house) return "house:" + house.agent;
     const meta = (extra._meta ?? {}) as Record<string, unknown>;
@@ -112,7 +114,7 @@ export function holdemServer(o: ToolOptions): McpServer {
     const current = known && (await casino.tableOf(known.id));
     const picked = current ? { id: current, created: false } : await casino.pickTable(opts);
     const table = picked.id;
-    const subscribe = (t: string) => events.turn.subscribe(extra, { table: t }, { client: guest.client, user: guest.user, wakeArgs: args });
+    const subscribe = (t: string) => events.turn.subscribe(extra, { table: t }, { client: guest.client, user: guest.user, wakeArgs: args, tool: "join" });
     let sub = await subscribe(table);
     const before = await casino.playerFor(conversationKey(guest.user, sub.session));
     let player = await casino.identify(conversationKey(guest.user, sub.session), guest.user, { harness: sub.agent.harness ?? guest.agent ?? null, subscription: sub.id, ...info });
@@ -139,7 +141,7 @@ export function holdemServer(o: ToolOptions): McpServer {
 
   /** The player for a call that isn't join: by session_key, else the guest's only player. */
   async function playerOf(extra: Extra, args: Args): Promise<Player> {
-    const guest = guestOf(extra);
+    const guest = signedInOf(extra);
     if (!guest) throw new GameError("Sign in first: add Agent Hold'em as an MCP server and let your agent sign in.");
     const nativeKey = nativeConversation(extra, guest);
     if (nativeKey !== null) {
@@ -175,14 +177,18 @@ export function holdemServer(o: ToolOptions): McpServer {
     }
   };
 
-  /** The player's watch link (the same each time for a seat and day); fresh: a new one, the old one stops working. */
-  const watchLink = async (player: Player, fresh = false): Promise<string | null> => {
-    let secret = "";
-    const seat = await casino.recordWatch(player.id, (s) => watchHash((secret = watchSecret(o.secret, player.id, s))), fresh);
-    return seat ? `${base}/watch/${secret}` : null;
+  /**
+   * The player's watch link and when it expires: the same each time for 30
+   * days, wherever they sit; fresh: a new one (the old one stops working).
+   */
+  const watchLink = async (player: Player, fresh = false): Promise<{ url: string; expires: string } | null> => {
+    const w = await casino.watchLink(player.id, (m) => watchHash(watchSecret(o.secret, player.id, m)), fresh);
+    return w ? { url: `${base}/watch/${watchSecret(o.secret, player.id, w)}`, expires: w.expiresAt.slice(0, 10) } : null;
   };
-  const watchLine = (link: string | null) =>
-    link ? `Share this with your user so they can watch your hand: ${link} (it shows your cards; it works while you're at this table, until 00:00 UTC).` : "";
+  const watchLine = (link: { url: string; expires: string } | null) =>
+    link
+      ? `Share this with your user so they can watch your hand: ${link.url} (it shows your cards at whatever table you're at, and works until ${link.expires}; after that, call watch_link for a new one).`
+      : "";
 
   const sessionLine = (session: string) => `Pass session_key "${session}" to state, act, say and leave, so they know which player you are.`;
 
@@ -242,11 +248,11 @@ export function holdemServer(o: ToolOptions): McpServer {
       run(async () => {
         const player = await playerOf(extra, args);
         const result = text(await withNotice(player, describe(await casino.state(player.id))));
-        const guest = guestOf(extra)!;
+        const guest = signedInOf(extra)!;
         // A native client (a house agent, ChatGPT) subscribes itself: there's no bridged wake to describe.
         if (nativeConversation(extra, guest) !== null) return result;
         try {
-          return await wake.annotate(wake.call(extra, { client: guest.client, user: guest.user, args }), result);
+          return await wake.annotate(wake.call(extra, { client: guest.client, user: guest.user, args, tool: "state" }), result);
         } catch {
           return result;
         }
@@ -309,18 +315,16 @@ export function holdemServer(o: ToolOptions): McpServer {
     "watch_link",
     {
       description:
-        "A link your user can open to watch your Agent Hold'em table with your cards showing. Share it only with your user: anyone with it sees your hand. It works while you're at this table, until 00:00 UTC. new: true gives a new link and stops the old one.",
+        "A link your user can open to watch you play Agent Hold'em with your cards showing. Share it only with your user: anyone with it sees your hand. It follows you to whatever table you sit at (between tables, it says you're not at one), and works for 30 days; after that, call watch_link again for a new one. new: true gives a new link and stops the old one.",
       inputSchema: { new: z.boolean().optional(), ...wake.args },
     },
     async ({ new: fresh, ...args }, extra) =>
       run(async () => {
         const player = await playerOf(extra, args);
         const link = await watchLink(player, fresh === true);
-        if (!link) {
-          const notice = await casino.takeNotice(player.id);
-          throw new GameError(notice ?? "You're not at a table. Call join first.");
-        }
-        return text(watchLine(link));
+        if (!link) throw new GameError("You haven't joined yet. Call join to take a seat.");
+        const away = (await casino.tableOf(player.id)) ? "" : "\nYou're not at a table right now: the page says so, and shows your table once you join one.";
+        return text(await withNotice(player, watchLine(link) + away));
       })(),
   );
 

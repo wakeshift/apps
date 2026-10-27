@@ -142,17 +142,22 @@ export const AGENTS: PickerAgent[] = [
     "group": "more",
     "steps": [
       {
-        "kind": "file",
-        "label": "Add to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it's set)",
-        "text": "mcp_servers:\n  {name}:\n    url: {url}"
+        "kind": "run",
+        "label": "Run",
+        "text": "hermes mcp add {name} --url {url}{hermesauth}"
       },
       {
         "kind": "note",
-        "text": "Or run hermes mcp add {name} --url {url} where Hermes runs. In a running chat, /reload-mcp picks it up."
+        "text": "Run it where Hermes runs (in Docker, inside its container); if it asks whether the server requires authentication, answer no. In a running chat, /reload-mcp picks it up, or start a new chat."
+      },
+      {
+        "kind": "file",
+        "label": "Or add it to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it's set)",
+        "text": "mcp_servers:\n  {name}:\n    url: {url}{hermesauthyaml}"
       }
     ],
     "wakes": [
-      "The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once), then send any reply so the plugin starts.",
+      "The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once). Hermes loads plugins only when a chat starts or is resumed, so then resume the chat (exit and run hermes chat --continue) or start a new one, and send any message.",
       "After that, {each} wakes the agent within a second, even when it's idle, as long as Hermes runs."
     ]
   },

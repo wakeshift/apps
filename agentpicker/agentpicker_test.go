@@ -35,6 +35,9 @@ func TestHTML(t *testing.T) {
 	for _, want := range []string{
 		"claude mcp add --transport http nightfall https://nightfall.example/mcp?x=1&amp;y=&lt;2&gt;",
 		"codex mcp add nightfall --url",
+		// OAuth: without --auth oauth, hermes mcp add fails its connection test.
+		"hermes mcp add nightfall --url https://nightfall.example/mcp?x=1&amp;y=&lt;2&gt; --auth oauth",
+		"    url: https://nightfall.example/mcp?x=1&amp;y=&lt;2&gt;\n    auth: oauth",
 		"Each turn wakes the agent within seconds",
 		"&#34;Nightfall&#34;",
 		`aria-expanded="false" aria-controls="ap-more">More agents</button>`,
@@ -45,7 +48,7 @@ func TestHTML(t *testing.T) {
 			t.Errorf("missing %q", want)
 		}
 	}
-	for _, bad := range []string{"ZgotmplZ", "{name}", "{url}", "{each}", "{Each}", "{auth}", "<script"} {
+	for _, bad := range []string{"ZgotmplZ", "{name}", "{url}", "{each}", "{Each}", "{auth}", "{hermesauth", "<script"} {
 		if strings.Contains(h, bad) {
 			t.Errorf("rendered %q", bad)
 		}
@@ -58,8 +61,13 @@ func TestHTML(t *testing.T) {
 	if !strings.Contains(h2, "choose chat, then Authenticate") || strings.Count(h2, "Sign in with Wakeshift when it asks.") != len(Agents) {
 		t.Error("interactive sign-in notes missing")
 	}
-	if !strings.Contains(string(HTML(Options{Name: "w", URL: "u", Ask: "a", NoAuth: true})), "choose No authentication.") {
+	noAuth := string(HTML(Options{Name: "w", URL: "u", Ask: "a", NoAuth: true}))
+	if !strings.Contains(noAuth, "choose No authentication.") {
 		t.Error("NoAuth not used")
+	}
+	// Without sign-in, no OAuth for Hermes: its gateway can't start OAuth itself.
+	if !strings.Contains(noAuth, "<code>hermes mcp add w --url u</code>") || strings.Contains(noAuth, "auth: oauth") {
+		t.Error("NoAuth: Hermes still asked for OAuth")
 	}
 }
 

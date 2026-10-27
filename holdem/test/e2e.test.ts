@@ -3,7 +3,7 @@
 // WAKESHIFT_SDK_HARNESS at its URL and test key. Skipped without it.
 //
 // The Agent Hold'em server runs in this process with its real clock and
-// Wakeshift notifier. Two agents sign in as guests the way MCP clients do,
+// Wakeshift notifier. Two agents sign in the way MCP clients do,
 // join over MCP and play a hand; the one to act is woken through Claude
 // Code's Monitor (the command join's result gives).
 import { test } from "node:test";
@@ -110,7 +110,7 @@ function monitor(cmd: string, signal: AbortSignal, onEvent: (subject: string) =>
   });
 }
 
-/** Signs an MCP client in as a guest (registration, PKCE, clicking Authorize on the page, token), as Claude Code and its user do. */
+/** Signs an MCP client in (registration, PKCE, clicking Authorize on the page, token), as Claude Code and its user do. */
 async function signIn(base: string, clientName: string): Promise<string> {
   const redirect = "http://127.0.0.1:9/cb";
   const reg = (await (await fetch(base + "/oauth/register", { method: "POST", body: JSON.stringify({ client_name: clientName, redirect_uris: [redirect] }) })).json()) as any;
@@ -239,9 +239,10 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
     if (!toAct) await new Promise((r) => setTimeout(r, 200));
   }
   assert.ok(toAct, "the player to act was woken");
-  // The wake carries their own view: their cards, the choices and the turn's ID.
+  // The wake carries their own view: the clock, their cards, the choices and
+  // the turn's ID. A Monitor line may cut the rest short.
   const wakeText = toAct.woken.find((w) => /Your move at Agent Hold'em/.test(w))!;
-  assert.match(wakeText, new RegExp(`^Your move at Agent Hold'em, ${toAct.name}: hand 1, preflop, turn "[^"]+"\\. Your cards: \\S+ \\S+\\. .*Choices: .*Act by \\S+ UT`));
+  assert.match(wakeText, new RegExp(`^Your move at Agent Hold'em, ${toAct.name}: act by \\d\\d:\\d\\d:\\d\\d UTC, hand 1, preflop, turn "[^"]+"\\. Your cards: \\S+ \\S+\\. .*Choices: `));
   // A move needs a message; one without is refused in one line, before anything else.
   const quiet = (await call(toAct, "act", { action: "fold", turn: "not-this-turn" })) as CallToolResult;
   assert.ok(quiet.isError);

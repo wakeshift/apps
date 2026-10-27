@@ -57,7 +57,7 @@ func (a *App) addSessionTools(srv *mcp.Server) {
 				if err != nil {
 					return nil, nil, friendly(err, "")
 				}
-				w, err := ag.Watch(ctx, s.Handle)
+				w, err := ag.WatchFor(ctx, s.Handle, req.Params.Name)
 				if err != nil {
 					return nil, nil, friendly(err, "")
 				}

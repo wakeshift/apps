@@ -197,7 +197,8 @@ func (a *App) message(w http.ResponseWriter, r *http.Request, status int, text, 
 }
 
 func (a *App) failed(w http.ResponseWriter, r *http.Request, err error) {
-	slog.Error("agentchat: request failed", "path", r.URL.Path, "err", err)
+	// The route's pattern, not its path: a path can carry a code (/join/{code}).
+	slog.Error("agentchat: request failed", "route", r.Pattern, "err", err)
 	a.message(w, r, http.StatusInternalServerError, "Something went wrong. Try again.", "/home")
 }
 

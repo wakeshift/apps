@@ -1,4 +1,4 @@
-// Agent Hold'em's HTTP server: guest sign-in and the MCP server for agents,
+// Agent Hold'em's HTTP server: players' sign-in (oauth.ts) and the MCP server for agents,
 // the pages for people (with a live stream per table, live.ts), players'
 // watch links (watch.ts), the static files, and the champion's share card.
 // A watch link's secret is in its path: it's never logged (Cloud Run's request
@@ -8,9 +8,10 @@
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { GuestAuth, type Wakeshift } from "@wakeshift/sdk";
+import type { Wakeshift } from "@wakeshift/sdk";
 import { Analytics, type AnalyticsConfig } from "./analytics.js";
 import { AuthorizePage } from "./authorize.js";
+import { SignIn } from "./oauth.js";
 import { pickerAssets } from "./agentpicker/picker.js";
 import type { Casino, Champion } from "./casino.js";
 import { MIN_HANDS } from "./casino.js";
@@ -28,11 +29,12 @@ import {
   streetsOf,
   tablePage,
   untilReset,
+  watchAwayPage,
 } from "./pages.js";
 import { holdemServer } from "./tools.js";
 import type { HoldemEvents } from "./events.js";
 import { tableName } from "./names.js";
-import { clientAddress, LiveHub, snapshot } from "./live.js";
+import { clientAddress, LiveHub, snapshot, watchAway } from "./live.js";
 import { loggable, WATCH_PATH, watchHash } from "./watch.js";
 
 export interface ServerOptions {
@@ -54,8 +56,10 @@ export interface ServerOptions {
   now?: () => number;
   /** PostHog, for visits to the public pages (analytics.ts, docs/analytics.md). Unset: off. */
   analytics?: AnalyticsConfig;
+  /** Players' sign-in (default: one on the casino's database). */
+  signIn?: SignIn;
   /** Live-stream tuning (tests). */
-  live?: { pollMs?: number; heartbeatMs?: number; maxStreamMs?: number; perAddress?: number; total?: number };
+  live?: { pollMs?: number; awayPollMs?: number; heartbeatMs?: number; maxStreamMs?: number; perAddress?: number; total?: number };
 }
 
 const STATIC: Record<string, string> = {
@@ -66,6 +70,7 @@ const STATIC: Record<string, string> = {
   "clock.js": "text/javascript; charset=utf-8",
   "filters.js": "text/javascript; charset=utf-8",
   "copy.js": "text/javascript; charset=utf-8",
+  "away.js": "text/javascript; charset=utf-8",
   "logo.svg": "image/svg+xml",
   "logo-small.svg": "image/svg+xml",
   "favicon-16.png": "image/png",
@@ -85,11 +90,11 @@ export const PUBLIC_PAGES = ["/", "/tables", "/tables/{id}", "/watch/{secret}", 
 export function holdemHttp(o: ServerOptions): Server {
   const base = o.publicUrl.replace(/\/+$/, "");
   const now = o.now ?? Date.now;
-  const guests = new GuestAuth({ wake: o.wake, mcpUrl: base + "/mcp", proxyHops: o.proxyHops ?? 0, onError: (err) => o.log("warn", "sign-in error", { err: String(err) }) });
+  const signIn = o.signIn ?? new SignIn({ wake: o.wake, db: o.casino.db, secret: o.secret, base, proxyHops: o.proxyHops ?? 0, log: o.log, now });
   // Signing in shows the authorize page (authorize.ts): authorizing is
   // agreeing to Agent Hold'em's terms and privacy policy, so the pages and
   // tools don't repeat it.
-  const authorize = new AuthorizePage({ guests, secret: o.secret, base, name: "Agent Hold'em", logo: "/static/logo-small.svg", now });
+  const authorize = new AuthorizePage({ signIn, secret: o.secret, base, name: "Agent Hold'em", logo: "/static/logo-small.svg", now });
   const files = new Map<string, Buffer>();
   for (const f of Object.keys(STATIC)) files.set(f, readFileSync(new URL(`../../static/${f}`, import.meta.url)));
   const cards = new Map<string, Buffer>();
@@ -122,7 +127,7 @@ export function holdemHttp(o: ServerOptions): Server {
   const notFound = (res: ServerResponse) => page(res, 404, messagePage("Not here", "There's nothing at this address.", "404"));
 
   async function mcp(req: IncomingMessage, res: ServerResponse) {
-    if (!guests.authenticate(req, res)) return;
+    if (!signIn.authenticate(req, res)) return;
     const server = holdemServer({ wake: o.wake, casino: o.casino, events: o.events, secret: o.secret, publicUrl: base, log: o.log, houseSecret: o.houseSecret, operatorNote: o.operatorNote });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
@@ -138,7 +143,7 @@ export function holdemHttp(o: ServerOptions): Server {
     const path = url.pathname;
     if (analytics && (await analytics.handle(req, res))) return;
     if (await authorize.handle(req, res)) return;
-    if (await guests.handle(req, res)) return;
+    if (await signIn.handle(req, res)) return;
     if (path === "/mcp") return mcp(req, res);
     if (req.method !== "GET" && req.method !== "HEAD") {
       res.setHeader("Allow", "GET, HEAD");
@@ -184,13 +189,21 @@ export function holdemHttp(o: ServerOptions): Server {
       const target = await o.casino.watchTarget(hash);
       if (!target) {
         if (path.startsWith("/api/")) return send(res, 404, "text/plain", "Not here.", { "Cache-Control": "no-store" });
-        return page(res, 404, messagePage("This link has stopped working", "A watch link works while its agent is at the table, until 00:00 UTC. Ask your agent for a new one.", "404"), "no-store");
+        return page(res, 404, messagePage("This link has stopped working", "A watch link works for 30 days, or until its agent asks for a new one. Ask your agent for a new one.", "404"), "no-store");
       }
-      if (path.startsWith("/api/")) return live.open(res, target.table, clientAddress(req, o.proxyHops ?? 0), { hash, player: target.player });
-      const v = await o.casino.spectate(target.table);
-      if (!v) return notFound(res);
-      const mine = await o.casino.holeCards(target.table, target.player);
-      const p = counted(res, 200, tablePage(v, { url: `${base}/tables/${v.id}`, recent: await o.casino.hands(v.id, 6), live: `/api/watch/${m[1]}/live`, mine }));
+      const watch = { hash, player: target.player };
+      if (path.startsWith("/api/")) {
+        const address = clientAddress(req, o.proxyHops ?? 0);
+        return target.table ? live.open(res, target.table, address, watch) : live.away(res, address, watch);
+      }
+      const liveSrc = `/api/watch/${m[1]}/live`;
+      const v = target.table ? await o.casino.spectate(target.table) : undefined;
+      // Off the table (or its table just went): the page says so, and loads
+      // again when they sit down.
+      const html = v
+        ? tablePage(v, { url: `${base}/tables/${v.id}`, recent: await o.casino.hands(v.id, 6), live: liveSrc, mine: await o.casino.holeCards(v.id, target.player) })
+        : watchAwayPage(watchAway(await o.casino.watchAway(target.player)), liveSrc);
+      const p = counted(res, 200, html);
       return send(res, 200, "text/html; charset=utf-8", p.html, {
         "Content-Security-Policy": p.csp,
         "Cache-Control": "no-store",

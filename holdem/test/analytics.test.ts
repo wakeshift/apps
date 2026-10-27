@@ -4,9 +4,10 @@
 // cookies or address.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
-import { allowSelf, Analytics, analyticsFromEnv, CAPTURE_PATH, cleanReferrer, event, patterns, SCRIPT_PATH } from "../src/analytics.js";
+import { readFileSync } from "node:fs";
+import { createServer, request, type IncomingMessage, type Server } from "node:http";
+import { connect, type AddressInfo } from "node:net";
+import { allowSelf, Analytics, analyticsFromEnv, CAPTURE_PATH, cleanReferrer, clientAddress, event, patterns, SCRIPT_PATH } from "../src/analytics.js";
 import { PUBLIC_PAGES } from "../src/server.js";
 
 const pages = patterns(PUBLIC_PAGES);
@@ -15,6 +16,49 @@ test("analytics is off without a key", () => {
   assert.equal(analyticsFromEnv({}), undefined);
   assert.equal(analyticsFromEnv({ WAKESHIFT_POSTHOG_KEY: " " }), undefined);
   assert.deepEqual(analyticsFromEnv({ WAKESHIFT_POSTHOG_KEY: "phc_x" }), { key: "phc_x", host: undefined });
+  assert.deepEqual(analyticsFromEnv({ WAKESHIFT_POSTHOG_KEY: "phc_x", WAKESHIFT_ANALYTICS_PROXY_HOPS: "2" }), { key: "phc_x", host: undefined, proxyHops: 2 });
+  assert.deepEqual(analyticsFromEnv({ WAKESHIFT_POSTHOG_KEY: "phc_x", WAKESHIFT_ANALYTICS_PROXY_HOPS: "x" }), { key: "phc_x", host: undefined });
+});
+
+// The same cases as analytics.go (apps/analytics/testdata/parity.json, copied here by its TestTypeScriptCopies).
+test("what PostHog gets matches analytics.go", () => {
+  const p = JSON.parse(readFileSync(new URL("../../test/analytics-parity.json", import.meta.url), "utf8")) as {
+    pages: string[];
+    events: { name: string; host: string; body: string; id?: string; want: Record<string, unknown> | null }[];
+    allowSelf: [string, string][];
+  };
+  const pp = patterns(p.pages);
+  for (const c of p.events) {
+    const ev = event(pp, c.host, c.body);
+    if (c.want === null) {
+      assert.equal(ev, undefined, c.name);
+      continue;
+    }
+    assert.ok(ev, c.name);
+    const { distinct_id: id, ...rest } = ev;
+    if (c.id) assert.equal(id, c.id, c.name);
+    else assert.ok(typeof id === "string" && /^[0-9a-f-]{36}$/.test(id) && !c.body.includes(id), `${c.name}: distinct_id ${String(id)}`);
+    assert.deepEqual(JSON.parse(JSON.stringify(rest)), c.want, c.name);
+  }
+  for (const [csp, want] of p.allowSelf) assert.equal(allowSelf(csp), want, csp);
+});
+
+test("the visitor's address, as the proxies wrote it", () => {
+  const req = (xff: string | undefined, remote = "192.0.2.1") =>
+    ({ headers: xff === undefined ? {} : { "x-forwarded-for": xff }, socket: { remoteAddress: remote } }) as unknown as IncomingMessage;
+  assert.equal(clientAddress(req(undefined), 0), "192.0.2.1");
+  assert.equal(clientAddress(req("203.0.113.9, 10.0.0.1"), 0), "192.0.2.1");
+  assert.equal(clientAddress(req("203.0.113.9, 10.0.0.1"), 2), "203.0.113.9");
+  assert.equal(clientAddress(req("spoofed, 203.0.113.9, 10.0.0.1"), 2), "203.0.113.9");
+  assert.equal(clientAddress(req("10.0.0.1"), 2), "192.0.2.1");
+  assert.equal(clientAddress(req("not-an-ip, 10.0.0.1"), 2), "192.0.2.1");
+  assert.equal(clientAddress(req("2001:db8:1:2:3:4:5:6, 10.0.0.1"), 2), "2001:db8:1:2::/64");
+  assert.equal(clientAddress(req("2001:db8::1, 10.0.0.1"), 2), clientAddress(req("2001:db8::2, 10.0.0.1"), 2));
+  assert.equal(clientAddress(req(undefined, "::ffff:203.0.113.9"), 0), "203.0.113.9");
+  assert.equal(clientAddress(req(undefined, "::ffff:cb00:7109"), 0), "203.0.113.9");
+  assert.equal(clientAddress(req(undefined, "64:ff9b:1:2::203.0.113.9"), 0), "64:ff9b:1:2::/64");
+  assert.equal(clientAddress(req(undefined, "::203.0.113.9"), 0), "0:0:0:0::/64");
+  assert.equal(clientAddress(req("203.0.113.9, 10.0.0.1"), undefined), "");
 });
 
 test("the script goes on the public pages only", () => {
@@ -134,5 +178,81 @@ test("the proxy forwards only the capture endpoint, without cookies or the visit
     await r.arrayBuffer();
   } finally {
     server.close();
+  }
+});
+
+test("the proxy can't flood PostHog, follow its redirects or be held open by a slow body", async () => {
+  let forwarded = 0;
+  let block: Promise<void> | undefined;
+  const fake: typeof fetch = async (_url, init) => {
+    assert.equal(init?.redirect, "manual");
+    forwarded++;
+    if (block) await block;
+    return new Response('{"status":"Ok"}', { status: 200 });
+  };
+  const a = new Analytics({ key: "phc_x", proxyHops: 2 }, PUBLIC_PAGES, fake, { perAddress: 3, perInstance: 5, inFlight: 1, readTimeout: 200 });
+  const server = createServer((req, res) => void a.handle(req, res));
+  const base = await listen(server);
+  const b = new Analytics({ key: "phc_x" }, PUBLIC_PAGES, fake, { inFlight: 1, readTimeout: 200 });
+  const busy = createServer((req, res) => void b.handle(req, res));
+  const busyBase = await listen(busy);
+  try {
+    const ok = JSON.stringify({ event: "$pageview", properties: { $current_url: `${base}/` } });
+    const post = async (client: string) => {
+      const r = await fetch(base + CAPTURE_PATH, { method: "POST", body: ok, headers: { "X-Forwarded-For": `${client}, 10.0.0.1` } });
+      await r.arrayBuffer();
+      return r.status;
+    };
+    for (let i = 0; i < 3; i++) assert.equal(await post("203.0.113.9"), 200);
+    assert.equal(await post("203.0.113.9"), 429, "past the per-address limit");
+    assert.equal(await post("2001:db8::1"), 200);
+    assert.equal(await post("2001:db8::2"), 200, "the same /64: its second");
+    assert.equal(await post("198.51.100.1"), 429, "past the overall limit");
+    assert.equal(forwarded, 5);
+
+    // Requests to PostHog at once are capped.
+    let release!: () => void;
+    block = new Promise((r) => (release = r));
+    const first = fetch(busyBase + CAPTURE_PATH, { method: "POST", body: JSON.stringify({ event: "$pageview", properties: { $current_url: `${busyBase}/` } }) });
+    while (forwarded < 6) await new Promise((r) => setTimeout(r, 5));
+    const second = await fetch(busyBase + CAPTURE_PATH, { method: "POST", body: JSON.stringify({ event: "$pageview", properties: { $current_url: `${busyBase}/` } }) });
+    assert.equal(second.status, 503);
+    await second.arrayBuffer();
+    release();
+    await (await first).arrayBuffer();
+
+    // A body that never finishes is cut off.
+    const status = await new Promise<string>((resolve, reject) => {
+      const u = new URL(busyBase);
+      const sock = connect(Number(u.port), u.hostname, () => {
+        sock.write(`POST ${CAPTURE_PATH} HTTP/1.1\r\nHost: ${u.host}\r\nContent-Length: 100\r\n\r\n{`);
+      });
+      let got = "";
+      sock.on("data", (d) => (got += d.toString()));
+      sock.on("close", () => resolve(got.split("\r\n")[0] ?? ""));
+      sock.on("error", reject);
+      sock.setTimeout(5000, () => sock.destroy(new Error("held open")));
+    });
+    assert.match(status, /^HTTP\/1\.1 400/);
+
+    // An oversized body isn't read to the end.
+    let answered = false;
+    const big = await new Promise<number>((resolve, reject) => {
+      const u = new URL(busyBase);
+      const req = request({ host: u.hostname, port: u.port, path: CAPTURE_PATH, method: "POST", headers: { "Content-Length": 1 << 30 } }, (res) => {
+        answered = true;
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on("error", (err) => (answered ? undefined : reject(err))); // the server may close before all is written
+      req.write("x".repeat(64 << 10));
+    });
+    assert.equal(big, 413);
+    assert.equal(forwarded, 6);
+  } finally {
+    for (const s of [server, busy]) {
+      s.close();
+      s.closeAllConnections();
+    }
   }
 });

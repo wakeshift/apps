@@ -37,6 +37,8 @@ type game struct {
 	Players  []*player `json:"players"`
 	Codeword string    `json:"codeword,omitempty"`
 	Result   string    `json:"result,omitempty"`
+	// Started is when the discussion opened: archived moves are timed from it.
+	Started time.Time `json:"started,omitzero"`
 }
 
 func (g *game) handles() []string {
@@ -92,9 +94,9 @@ func (a *App) step(tx *gamekit.Tx, g *game) error {
 		g.Announce("Game closed", fmt.Sprintf("Nobody else joined in %s, so this game is closed. Call the `join` tool to try again.", gamekit.Human(a.wait())), g.handles())
 		g.End(time.Minute)
 	case discussion:
-		a.openVoting(tx, g)
+		return a.openVoting(tx, g)
 	case voting:
-		a.finish(g)
+		return a.finish(tx, g)
 	}
 	return nil
 }
@@ -121,6 +123,7 @@ func (a *App) start(tx *gamekit.Tx, g *game) error {
 		}
 	}
 	g.Open = false
+	g.Started = tx.Now
 	g.Phase, g.Deadline = discussion, tx.Now.Add(a.discussion())
 	g.Announce("The game has started", fmt.Sprintf(
 		"Secret Agent game %s has started. Players: %s. One of you is the secret agent; the other two are civilians who share a codeword "+
@@ -131,32 +134,32 @@ func (a *App) start(tx *gamekit.Tx, g *game) error {
 	return nil
 }
 
-func (a *App) openVoting(tx *gamekit.Tx, g *game) {
+func (a *App) openVoting(tx *gamekit.Tx, g *game) error {
 	g.Phase, g.Deadline = voting, tx.Now.Add(a.voting())
 	g.Announce("Time to vote", fmt.Sprintf("Discussion is over. Vote now: call the `vote` tool with the handle of the player you suspect is the secret agent "+
 		"(not yourself). You have %s; the result comes when everyone has voted.", gamekit.Human(a.voting())), g.handles())
-	a.allVoted(tx, g) // everyone still here may have voted already
+	return a.allVoted(tx, g) // everyone still here may have voted already
 }
 
 // allVoted ends the game once every player who's still connected has
 // voted: one that dropped off doesn't hold it up.
-func (a *App) allVoted(tx *gamekit.Tx, g *game) {
+func (a *App) allVoted(tx *gamekit.Tx, g *game) error {
 	if g.Phase != discussion && g.Phase != voting {
-		return
+		return nil
 	}
 	if slices.ContainsFunc(g.Players, func(p *player) bool { return p.Vote == "" && !tx.Away[p.Handle] }) {
-		return
+		return nil
 	}
-	a.finish(g)
+	return a.finish(tx, g)
 }
 
 // finish tallies the votes and announces who won: the civilians, if the
-// secret agent has a majority of the votes; else the secret agent.
-func (a *App) finish(g *game) {
+// secret agent has a majority of the votes; else the secret agent. The
+// game is archived, anonymised, as it finishes.
+func (a *App) finish(tx *gamekit.Tx, g *game) error {
 	if g.Phase != discussion && g.Phase != voting {
-		return
+		return nil
 	}
-	count := map[string]int{}
 	var agent *player
 	var votes []string
 	for _, p := range g.Players {
@@ -164,14 +167,13 @@ func (a *App) finish(g *game) {
 			agent = p
 		}
 		if p.Vote != "" {
-			count[p.Vote]++
 			votes = append(votes, p.Handle+" → "+p.Vote)
 		} else {
 			votes = append(votes, p.Handle+" didn't vote")
 		}
 	}
 	winner := "The secret agent wins: " + agent.Handle + " got away with it."
-	if count[agent.Handle]*2 > len(g.Players) {
+	if caught(g, agent) {
 		winner = "The civilians win: they caught " + agent.Handle + "."
 	}
 	g.Phase, g.Result = over, winner
@@ -180,6 +182,18 @@ func (a *App) finish(g *game) {
 	// The room stays a while, so everyone gets the result, then closes; the
 	// game itself is kept a while longer, for the follow-along page.
 	g.End(a.linger())
+	return archive(tx, g)
+}
+
+// caught is whether the secret agent got a majority of the votes.
+func caught(g *game, agent *player) bool {
+	n := 0
+	for _, p := range g.Players {
+		if p.Vote == agent.Handle {
+			n++
+		}
+	}
+	return n*2 > len(g.Players)
 }
 
 // follow is the follow-along page's view for one player: what it knows,

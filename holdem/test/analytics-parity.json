@@ -1,0 +1,89 @@
+{
+  "comment": "What PostHog gets, for analytics.go and analytics.ts alike (TestParity, and apps/holdem/test/analytics.test.ts with its copy). want null: dropped. id: the distinct_id kept, or \"\" for a fresh one.",
+  "pages": ["/", "/games", "/games/{id}", "/watch/{secret}"],
+  "events": [
+    {
+      "name": "page view: ID, query string and fragment cut; smuggled properties dropped",
+      "host": "h.example",
+      "body": "{\"event\":\"$pageview\",\"distinct_id\":\"0b0e2a3c-1d2e-4f5a-8b9c-0d1e2f3a4b5c\",\"properties\":{\"$current_url\":\"https://h.example/games/g-8f3a9c?invite=SECRET#frag\",\"$referrer\":\"https://www.google.com/search?q=private\",\"$ip\":\"203.0.113.9\",\"email\":\"a@b.example\",\"$set\":{\"name\":\"x\"},\"$set_once\":{\"x\":1},\"$groups\":{\"company\":\"x\"},\"$anon_distinct_id\":\"x\",\"$process_person_profile\":true,\"$geoip_disable\":false,\"$lib\":\"posthog-js\",\"token\":\"phc_other\",\"$host\":\"evil.example\"}}",
+      "id": "0b0e2a3c-1d2e-4f5a-8b9c-0d1e2f3a4b5c",
+      "want": {"event": "$pageview", "properties": {"$current_url": "https://h.example/games/:id", "$host": "h.example", "$pathname": "/games/:id", "$referrer": "https://www.google.com/", "$referring_domain": "www.google.com", "$lib": "wakeshift-web", "$process_person_profile": false, "$geoip_disable": true}}
+    },
+    {
+      "name": "an email address or a long token in the path",
+      "host": "h.example",
+      "body": "{\"event\":\"$pageleave\",\"distinct_id\":\"not-a-uuid\",\"properties\":{\"$current_url\":\"https://H.EXAMPLE/watch/someone%40example.com\",\"$referrer\":\"https://h.example/games/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?x=1\"}}",
+      "id": "",
+      "want": {"event": "$pageleave", "properties": {"$current_url": "https://h.example/watch/:secret", "$host": "h.example", "$pathname": "/watch/:secret", "$referrer": "https://h.example/games/:id", "$referring_domain": "h.example", "$lib": "wakeshift-web", "$process_person_profile": false, "$geoip_disable": true}}
+    },
+    {
+      "name": "referrer: another site's origin, without its user info; our untracked page as the origin",
+      "host": "h.example",
+      "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"http://h.example/\",\"$referrer\":\"https://user:pass@Other.Example/path/123?q=word\"}}",
+      "id": "",
+      "want": {"event": "$pageview", "properties": {"$current_url": "http://h.example/", "$host": "h.example", "$pathname": "/", "$referrer": "https://other.example/", "$referring_domain": "other.example", "$lib": "wakeshift-web", "$process_person_profile": false, "$geoip_disable": true}}
+    },
+    {
+      "name": "referrer: our own untracked page",
+      "host": "h.example",
+      "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://h.example/games\",\"$referrer\":\"https://h.example/signin?code=abc\"}}",
+      "id": "",
+      "want": {"event": "$pageview", "properties": {"$current_url": "https://h.example/games", "$host": "h.example", "$pathname": "/games", "$referrer": "https://h.example/", "$referring_domain": "h.example", "$lib": "wakeshift-web", "$process_person_profile": false, "$geoip_disable": true}}
+    },
+    {
+      "name": "referrer: not an http(s) address",
+      "host": "h.example",
+      "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://h.example/\",\"$referrer\":\"javascript:alert(1)\"}}",
+      "id": "",
+      "want": {"event": "$pageview", "properties": {"$current_url": "https://h.example/", "$host": "h.example", "$pathname": "/", "$referrer": "$direct", "$referring_domain": "$direct", "$lib": "wakeshift-web", "$process_person_profile": false, "$geoip_disable": true}}
+    },
+    {
+      "name": "a known call to action, and nothing else",
+      "host": "h.example",
+      "body": "{\"event\":\"cta_clicked\",\"properties\":{\"$current_url\":\"https://h.example/\",\"cta\":\"start_building\",\"agent\":\"codex\",\"label\":\"typed\"}}",
+      "id": "",
+      "want": {"event": "cta_clicked", "properties": {"$current_url": "https://h.example/", "$host": "h.example", "$pathname": "/", "$referrer": "$direct", "$referring_domain": "$direct", "$lib": "wakeshift-web", "$process_person_profile": false, "$geoip_disable": true, "cta": "start_building"}}
+    },
+    {
+      "name": "an agent ID",
+      "host": "h.example",
+      "body": "{\"event\":\"agent_picked\",\"properties\":{\"$current_url\":\"https://h.example/\",\"agent\":\"claude-code\"}}",
+      "id": "",
+      "want": {"event": "agent_picked", "properties": {"$current_url": "https://h.example/", "$host": "h.example", "$pathname": "/", "$referrer": "$direct", "$referring_domain": "$direct", "$lib": "wakeshift-web", "$process_person_profile": false, "$geoip_disable": true, "agent": "claude-code"}}
+    },
+    {"name": "identify", "host": "h.example", "body": "{\"event\":\"$identify\",\"properties\":{\"$current_url\":\"https://h.example/\",\"$set\":{\"email\":\"a@b.example\"}}}", "want": null},
+    {"name": "alias", "host": "h.example", "body": "{\"event\":\"$create_alias\",\"properties\":{\"$current_url\":\"https://h.example/\",\"alias\":\"a@b.example\"}}", "want": null},
+    {"name": "set", "host": "h.example", "body": "{\"event\":\"$set\",\"properties\":{\"$current_url\":\"https://h.example/\"}}", "want": null},
+    {"name": "group identify", "host": "h.example", "body": "{\"event\":\"$groupidentify\",\"properties\":{\"$current_url\":\"https://h.example/\"}}", "want": null},
+    {"name": "autocapture", "host": "h.example", "body": "{\"event\":\"$autocapture\",\"properties\":{\"$current_url\":\"https://h.example/\"}}", "want": null},
+    {"name": "session recording", "host": "h.example", "body": "{\"event\":\"$snapshot\",\"properties\":{\"$current_url\":\"https://h.example/\"}}", "want": null},
+    {"name": "event name in another case", "host": "h.example", "body": "{\"event\":\"$PAGEVIEW\",\"properties\":{\"$current_url\":\"https://h.example/\"}}", "want": null},
+    {"name": "field names in another case", "host": "h.example", "body": "{\"EVENT\":\"$pageview\",\"Properties\":{\"$current_url\":\"https://h.example/\"}}", "want": null},
+    {"name": "a batch", "host": "h.example", "body": "[{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://h.example/\"}}]", "want": null},
+    {"name": "a batch in the body", "host": "h.example", "body": "{\"batch\":[{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://h.example/\"}}]}", "want": null},
+    {"name": "not JSON", "host": "h.example", "body": "{", "want": null},
+    {"name": "properties not an object", "host": "h.example", "body": "{\"event\":\"$pageview\",\"properties\":[\"https://h.example/\"]}", "want": null},
+    {"name": "another host", "host": "h.example", "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://evil.example/\"}}", "want": null},
+    {"name": "a Host header that isn't a host", "host": "a@b.example", "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://a@b.example/\"}}", "want": null},
+    {"name": "a Host header with markup", "host": "x\"><b>", "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://x/\"}}", "want": null},
+    {"name": "an untracked page", "host": "h.example", "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://h.example/oauth/authorize?state=x\"}}", "want": null},
+    {"name": "an encoded slash", "host": "h.example", "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://h.example/games%2Fabc\"}}", "want": null},
+    {"name": "an extra segment", "host": "h.example", "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://h.example/games/abc/state\"}}", "want": null},
+    {"name": "an empty ID", "host": "h.example", "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"https://h.example/games/\"}}", "want": null},
+    {"name": "not http(s)", "host": "h.example", "body": "{\"event\":\"$pageview\",\"properties\":{\"$current_url\":\"javascript://h.example/\"}}", "want": null},
+    {"name": "no address", "host": "h.example", "body": "{\"event\":\"$pageview\",\"properties\":{}}", "want": null},
+    {"name": "an unknown call to action", "host": "h.example", "body": "{\"event\":\"cta_clicked\",\"properties\":{\"$current_url\":\"https://h.example/\",\"cta\":\"a@b.example\"}}", "want": null},
+    {"name": "a call to action that isn't a string", "host": "h.example", "body": "{\"event\":\"cta_clicked\",\"properties\":{\"$current_url\":\"https://h.example/\",\"cta\":[\"start_building\"]}}", "want": null},
+    {"name": "typed text as an agent", "host": "h.example", "body": "{\"event\":\"agent_picked\",\"properties\":{\"$current_url\":\"https://h.example/\",\"agent\":\"My Secret Text\"}}", "want": null},
+    {"name": "an overlong agent ID", "host": "h.example", "body": "{\"event\":\"agent_picked\",\"properties\":{\"$current_url\":\"https://h.example/\",\"agent\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}", "want": null}
+  ],
+  "allowSelf": [
+    ["default-src 'self'; frame-ancestors 'none'", "default-src 'self'; frame-ancestors 'none'"],
+    ["default-src 'none'; style-src 'unsafe-inline'; img-src 'self'", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; script-src 'self'; connect-src 'self'"],
+    ["default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'", "default-src 'none'; script-src 'unsafe-inline' 'self'; connect-src 'self'"],
+    ["default-src 'none'; script-src 'self' 'nonce-abc'; connect-src 'none'", "default-src 'none'; script-src 'self' 'nonce-abc'; connect-src 'self'"],
+    ["default-src https://a.example; form-action 'none'", "default-src https://a.example; form-action 'none'; script-src https://a.example 'self'; connect-src https://a.example 'self'"],
+    ["frame-ancestors 'none'", "frame-ancestors 'none'"],
+    ["Default-Src 'none'; script-src 'none'; script-src https://x.example", "default-src 'none'; script-src 'self'; connect-src 'self'"]
+  ]
+}

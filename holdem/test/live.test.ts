@@ -7,7 +7,7 @@ import { Wakeshift } from "@wakeshift/sdk";
 import { Casino, type Notifier } from "../src/casino.js";
 import type { Db } from "../src/db.js";
 import type { HoldemEvents } from "../src/events.js";
-import { LiveHub, snapshot, watchEndedMessage } from "../src/live.js";
+import { LiveHub, snapshot, WATCH_GONE, watchAwayMessage } from "../src/live.js";
 import { cleanMessage, cleanReasoning, HIDDEN, MESSAGE_MAX, MessageError, REASONING_MAX } from "../src/moderation.js";
 import { card, handPage, streetsOf, tablePage } from "../src/pages.js";
 import { holdemHttp } from "../src/server.js";
@@ -143,29 +143,34 @@ test("a move's message goes into the next wake as the player's words, the specta
 
 // ── Watch links ────────────────────────────────────────────────────────────
 
-test("a watch link: its own player's cards only, the same link all day, and it stops working when they leave, ask for a new one, or the day turns", async (t) => {
+/** A player's watch link's secret, as the watch_link tool gives it (fresh: a new one). */
+async function watchLinkOf(casino: Casino, key: string, id: string, fresh = false): Promise<string> {
+  const w = await casino.watchLink(id, (m) => watchHash(watchSecret(key, id, m)), fresh);
+  assert.ok(w, "a watch link for " + id);
+  return watchSecret(key, id, w);
+}
+
+test("a watch link is the player's: its own player's cards only, the same link across leaving, rejoining and changing tables, off the table between them, and gone with the player", async (t) => {
   const db = await testDb(t);
-  const { casino, clock } = room(db);
+  const { casino } = room(db);
   const a = await player(casino, 1);
   const b = await player(casino, 2);
   const j = await casino.join(a.id, {});
   await casino.join(b.id, {});
   const key = "watch-test-secret-at-least-32-bytes-long";
-  let sa = "";
-  let sb = "";
-  await casino.recordWatch(a.id, (s) => watchHash((sa = watchSecret(key, a.id, s))));
-  await casino.recordWatch(b.id, (s) => watchHash((sb = watchSecret(key, b.id, s))));
+  const sa = await watchLinkOf(casino, key, a.id);
+  const sb = await watchLinkOf(casino, key, b.id);
   assert.match(sa, /^[A-Za-z0-9_-]{22}$/);
   assert.notEqual(sa, sb);
   assert.deepEqual(await casino.watchTarget(watchHash(sa)), { player: a.id, table: j.table });
   assert.deepEqual(await casino.watchTarget(watchHash(sb)), { player: b.id, table: j.table });
   assert.equal(await casino.watchTarget(watchHash("A".repeat(22))), undefined);
-  const stored = await db.query<{ watch_hash: string }>("SELECT watch_hash FROM seats");
-  assert.ok(stored.rows.every((r) => r.watch_hash && r.watch_hash !== sa && r.watch_hash !== sb), "only the hash is stored");
-  // Asked again the same day: the same link.
-  let again = "";
-  await casino.recordWatch(a.id, (s) => watchHash((again = watchSecret(key, a.id, s))));
-  assert.equal(again, sa);
+  assert.equal(await casino.watchLink("p_nobody", () => "h"), undefined, "no link for a player who doesn't exist");
+  const stored = await db.query<{ hash: string }>("SELECT hash FROM watch_links");
+  assert.equal(stored.rowCount, 2);
+  assert.ok(stored.rows.every((r) => r.hash !== sa && r.hash !== sb), "only the hash is stored");
+  // Asked again: the same link.
+  assert.equal(await watchLinkOf(casino, key, a.id), sa);
 
   // Each link shows its own player's cards, never the other's; the public page shows neither.
   const view = (await casino.spectate(j.table))!;
@@ -187,21 +192,87 @@ test("a watch link: its own player's cards only, the same link all day, and it s
   for (const c of [...ma.cards, ...mb.cards]) assert.ok(!labels(snapPub.html.felt + snapPub.html.phone).has(label(c)));
   for (const c of mb.cards) assert.ok(!labels(JSON.stringify(snapA).replace(/\\"/g, '"')).has(label(c)), "a's snapshot never has b's cards");
 
-  // A new link: the old one stops working.
-  let fresh = "";
-  await casino.recordWatch(a.id, (s) => watchHash((fresh = watchSecret(key, a.id, s))), true);
-  assert.notEqual(fresh, sa);
-  assert.equal(await casino.watchTarget(watchHash(sa)), undefined);
-  assert.ok(await casino.watchTarget(watchHash(fresh)));
-  // Leaving ends it.
-  await casino.leave(b.id);
+  // a leaves: the link still works, off the table, and is the one a gets again.
+  await casino.leave(a.id);
   await playOut(casino, [a.id, b.id]);
+  assert.deepEqual(await casino.watchTarget(watchHash(sa)), { player: a.id, table: null });
+  assert.equal(await watchLinkOf(casino, key, a.id), sa);
+  assert.match((await casino.watchAway(a.id)).name, /\S/);
+  // Rejoins: the same link shows the table it sits at now.
+  const back = await casino.join(a.id, {});
+  assert.deepEqual(await casino.watchTarget(watchHash(sa)), { player: a.id, table: back.table });
+  assert.equal(await watchLinkOf(casino, key, a.id), sa);
+  // Changes tables: it follows.
+  await casino.leave(a.id);
+  await playOut(casino, [a.id, b.id]);
+  const other = await casino.join(a.id, { private: true });
+  assert.notEqual(other.table, j.table);
+  assert.deepEqual(await casino.watchTarget(watchHash(sa)), { player: a.id, table: other.table });
+  assert.equal(await watchLinkOf(casino, key, a.id), sa);
+
+  // A player deleted: their link goes with them.
+  await db.query("DELETE FROM players WHERE id = $1", [b.id]);
   assert.equal(await casino.watchTarget(watchHash(sb)), undefined);
-  // The day turns: it stops working.
-  clock.t += 24 * 3600_000;
-  assert.equal(await casino.watchTarget(watchHash(fresh)), undefined);
-  assert.equal(loggable("/watch/" + fresh), "/watch/…");
-  assert.equal(loggable("/api/watch/" + fresh + "/live"), "/api/watch/…/live");
+  assert.equal((await db.query("SELECT 1 FROM watch_links WHERE player = $1", [b.id])).rowCount, 0);
+  assert.equal(loggable("/watch/" + sa), "/watch/…");
+  assert.equal(loggable("/api/watch/" + sa + "/live"), "/api/watch/…/live");
+});
+
+test("a watch link: new: true ends the old one; it works for 30 days, then the agent gets a new one", async (t) => {
+  const db = await testDb(t);
+  const { casino, clock } = room(db);
+  const a = await player(casino, 1);
+  const j = await casino.join(a.id, {});
+  const key = "watch-test-secret-at-least-32-bytes-long";
+  const first = await watchLinkOf(casino, key, a.id);
+  const fresh = await watchLinkOf(casino, key, a.id, true);
+  assert.notEqual(fresh, first);
+  assert.equal(await casino.watchTarget(watchHash(first)), undefined, "the old link stops working");
+  assert.deepEqual(await casino.watchTarget(watchHash(fresh)), { player: a.id, table: j.table });
+  assert.equal(await watchLinkOf(casino, key, a.id), fresh, "and the new one is the one given from then on");
+
+  // The day turns, and more: it still works, until 30 days from minting.
+  clock.t += 30 * 86_400_000 - 60_000;
+  assert.ok(await casino.watchTarget(watchHash(fresh)));
+  assert.equal(await watchLinkOf(casino, key, a.id), fresh);
+  clock.t += 2 * 60_000;
+  assert.equal(await casino.watchTarget(watchHash(fresh)), undefined, "expired after 30 days");
+  // Asked for after that: a new one, for another 30 days.
+  const next = await watchLinkOf(casino, key, a.id);
+  assert.ok(![first, fresh].includes(next));
+  assert.ok(await casino.watchTarget(watchHash(next)));
+  // Expired links are deleted, and never come back: the next one is minted anew.
+  clock.t += 31 * 86_400_000;
+  await casino.tick();
+  assert.equal((await db.query("SELECT 1 FROM watch_links")).rowCount, 0);
+  const after = await watchLinkOf(casino, key, a.id);
+  assert.ok(![first, fresh, next].includes(after));
+  for (const s of [first, fresh, next]) assert.equal(await casino.watchTarget(watchHash(s)), undefined);
+});
+
+test("a watch page shows only the current hand's own cards, never an earlier hand's", async (t) => {
+  const db = await testDb(t);
+  const { casino } = room(db);
+  const a = await player(casino, 1);
+  const b = await player(casino, 2);
+  const j = await casino.join(a.id, {});
+  await casino.join(b.id, {});
+  const seen: string[][] = [];
+  for (let hand = 0; hand < 6; hand++) {
+    const view = (await casino.spectate(j.table))!;
+    const mine = await casino.holeCards(j.table, a.id);
+    const page = labels(tablePage(view, { url: "u", recent: [], live: "l", mine }));
+    const snap = snapshot(view, mine);
+    assert.deepEqual(snap.mine!.cards, mine.cards);
+    for (const c of mine.cards) assert.ok(page.has(label(c)), c);
+    // Cards a held in earlier hands and doesn't hold now (or that weren't shown at the table) aren't on the page.
+    const shownNow = new Set((view.hand?.shown ?? []).flatMap((x) => x.cards));
+    for (const old of seen.flat()) if (!mine.cards.includes(old) && !shownNow.has(old) && !view.hand?.board.includes(old)) assert.ok(!page.has(label(old)), `an earlier hand's ${old} on the page`);
+    seen.push(mine.cards);
+    await playOut(casino, [a.id, b.id]);
+    await casino.tick();
+  }
+  assert.ok(seen.length >= 2);
 });
 
 // ── Live streams ───────────────────────────────────────────────────────────
@@ -214,8 +285,7 @@ test("live streams: a snapshot now and one per change, the watch stream adds onl
   const j = await casino.join(a.id, {});
   await casino.join(b.id, {});
   const secret = "live-test-secret-at-least-32-bytes-long";
-  let sa = "";
-  await casino.recordWatch(a.id, (s) => watchHash((sa = watchSecret(secret, a.id, s))));
+  const sa = await watchLinkOf(casino, secret, a.id);
   const logs: string[] = [];
   const wake = new Wakeshift({ key: "wst_test_holdem_" + "x".repeat(43), core: "http://127.0.0.1:9" });
   const server = holdemHttp({
@@ -225,7 +295,7 @@ test("live streams: a snapshot now and one per change, the watch stream adds onl
     secret,
     publicUrl: "http://localhost",
     log: (l, m, at) => logs.push(`${l} ${m} ${JSON.stringify(at ?? {})}`),
-    live: { pollMs: 40, perAddress: 3 },
+    live: { pollMs: 40, awayPollMs: 40, perAddress: 3 },
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const stop = new AbortController();
@@ -304,20 +374,53 @@ test("live streams: a snapshot now and one per change, the watch stream adds onl
   const tp = await (await fetch(`${base}/tables/${j.table}`)).text();
   assert.doesNotMatch(tp, /Your agent|data-mine|data-thinking|PRIVATE-PLAN/);
   for (const c of [...ma.cards, ...mb.cards]) assert.ok(!labels(tp).has(label(c)));
-  // Player a leaves (after the hand): the watch stream is told and ends; the link is 404.
+  // Player a leaves (after the hand): the watch stream says "moved" and ends
+  // (the page loads again), and the link keeps working, off the table.
   await casino.leave(a.id);
   await playOut(casino, [a.id, b.id]);
-  await until(() => mine.got.some((e) => e.event === "gone"), "the watch stream was told it's gone");
+  await until(() => mine.got.some((e) => e.event === "moved"), "the watch stream was told the player moved");
   // The page isn't left frozen on a seat that's gone (the bug: a player who
-  // busted still showed their last stack): the event before "gone" is the
-  // table as it is now, without the player, and "gone" says why.
-  const gi = mine.got.findIndex((e) => e.event === "gone");
-  const lastSnap = mine.got[gi - 1]!;
+  // busted still showed their last stack): the event before "moved" is the
+  // table as it is now, without the player.
+  const mi = mine.got.findIndex((e) => e.event === "moved");
+  const lastSnap = mine.got[mi - 1]!;
   assert.equal(lastSnap.event, "snap");
-  const aName = (await casino.watchEnded(a.id)).name;
+  const aName = (await casino.watchAway(a.id)).name;
   assert.ok(!lastSnap.data.seats.some((x: { name: string } | null) => x?.name === aName), "the final snapshot no longer seats the player");
-  assert.match(mine.got[gi]!.data.message, new RegExp(`^${aName} has left the table; \\$\\d+ is back in today's bankroll\\.$`));
+  // Off the table: the page says so, with no cards, and its stream says "away".
+  const awayPage = await fetch(`${base}/watch/${sa}`);
+  assert.equal(awayPage.status, 200);
+  assert.equal(awayPage.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(awayPage.headers.get("x-robots-tag"), "noindex, nofollow");
+  const awayText = await awayPage.text();
+  assert.ok(awayText.includes(`<h1>${aName} isn&#39;t at a table right now</h1>`), awayText);
+  assert.match(awayText, /data-away-src="\/api\/watch\/[A-Za-z0-9_-]{22}\/live"/);
+  assert.doesNotMatch(awayText, /data-mine|data-thinking|PRIVATE-PLAN/);
+  const away = await open(`/api/watch/${sa}/live`);
+  assert.equal(away.res.status, 200);
+  assert.equal(away.res.headers.get("referrer-policy"), "no-referrer");
+  await until(() => away.got.length > 0, "the away stream's first event");
+  assert.deepEqual(away.got[0], { event: "away", data: { message: watchAwayMessage(await casino.watchAway(a.id)) } });
+  // a sits down at another table: the away stream says "moved", and the
+  // same link shows that table, with a's cards.
+  const other = await casino.join(a.id, { private: true });
+  assert.notEqual(other.table, j.table);
+  await until(() => away.got.some((e) => e.event === "moved"), "the away stream was told the player sat down");
+  const backPage = await (await fetch(`${base}/watch/${sa}`)).text();
+  assert.ok(backPage.includes(`data-table="${other.table}"`));
+  assert.match(backPage, /Your agent|data-mine/);
+  const back = await open(`/api/watch/${sa}/live`);
+  await until(() => back.got.length > 0, "the new table's snapshot");
+  assert.equal(back.got[0]!.event, "snap");
+  assert.equal(back.got[0]!.data.table, other.table);
+  assert.deepEqual(back.got[0]!.data.mine.cards, (await casino.holeCards(other.table, a.id)).cards);
+  // A new link: the old one's stream is told it's gone with the next change, and its page is 404.
+  const fresh = await watchLinkOf(casino, secret, a.id, true);
+  await casino.say(a.id, "Anyone there?");
+  await until(() => back.got.some((e) => e.event === "gone"), "the old link's stream was told it's gone");
+  assert.equal(back.got.find((e) => e.event === "gone")!.data.message, WATCH_GONE);
   assert.equal((await fetch(`${base}/watch/${sa}`)).status, 404);
+  assert.equal((await fetch(`${base}/watch/${fresh}`)).status, 200);
   // After the hand: never on the public pages, the hand's history or its replay.
   const hand = { id: (await db.query<{ hand_id: string }>("SELECT hand_id FROM action_thinking")).rows[0]!.hand_id };
   for (const path of [`/tables/${j.table}`, `/api/tables/${j.table}`, `/hands/${hand.id}`, `/hands/${hand.id}.json`, "/api/lobby", "/", "/leaderboard"]) {
@@ -329,13 +432,13 @@ test("live streams: a snapshot now and one per change, the watch stream adds onl
   assert.ok(!logs.some((l) => l.includes(sa)), logs.join("\n"));
 });
 
-test("a watch link's last word says why it ended", async () => {
+test("a watch link says when its player is off the table, and what's in their bankroll", async () => {
   assert.equal(
-    watchEndedMessage({ name: "Young Iguana", seated: false, balance: 0 }),
-    "Young Iguana is out of chips for today and has left the table. Everyone starts again with $100 at 00:00 UTC.",
+    watchAwayMessage({ name: "Young Iguana", balance: 0 }),
+    "Young Iguana isn't at a table right now. It's out of chips for today. Everyone starts again with $100 at 00:00 UTC.",
   );
-  assert.equal(watchEndedMessage({ name: "Bright Tiger", seated: false, balance: 205 }), "Bright Tiger has left the table; $205 is back in today's bankroll.");
-  assert.match(watchEndedMessage({ name: "Bright Tiger", seated: true, balance: 0 }), /expired\. Bright Tiger is still playing/);
+  assert.equal(watchAwayMessage({ name: "Bright Tiger", balance: 205 }), "Bright Tiger isn't at a table right now. $205 of today's money is in its bankroll.");
+  assert.match(WATCH_GONE, /30 days/);
 });
 
 test("a player who leaves (deferred to the hand's end, or at once) drops off the spectators' view and live snapshot, and chips match the bankroll ledger", async (t) => {
@@ -347,7 +450,7 @@ test("a player who leaves (deferred to the hand's end, or at once) drops off the
   await casino.join(c.id, { table: j.table });
   const ids = [a.id, b.id, c.id];
   const names = new Map<string, string>();
-  for (const id of ids) names.set(id, (await casino.watchEnded(id)).name);
+  for (const id of ids) names.set(id, (await casino.watchAway(id)).name);
   const seated = async () => {
     const v = (await casino.spectate(j.table))!;
     const snap = snapshot(v);
@@ -393,7 +496,7 @@ test("a player who leaves (deferred to the hand's end, or at once) drops off the
   assert.ok(!(await seated()).has(names.get(leaver)!), "gone");
   await conserved();
   // Their watch link's last word says they left, with what's in today's bankroll.
-  assert.match(watchEndedMessage(await casino.watchEnded(leaver)), /has left the table; \$\d+ is back in today's bankroll\.|out of chips/);
+  assert.match(watchAwayMessage(await casino.watchAway(leaver)), /isn't at a table right now\. (\$\d+ of today's money is in its bankroll\.|It's out of chips)/);
 });
 
 test("a live stream whose browser goes before its first snapshot gives its place back", async (t) => {

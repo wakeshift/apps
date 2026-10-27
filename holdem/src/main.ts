@@ -3,7 +3,7 @@
 //
 //   WAKESHIFT_KEY         the app's key (wst_test_… from the console, or wst_live_holdem_… for an env-registered app)
 //   WAKESHIFT_CORE        Wakeshift's URL (default https://app.wakeshift.ai)
-//   HOLDEM_SECRET         keys the hash that ties a conversation to its player (at least 32 bytes; changing it makes every conversation a new player)
+//   HOLDEM_SECRET         keys the hash that ties a conversation to its player, and sign-in (at least 32 bytes; changing it makes every conversation a new player and signs every agent out)
 //   HOLDEM_DATABASE_URL   Postgres (every instance shares it)
 //   HOLDEM_DB_POOL        connections per instance (default 4)
 //   PUBLIC_URL            this server's public URL (default http://localhost:$PORT)
@@ -17,6 +17,7 @@ import { analyticsFromEnv } from "./analytics.js";
 import { Casino, type Notifier } from "./casino.js";
 import { Db, type Log } from "./db.js";
 import { defineHoldemEvents, type HoldemEvents } from "./events.js";
+import { SignIn } from "./oauth.js";
 import { holdemHttp } from "./server.js";
 
 function env(name: string, fallback?: string): string {
@@ -67,7 +68,19 @@ if (houseSecret && Buffer.byteLength(houseSecret) < 32) {
   process.exit(2);
 }
 const operatorNote = /^(1|true)$/i.test(process.env.GAMES_OPERATOR_NOTE?.trim() ?? "");
-const server = holdemHttp({ wake, casino, events: events.current, secret, houseSecret, operatorNote, publicUrl: env("PUBLIC_URL", `http://localhost:${port}`), proxyHops: Number(process.env.HOLDEM_PROXY_HOPS ?? 0) || 0, analytics: analyticsFromEnv(), log });
+const publicUrl = env("PUBLIC_URL", `http://localhost:${port}`);
+const proxyHops = Number(process.env.HOLDEM_PROXY_HOPS ?? 0) || 0;
+// Players' sign-in (oauth.ts): sessions idle for 31 days are forgotten, by
+// every instance about once an hour.
+const signIn = new SignIn({ wake, db, secret, base: publicUrl, proxyHops, log });
+const server = holdemHttp({ wake, casino, events: events.current, secret, houseSecret, operatorNote, publicUrl, proxyHops, signIn, analytics: analyticsFromEnv(), log });
+const expire = () =>
+  signIn
+    .expire()
+    .then((n) => n > 0 && log("info", "forgot idle sessions", { sessions: n }))
+    .catch((err) => log("warn", "forgetting idle sessions failed", { err: String(err) }));
+const expiry = setInterval(expire, 60 * 60_000 + Math.floor(Math.random() * 60_000));
+setTimeout(expire, 60_000).unref();
 
 // The clock: every instance runs it; each table is handled by whichever gets its lock.
 let ticking = false;
@@ -89,6 +102,7 @@ server.listen(port, () =>
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, () => {
     clearInterval(clock);
+    clearInterval(expiry);
     server.close(() => {
       db.close().finally(() => process.exit(0));
     });

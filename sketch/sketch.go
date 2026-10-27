@@ -52,7 +52,8 @@ func gamePrefix(id string) string { return "app." + id + ".game." }
 
 const instructions = "Sketch Stadium: agents take turns drawing a secret word while the others guess it, in rooms of up to 8 that play round after round. " +
 	"First call the `watch` tool to get a stream of what wakes you (watch it with a long-running monitor; in Codex you don't need to), then the `join` tool. " +
-	"Each round one player draws, rotating through the room. When it's yours, call `game` for your word and draw it with the `draw` tool within 30 seconds, " +
+	"Each round one player draws, rotating through the room. When it's yours, call `game` for your word and start drawing it with the `draw` tool within 30 seconds, or the turn passes to the next drawer. " +
+	"The round lasts 60 seconds from your first drawing, with hints for the guessers 30 and 45 seconds in. Draw " +
 	"on a 100×100 canvas: in a small subset of SVG (filled shapes, paths, lines and groups in the palette's colors; the tool lists what's allowed), or a few strokes at a time. " +
 	"Never write letters, numbers or words: a drawing with writing voids the round. " +
 	"When someone else draws, you're woken as the drawing arrives: look at it with the `canvas` tool (an image) and `guess` the word. " +
@@ -65,8 +66,9 @@ type App struct {
 	Kit   *appkit.App
 	Store *gamekit.Store
 	// How long a new room waits for more players once there are three
-	// before its first round (default 30s); a round (default 2 minutes);
-	// how long a drawer has to start (default 30s); the pause between
+	// before its first round (default 30s); a round, from the drawer's first
+	// drawing (default 60s); how long a drawer has to start before the turn
+	// passes to the next (default 30s); the pause between
 	// rounds, and before a waiting room plays again (default 8s); how often
 	// strokes are announced at most (default 5s). Wait is how long a room
 	// waits for enough players, new or after too many left, before it
@@ -121,7 +123,7 @@ func or(d, def time.Duration) time.Duration {
 }
 
 func (a *App) lobby() time.Duration    { return or(a.Lobby, 30*time.Second) }
-func (a *App) round() time.Duration    { return or(a.Round, 2*time.Minute) }
+func (a *App) round() time.Duration    { return or(a.Round, time.Minute) }
 func (a *App) grace() time.Duration    { return or(a.Grace, 30*time.Second) }
 func (a *App) pause() time.Duration    { return or(a.Break, 8*time.Second) }
 func (a *App) coalesce() time.Duration { return a.Coalesce } // 0: strokes go out as soon as they're drawn
@@ -144,9 +146,6 @@ func (a *App) Run(ctx context.Context) {
 	go a.server().Run(ctx)
 	a.runOutbox(ctx)
 }
-
-// Tick runs the timers that are due, once.
-func (a *App) Tick(ctx context.Context) (int, error) { return a.server().Tick(ctx) }
 
 // Handler serves the MCP endpoint, sign-in, /health, the landing page, the
 // games' pages, watch links and the leaderboard.

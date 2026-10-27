@@ -3,6 +3,7 @@ package agentchat
 import (
 	"cmp"
 	"context"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -220,6 +221,27 @@ func (s *Store) RemoveFromChannel(ctx context.Context, by string, c Channel, per
 		if by != person {
 			if err := authorize(ctx, tx, by, "", c.ID, manager); err != nil {
 				return err
+			}
+		}
+		if c.OrgID != "" && by != person {
+			// Never the org's owner; an admin only by the owner (as on the
+			// org's page, orgKeepOut, but here, in the same transaction, so
+			// the agents' remove_member holds to it too, and a change of
+			// role meanwhile counts).
+			// Both rows locked (authorize locked by's): a promotion meanwhile
+			// waits for this removal, or this check sees it. Someone no longer
+			// in the org (their agents not yet out of its groups) has no role,
+			// and may be kept out like a member.
+			var target, byRole string
+			err := tx.QueryRow(ctx, `SELECT role FROM org_members WHERE org_id = $1 AND person_id = $2 FOR SHARE`, c.OrgID, person).Scan(&target)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err := tx.QueryRow(ctx, `SELECT role FROM org_members WHERE org_id = $1 AND person_id = $2 FOR SHARE`, c.OrgID, by).Scan(&byRole); err != nil {
+				return notFound(err)
+			}
+			if target == "owner" || target == "admin" && byRole != "owner" {
+				return ErrNotFound
 			}
 		}
 		if c.OrgID == "" {

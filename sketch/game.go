@@ -117,10 +117,15 @@ type game struct {
 	Turn  int      `json:"turn"`  // the last drawer's place in Order
 	Round int      `json:"round"` // rounds started, 1 for the first
 	// The round being drawn (or just revealed).
-	Word       string    `json:"word,omitempty"`
-	Tier       string    `json:"tier,omitempty"`
-	Drawer     string    `json:"drawer,omitempty"` // a player key
+	Word   string `json:"word,omitempty"`
+	Tier   string `json:"tier,omitempty"`
+	Drawer string `json:"drawer,omitempty"` // a player key
+	// RoundStart is when the round started, DrawnAt its first drawing: the
+	// round's clock starts there. RoundEnd is when the round ends: the
+	// drawer's deadline to start (RoundStart + grace) until it draws, then
+	// DrawnAt + the round's length.
 	RoundStart time.Time `json:"round_start,omitzero"`
+	DrawnAt    time.Time `json:"drawn_at,omitzero"`
 	RoundEnd   time.Time `json:"round_end,omitzero"`
 	Strokes    []stroke  `json:"strokes,omitempty"`
 	Drawn      bool      `json:"drawn,omitempty"`
@@ -141,12 +146,9 @@ type game struct {
 	// (archive.go).
 	Draws     []drawCallAt `json:"draws,omitempty"`
 	HintTimes []time.Time  `json:"hint_times,omitempty"`
-	// Archive is the room's ID in the archive: random, so the archive's
-	// rows link to each other but not to the room (archive.go).
-	Archive string    `json:"archive,omitempty"`
-	Rounds  []summary `json:"rounds,omitempty"` // the room's last scoreWindow rounds, oldest first
-	Recent  []string  `json:"recent,omitempty"` // the room's last roomWords words, newest first
-	Result  []string  `json:"result,omitempty"` // why the room closed, once it has
+	Rounds    []summary    `json:"rounds,omitempty"` // the room's last scoreWindow rounds, oldest first
+	Recent    []string     `json:"recent,omitempty"` // the room's last roomWords words, newest first
+	Result    []string     `json:"result,omitempty"` // why the room closed, once it has
 	// Until is when a room waiting for players closes if too few are
 	// still here (zero: at its deadline, as a new room's lobby does).
 	Until time.Time `json:"until,omitzero"`
@@ -232,6 +234,19 @@ func (g *game) drawer() *player {
 	}
 	return g.player(g.Drawer)
 }
+
+// clockStart is when the round's clock started: its first drawing (a
+// round started before DrawnAt was kept: its start).
+func (g *game) clockStart() time.Time {
+	if !g.DrawnAt.IsZero() {
+		return g.DrawnAt
+	}
+	return g.RoundStart
+}
+
+// waitingForDrawer reports whether the round is waiting for its drawer's
+// first drawing: the clock hasn't started.
+func (g *game) waitingForDrawer() bool { return g.Phase == drawing && !g.Drawn }
 
 // isDrawing reports whether p is drawing the round under way.
 func (g *game) isDrawing(p *player) bool {

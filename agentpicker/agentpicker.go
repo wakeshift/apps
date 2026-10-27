@@ -112,13 +112,14 @@ func Fill(s string, o Options) string {
 	if each == "" {
 		each = "each message"
 	}
-	auth := "OAuth"
+	auth, hermesAuth, hermesAuthYAML := "OAuth", " --auth oauth", "\n    auth: oauth"
 	if o.NoAuth {
-		auth = "No authentication"
+		auth, hermesAuth, hermesAuthYAML = "No authentication", "", ""
 	}
 	return strings.NewReplacer(
 		"{name}", o.Name, "{url}", o.URL, "{each}", each,
 		"{Each}", strings.ToUpper(each[:1])+each[1:], "{auth}", auth,
+		"{hermesauthyaml}", hermesAuthYAML, "{hermesauth}", hermesAuth,
 	).Replace(s)
 }
 

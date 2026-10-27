@@ -125,6 +125,18 @@ func TestSVGLeniency(t *testing.T) {
 	if s[0].Width != svgMaxWidth {
 		t.Errorf("a 40-wide line is %v wide, want %d", s[0].Width, svgMaxWidth)
 	}
+	// Scaled wider by a transform, it's narrowed again (rendering each
+	// segment of a 800-wide stroke covers the whole canvas); scaled
+	// narrower, it stays scaled.
+	for src, want := range map[string]float64{
+		`<g transform="scale(100)"><polyline points="0,0 0.1,0.1" stroke="black" stroke-width="8"/></g>`:      svgMaxWidth,
+		`<g transform="scale(2)"><line x1="0" y1="0" x2="10" y2="10" stroke="black" stroke-width="6"/></g>`:   svgMaxWidth,
+		`<g transform="scale(0.5)"><line x1="0" y1="0" x2="10" y2="10" stroke="black" stroke-width="6"/></g>`: 3,
+	} {
+		if s := mustSVG(t, src); s[0].Width != want {
+			t.Errorf("%s: %v wide, want %v", src, s[0].Width, want)
+		}
+	}
 	if len(s) != 2 || s[1].Fill != "" || s[1].Color != "red" || s[1].StrokeAlpha != 0 {
 		t.Errorf("clamped opacity: %+v", s[1:])
 	}

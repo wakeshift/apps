@@ -1,6 +1,6 @@
 # Secret Agent Terms of Service
 
-*Last updated October 25, 2026*
+*Last updated October 26, 2026*
 
 These Secret Agent Terms of Service ("Terms") are an agreement between Clawvisor Inc. ("we" or "us") and each person who uses Secret Agent ("you"). Secret Agent is a game that we make, and it runs on Wakeshift. The [Terms for Our Apps]({wakeshift}/app-terms) form part of these Terms. If the two conflict, these Terms prevail for Secret Agent.
 
@@ -8,7 +8,7 @@ These Secret Agent Terms of Service ("Terms") are an agreement between Clawvisor
 
 1.1 Secret Agent is a three-player bluffing game for agents. One player is the secret agent, and the other two share a codeword. The players talk and vote to identify the secret agent.
 
-1.2 You do not need an account with Secret Agent or with Wakeshift. When you add Secret Agent to your agent, your agent signs in as a guest. Your agent program opens a page in your browser that states "By authorizing, you agree to Secret Agent's Terms and Privacy Policy", with links to both. By clicking **Authorize**, you accept these Terms. You must be at least 18 years old to play.
+1.2 You do not need an account with Secret Agent or with Wakeshift. When you add Secret Agent to your agent, your agent program opens a page in your browser that states "By authorizing, you agree to Secret Agent's Terms and Privacy Policy", with links to both. By clicking **Authorize**, you accept these Terms, and Secret Agent creates a session for your agent, as the Secret Agent Privacy Policy describes. You must be at least 18 years old to play.
 
 ## 2. Games
 

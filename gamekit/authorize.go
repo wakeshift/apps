@@ -2,12 +2,9 @@ package gamekit
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/json"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -17,24 +14,21 @@ import (
 	"time"
 )
 
-// The authorize page: what a game shows when a player's agent signs in as a
-// guest. Guest sign-in (appkit.GuestAuth) redirects back with a code at
-// once; a game with terms (Server.Legal) puts this page in front of it: the
-// game's name and logo, "By authorizing, you agree to <Game>'s Terms and
-// Privacy Policy" linking its own /terms and /privacy, and an Authorize
-// button. That button is where players agree to the game's terms.
+// The authorize page: what a game shows when a player's agent signs in
+// (oauth.go). A game with terms (Server.Legal) shows its name and logo,
+// "By authorizing, you agree to <Game>'s Terms and Privacy Policy" linking
+// its own /terms and /privacy, and an Authorize button. That button is
+// where players agree to the game's terms, and clicking it starts the
+// player's session.
 //
-// The page is the game's, not the SDK's. GET /oauth/authorize runs the
-// SDK's authorize to check the request (client, redirect URI, PKCE) and, if
-// it would issue a code, shows the page instead, so the code never leaves;
-// anything else (an unknown client, a bad redirect) is the SDK's answer as
-// it is. The Authorize button posts back with a CSRF token (signed with a
-// key derived from the app's key, good for authorizePageTTL, and bound to a
-// SameSite=Strict, HttpOnly cookie); with a valid one, the original
-// authorize request goes to the SDK unchanged, which redirects back with
-// the code. Nothing is stored, and nothing is created until the code
-// exchange, as before. Agent Hold'em has the same page in its own server
-// (apps/holdem/src/authorize.ts).
+// GET /oauth/authorize checks the request (client, redirect URI, PKCE) and
+// shows the page; a refused request is said on a plain page, never by
+// redirecting. The Authorize button posts back with a CSRF token (signed
+// with a key derived from the app's key, good for authorizePageTTL, and
+// bound to a SameSite=Strict, HttpOnly cookie) carrying the authorize
+// request; with a valid one, the request is checked again, the session
+// starts and the player's agent gets its code. Agent Hold'em has the same
+// page in its own server (apps/holdem/src/authorize.ts).
 
 // authorizePageStyle is the page's only styling, allowed by its hash in
 // the page's CSP: no other style, script or third-party asset loads.
@@ -80,106 +74,40 @@ const (
 
 var nonceRE = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 
-// guestRoutes mounts guest sign-in: the SDK's, with the authorize page in
-// front of its authorize when the game has terms.
-func (s *Server) guestRoutes(mux *http.ServeMux) {
-	if s.Legal == nil {
-		s.guest().Routes(mux)
-		return
-	}
-	sdk := http.NewServeMux()
-	s.guest().Routes(sdk)
-	mux.Handle("/.well-known/", sdk)
-	mux.Handle("/oauth/", sdk)
-	// More specific than /oauth/ (a strict subset of its requests), so these
-	// take precedence over it rather than conflict (TestAuthorizePage
-	// mounts them).
-	mux.HandleFunc("GET /oauth/authorize", func(w http.ResponseWriter, r *http.Request) { s.authorizePage(w, r, sdk) })
-	mux.HandleFunc("POST /oauth/authorize", func(w http.ResponseWriter, r *http.Request) { s.authorizeClick(w, r, sdk) })
-}
-
 // authorizeForm is what the page's CSRF token carries: the authorize
-// request to send the SDK, the nonce in the browser's cookie it's bound
-// to, and until when (Unix seconds).
+// request, the nonce in the browser's cookie it's bound to, and until when
+// (Unix seconds).
 type authorizeForm struct {
 	Query   string `json:"q"`
 	Nonce   string `json:"n"`
 	Expires int64  `json:"e"`
 }
 
-func (s *Server) authorizeKey() []byte {
-	h := hmac.New(sha256.New, s.Kit.Key.Seed())
-	h.Write([]byte("gamekit:authorize-page"))
-	return h.Sum(nil)
-}
-
-func (s *Server) signForm(f authorizeForm) string {
-	b, _ := json.Marshal(f)
-	p := base64.RawURLEncoding.EncodeToString(b)
-	h := hmac.New(sha256.New, s.authorizeKey())
-	h.Write([]byte(p))
-	return p + "." + base64.RawURLEncoding.EncodeToString(h.Sum(nil))
-}
+func (s *Server) signForm(f authorizeForm) string { return s.seal(labelForm, f) }
 
 func (s *Server) openForm(token string) (authorizeForm, bool) {
 	var f authorizeForm
-	p, sig, ok := strings.Cut(token, ".")
-	if !ok {
-		return f, false
+	ok := s.unseal(labelForm, token, &f)
+	return f, ok
+}
+
+// authorizePage answers GET /oauth/authorize: the page, for a request that
+// checks out (without terms, the session starts at once).
+func (s *Server) authorizePage(w http.ResponseWriter, r *http.Request) {
+	a, problem := s.checkAuthorize(r.URL.Query())
+	if problem != "" {
+		http.Error(w, problem, http.StatusBadRequest)
+		return
 	}
-	got, err := base64.RawURLEncoding.DecodeString(sig)
-	h := hmac.New(sha256.New, s.authorizeKey())
-	h.Write([]byte(p))
-	if err != nil || !hmac.Equal(got, h.Sum(nil)) {
-		return f, false
-	}
-	b, err := base64.RawURLEncoding.DecodeString(p)
-	return f, err == nil && json.Unmarshal(b, &f) == nil
-}
-
-// recorder keeps the SDK's answer to an authorize request.
-type recorder struct {
-	header http.Header
-	status int
-	body   bytes.Buffer
-}
-
-func (r *recorder) Header() http.Header { return r.header }
-
-// Write and WriteHeader as net/http's: a write before any WriteHeader is a
-// 200, and only the first status counts.
-func (r *recorder) Write(b []byte) (int, error) {
-	r.WriteHeader(http.StatusOK)
-	return r.body.Write(b)
-}
-
-func (r *recorder) WriteHeader(status int) {
-	if r.status == 0 {
-		r.status = status
-	}
-}
-
-// authorizePage answers GET /oauth/authorize: the page, if the SDK would
-// issue a code for the request; else the SDK's answer.
-func (s *Server) authorizePage(w http.ResponseWriter, r *http.Request, sdk http.Handler) {
-	rec := &recorder{header: http.Header{}}
-	sdk.ServeHTTP(rec, r)
-	if loc, err := url.Parse(rec.header.Get("Location")); rec.status != http.StatusFound || err != nil || loc.Query().Get("code") == "" {
-		for k, v := range rec.header {
-			w.Header()[k] = v
-		}
-		rec.WriteHeader(http.StatusOK) // the SDK wrote nothing: an empty 200, as net/http would send
-		w.WriteHeader(rec.status)
-		w.Write(rec.body.Bytes())
+	if s.Legal == nil {
+		s.startSession(w, r, a)
 		return
 	}
 	n := ""
 	if c, err := r.Cookie(authorizeCookie); err == nil && nonceRE.MatchString(c.Value) {
 		n = c.Value // another tab's page stays good
 	} else {
-		b := make([]byte, 16)
-		rand.Read(b)
-		n = base64.RawURLEncoding.EncodeToString(b)
+		n = random(16)
 	}
 	base := s.PublicURL()
 	http.SetCookie(w, &http.Cookie{Name: authorizeCookie, Value: n, Path: "/", MaxAge: int(authorizePageTTL.Seconds()),
@@ -207,9 +135,8 @@ func (s *Server) authorizePage(w http.ResponseWriter, r *http.Request, sdk http.
 }
 
 // authorizeClick answers the Authorize button: with a valid CSRF token, the
-// original authorize request goes to the SDK, which redirects back to the
-// client with the code.
-func (s *Server) authorizeClick(w http.ResponseWriter, r *http.Request, sdk http.Handler) {
+// session starts and the player's agent gets its code.
+func (s *Server) authorizeClick(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Bad form.", http.StatusBadRequest)
@@ -217,15 +144,19 @@ func (s *Server) authorizeClick(w http.ResponseWriter, r *http.Request, sdk http
 	}
 	f, ok := s.openForm(r.PostForm.Get("csrf"))
 	c, err := r.Cookie(authorizeCookie)
-	if !ok || time.Now().Unix() > f.Expires || f.Nonce == "" || err != nil || subtle.ConstantTimeCompare([]byte(c.Value), []byte(f.Nonce)) != 1 {
+	if s.Legal == nil || !ok || time.Now().Unix() > f.Expires || f.Nonce == "" || err != nil || subtle.ConstantTimeCompare([]byte(c.Value), []byte(f.Nonce)) != 1 {
 		http.Error(w, "This page has expired. Go back to your agent and sign in again.", http.StatusForbidden)
 		return
 	}
-	get := r.Clone(r.Context())
-	get.Method = http.MethodGet
-	get.URL.RawQuery = f.Query
-	get.Body, get.ContentLength, get.Form, get.PostForm = http.NoBody, 0, nil, nil
-	get.Header.Del("Content-Type")
-	w.Header().Set("Cache-Control", "no-store")
-	sdk.ServeHTTP(w, get)
+	q, err := url.ParseQuery(f.Query)
+	if err != nil {
+		http.Error(w, "Bad form.", http.StatusBadRequest)
+		return
+	}
+	a, problem := s.checkAuthorize(q)
+	if problem != "" {
+		http.Error(w, problem, http.StatusBadRequest)
+		return
+	}
+	s.startSession(w, r, a)
 }

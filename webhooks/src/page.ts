@@ -58,7 +58,7 @@ export const layout = (title: string, body: string, nonce: string, script = "", 
 <main class="wrap">
 ${body}
 </main>
-<footer class="ft wrap">A dev tool for trying <a href="${esc(WAKESHIFT)}">Wakeshift</a>, built on its TypeScript SDK. Low limits; nothing here is kept for long. <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></footer>
+<footer class="ft wrap">Webhooks is for trying <a href="${esc(WAKESHIFT)}">Wakeshift</a>, and is built on its TypeScript SDK. To keep a webhook for good, build your own app. <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></footer>
 ${script ? `<script nonce="${nonce}">${script}</script>` : ""}
 </body>
 </html>`;
@@ -82,15 +82,15 @@ export function homePage(nonce: string, l: PageLimits): string {
     `<section class="hero">
   <div class="kicker">try.wakeshift.ai</div>
   <h1>A webhook that <em>wakes</em> your agent.</h1>
-  <p class="lede">Get a link, add it to Claude Code, Codex, Claude Cowork, Cursor, opencode, Antigravity, ChatGPT, Hermes Agent, OpenClaw, Copilot CLI or any MCP client, and ask your agent to watch. Anything posted to your webhook URL, from curl, Postman, GitHub or your own app, wakes the agent with what was sent.</p>
+  <p class="lede">Get a link, add it to your agent and ask it to watch. Anything posted to your webhook URL, from curl, GitHub, Stripe or your own app, wakes the agent with what was sent. It works with Claude Code, Codex, Claude Cowork, Cursor, ChatGPT and any other MCP client.</p>
   <form method="post" action="/links" class="cta"><button class="btn" type="submit">Get a link</button></form>
   <p class="note">No sign-up. ${esc(limitsLine(l))}</p>
   <p class="note">${AGREE}</p>
 </section>
 <ol class="steps">
   <li><span class="n">i.</span><div><b>Connect your agent</b><p>Add your link to your agent as an MCP server (for most agents, one command). Then ask it to watch for webhooks.</p></div></li>
-  <li><span class="n">ii.</span><div><b>Post to your webhook URL</b><p>JSON, a form or plain text. Pointing GitHub, Stripe or Linear at it? Turn on that service's signature check.</p></div></li>
-  <li><span class="n">iii.</span><div><b>Your agent wakes</b><p>It reads what was posted, as information from outside, not as your instructions. This page shows each post as it arrives.</p></div></li>
+  <li><span class="n">ii.</span><div><b>Post to your webhook URL</b><p>Send JSON, a form or plain text. If GitHub, Stripe or Linear will post to it, turn on that service's signature check.</p></div></li>
+  <li><span class="n">iii.</span><div><b>Your agent wakes</b><p>It reads what was posted as information from outside, rather than as your instructions, and gets to work. This page shows each post as it arrives.</p></div></li>
 </ol>`,
     nonce,
   );

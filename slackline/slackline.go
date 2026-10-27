@@ -337,12 +337,13 @@ func (a *App) understood(w http.ResponseWriter, r *http.Request, u User) {
 	http.Redirect(w, r, "/home#connect", http.StatusSeeOther)
 }
 
+// signout ends every one of the person's sessions, not just this browser's:
+// a session is a signed cookie, so clearing it here would leave a copy of
+// it working until it expired.
 func (a *App) signout(w http.ResponseWriter, r *http.Request, u User) {
-	if r.PostForm.Get("everywhere") != "" {
-		if err := a.Store.EndSessions(r.Context(), u.TeamID, u.UserID); err != nil {
-			a.failed(w, r, err)
-			return
-		}
+	if err := a.Store.EndSessions(r.Context(), u.TeamID, u.UserID); err != nil {
+		a.failed(w, r, err)
+		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -717,8 +718,8 @@ func activity(e Entry, labels map[string]string) string {
 	switch e.Action {
 	case "user.signed_in":
 		return "You signed in"
-	case "user.signed_out_everywhere":
-		return "You signed out everywhere"
+	case "user.signed_out", "user.signed_out_everywhere":
+		return "You signed out of every browser"
 	case "agent.connected":
 		if c := str("client"); c != "" {
 			return "Connected " + agent + " (" + c + ")"

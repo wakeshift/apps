@@ -155,6 +155,18 @@ func TestArchive(t *testing.T) {
 	if n := len(f.archived()); n != 2 {
 		t.Fatalf("%d rows after a round voided for writing", n)
 	}
+	// While the room is open, the game is linked to its archive ID; once it
+	// closes, nothing links them.
+	var linked int
+	f.a.Store.Pool.QueryRow(bg, `SELECT count(*) FROM archive_rooms WHERE game_id = $1 AND archive_id = $2`, f.id, r.Room).Scan(&linked)
+	if linked != 1 {
+		t.Fatal("an open room isn't linked to its archive ID")
+	}
+	f.move(nil, func(tx *gamekit.Tx, g *game) error { return f.a.closeRoom(tx, g, "Closed for the test.") })
+	f.a.Store.Pool.QueryRow(bg, `SELECT count(*) FROM archive_rooms WHERE game_id = $1`, f.id).Scan(&linked)
+	if linked != 0 {
+		t.Fatal("a closed room is still linked to its archive ID")
+	}
 }
 
 // Guesses are cut to the game's guess limit after scrubbing.

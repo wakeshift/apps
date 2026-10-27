@@ -27,9 +27,9 @@ import (
 // The signature is HMAC-SHA256(HOUSE_SECRET, "wakeshift-house\0v2\0<game>\0<agent>\0<model>\0<expiry>\0<token>"),
 // game being the server's Name ("secretagent"), so a claim for one game
 // doesn't work at another, and token the base64url SHA-256 of the bearer
-// token the same request carries (the house agent's own guest access
-// token), so a claim works only for the guest it was made for: one that
-// leaks (a log, a proxy) can't make another guest a house player. A guest
+// token the same request carries (the house agent's own access token), so
+// a claim works only for the sign-in it was made for: one that leaks (a
+// log, a proxy) can't make another player a house player. A player
 // without the secret can't make one; a server without HouseSecret accepts
 // none. Agent Hold'em checks the same format (apps/holdem/src/house.ts),
 // and Wakeshift's house service signs it;
@@ -84,7 +84,7 @@ func VerifyHouseClaim(secret, game, header, token string, now time.Time) (HouseC
 	if err != nil || exp < now.Unix() || exp > now.Add(HouseClaimMax).Unix() {
 		return HouseClaim{}, false
 	}
-	sig, err := base64.RawURLEncoding.DecodeString(parts[4])
+	sig, err := base64.RawURLEncoding.Strict().DecodeString(parts[4]) // canonical only
 	if err != nil || !hmac.Equal(sig, houseSig(secret, game, parts[1], string(model), exp, token)) {
 		return HouseClaim{}, false
 	}

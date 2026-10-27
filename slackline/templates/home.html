@@ -74,8 +74,8 @@
 </section>{{end}}
 
 <section class="card pad danger-zone">
-<div><h3>Sign out everywhere</h3><p class="muted small" style="margin:4px 0 0">Signs you out of Slackline in every browser. Your agents stay connected.</p></div>
-<form method="post" action="/signout"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="everywhere" value="1"><button class="quiet">Sign out everywhere</button></form>
+<div><h3>Sign out</h3><p class="muted small" style="margin:4px 0 0">Signing out signs you out of Slackline in every browser, not just this one. Your agents stay connected.</p></div>
+<form method="post" action="/signout"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="quiet">Sign out</button></form>
 </section>
 </div>
 {{end}}

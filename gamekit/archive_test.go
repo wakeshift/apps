@@ -1,9 +1,14 @@
 package gamekit
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/wakeshift/apps/internal/pgtest"
 )
 
 // Roles name no one: a label each, the house flag and model for house
@@ -98,5 +103,77 @@ func TestTruncate(t *testing.T) {
 	}
 	if a, b := ArchiveID(), ArchiveID(); len(a) != 26 || a == b {
 		t.Errorf("ArchiveID %q %q", a, b)
+	}
+}
+
+// A room's archive ID is random, the same for every record while the room
+// is open, and its link to the game goes when the game ends, when it's
+// stopped, or once it's gone unused for archiveRoomIdle.
+func TestArchiveRoom(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenStore(ctx, pgtest.EmptyURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	now := time.Now()
+	s := &Server{Name: "g", Store: st, Now: func() time.Time { return now }, NewState: func() State { return &Game{} }}
+	for _, id := range []string{"g1", "g2", "g3"} {
+		if _, err := st.Pool.Exec(ctx, `INSERT INTO games (id, phase, max_seats, state) VALUES ($1, 'playing', 3, $2)`, id, fmt.Sprintf(`{"id":%q,"phase":"playing"}`, id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	room := func(game string) string {
+		t.Helper()
+		var id string
+		if _, err := s.Update(ctx, game, nil, func(tx *Tx, g State) error {
+			var err error
+			id, err = tx.ArchiveRoom(game)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	linked := func(game string) bool {
+		var n int
+		st.Pool.QueryRow(ctx, `SELECT count(*) FROM archive_rooms WHERE game_id = $1`, game).Scan(&n)
+		return n == 1
+	}
+	a := room("g1")
+	if len(a) != 26 || a == "g1" || room("g1") != a || room("g2") == a {
+		t.Fatalf("archive IDs %q %q %q", a, room("g1"), room("g2"))
+	}
+	room("g3")
+	// The game ends: its link goes.
+	if _, err := s.Update(ctx, "g1", nil, func(tx *Tx, g State) error { g.(*Game).End(time.Minute); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if linked("g1") {
+		t.Error("an ended game is still linked to its archive ID")
+	}
+	// Stopped: likewise.
+	if _, err := s.Update(ctx, "g2", nil, func(tx *Tx, g State) error { return s.stop(tx, "g2", "test") }); err != nil {
+		t.Fatal(err)
+	}
+	if linked("g2") {
+		t.Error("a stopped game is still linked to its archive ID")
+	}
+	// Unused for archiveRoomIdle: it goes, and the room gets a new one.
+	now = now.Add(archiveRoomIdle + time.Minute)
+	s.forgotAt.Store(0)
+	if err := s.forget(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if linked("g3") {
+		t.Error("an idle link was kept")
+	}
+	// Deleting the game deletes its link.
+	b := room("g3")
+	if _, err := st.Pool.Exec(ctx, `DELETE FROM games WHERE id = 'g3'`); err != nil {
+		t.Fatal(err)
+	}
+	if b == "" || linked("g3") {
+		t.Error("a deleted game's link was kept")
 	}
 }

@@ -1,13 +1,17 @@
 package analytics
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 var testPages = compile([]string{"/", "/rules", "/games", "/games/{id}", "/watch/{secret}", "/docs/quickstart"})
@@ -308,5 +312,182 @@ func TestProxy(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Errorf("upstream got %d requests, want 1", len(got))
+	}
+}
+
+func TestEventHostHeader(t *testing.T) {
+	for _, host := range []string{`evil.example"><x`, "a@b.example", "", strings.Repeat("a.", 130) + "example", "white space", "h.example:99999999", "h.example/"} {
+		body := `{"event":"$pageview","properties":{"$current_url":"https://` + host + `/"}}`
+		if ev, ok := event(testPages, host, []byte(body)); ok {
+			t.Errorf("Host %q: passed %v", host, ev)
+		}
+	}
+	for _, host := range []string{"h.example", "H.Example", "localhost:8080", "127.0.0.1:8370"} {
+		body := `{"event":"$pageview","properties":{"$current_url":"http://` + host + `/"}}`
+		if _, ok := event(testPages, host, []byte(body)); !ok {
+			t.Errorf("Host %q: dropped", host)
+		}
+	}
+}
+
+func TestLimiter(t *testing.T) {
+	l := &limiter{perAddress: 2, total: 3}
+	now := time.Now()
+	for i, c := range []struct {
+		addr string
+		want bool
+	}{{"a", true}, {"a", true}, {"a", false}, {"b", true}, {"c", false}, {"", false}} {
+		if got := l.allow(c.addr, now); got != c.want {
+			t.Errorf("%d: allow(%q) = %v, want %v", i, c.addr, got, c.want)
+		}
+	}
+	if !l.allow("a", now.Add(time.Minute)) {
+		t.Error("a new minute didn't reset the counts")
+	}
+	l = &limiter{perAddress: 1, total: 10}
+	if !l.allow("", now) || !l.allow("", now) {
+		t.Error("an unknown address was limited per address")
+	}
+}
+
+func TestClientAddr(t *testing.T) {
+	for _, c := range []struct {
+		xff, remote string
+		hops        int
+		want        string
+	}{
+		{"", "192.0.2.1:1234", 0, "192.0.2.1"},
+		{"203.0.113.9, 10.0.0.1", "192.0.2.1:1234", 0, "192.0.2.1"},
+		{"203.0.113.9, 10.0.0.1", "192.0.2.1:1234", 2, "203.0.113.9"},
+		{"spoofed, 203.0.113.9, 10.0.0.1", "192.0.2.1:1234", 2, "203.0.113.9"},
+		{"10.0.0.1", "192.0.2.1:1234", 2, "192.0.2.1"}, // fewer entries than hops: not the proxies'
+		{"not-an-ip, 10.0.0.1", "192.0.2.1:1234", 2, "192.0.2.1"},
+		{"2001:db8:1:2:3:4:5:6, 10.0.0.1", "192.0.2.1:1234", 2, "2001:db8:1:2::/64"},
+		{"::ffff:203.0.113.9, 10.0.0.1", "192.0.2.1:1234", 2, "203.0.113.9"},
+		{"203.0.113.9, 10.0.0.1", "192.0.2.1:1234", -1, ""},
+	} {
+		r := httptest.NewRequest("POST", CapturePath, nil)
+		r.RemoteAddr = c.remote
+		if c.xff != "" {
+			r.Header.Set("X-Forwarded-For", c.xff)
+		}
+		if got := clientAddr(r, c.hops); got != c.want {
+			t.Errorf("clientAddr(%q, %d) = %q, want %q", c.xff, c.hops, got, c.want)
+		}
+	}
+}
+
+func TestFromEnvProxyHops(t *testing.T) {
+	t.Setenv("WAKESHIFT_ANALYTICS_PROXY_HOPS", "")
+	if got := FromEnv().ProxyHops; got != -1 {
+		t.Errorf("unset: ProxyHops %d, want -1", got)
+	}
+	t.Setenv("WAKESHIFT_ANALYTICS_PROXY_HOPS", "2")
+	if got := FromEnv().ProxyHops; got != 2 {
+		t.Errorf("2: ProxyHops %d", got)
+	}
+}
+
+// TestProxyLimits: /ingest can't be used to flood PostHog, to make it
+// follow a redirect, or to hold a request open with a slow body.
+func TestProxyLimits(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	count := func() int { mu.Lock(); defer mu.Unlock(); return hits }
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		if r.URL.Path != "/i/v0/e/" {
+			t.Errorf("followed to %s", r.URL.Path)
+		}
+		io.WriteString(w, `{"status":"Ok"}`)
+	}))
+	defer upstream.Close()
+	ok := `{"event":"$pageview","properties":{"$current_url":"https://games.example/"}}`
+	post := func(h http.Handler, client string) int {
+		req := httptest.NewRequest("POST", CapturePath, strings.NewReader(ok))
+		req.Host = "games.example"
+		req.Header.Set("X-Forwarded-For", client+", 10.0.0.1")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	h := Wrap(http.HandlerFunc(page), Config{Key: "phc_test", Host: upstream.URL, ProxyHops: 2}, "/").(*handler)
+	h.limit = &limiter{perAddress: 3, total: 5}
+	for range 10 { // dropped events don't count
+		req := httptest.NewRequest("POST", CapturePath, strings.NewReader(`{"event":"$identify"}`))
+		req.Host = "games.example"
+		req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("dropped event: %d", rec.Code)
+		}
+	}
+	for i := range 3 {
+		if code := post(h, "203.0.113.9"); code != http.StatusOK {
+			t.Fatalf("event %d: %d", i, code)
+		}
+	}
+	for _, c := range []struct {
+		client string
+		want   int
+	}{
+		{"203.0.113.9", http.StatusTooManyRequests}, // past the per-address limit
+		{"2001:db8::1", http.StatusOK},
+		{"2001:db8::2", http.StatusOK},               // the same /64: its second
+		{"198.51.100.1", http.StatusTooManyRequests}, // past the overall limit
+	} {
+		if code := post(h, c.client); code != c.want {
+			t.Errorf("%s: %d, want %d", c.client, code, c.want)
+		}
+	}
+	if n := count(); n != 5 {
+		t.Errorf("PostHog got %d events, want 5", n)
+	}
+
+	// PostHog's redirect isn't followed.
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, upstream.URL+"/elsewhere", http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+	if code := post(Wrap(http.HandlerFunc(page), Config{Key: "phc_test", Host: redirect.URL}, "/"), "203.0.113.9"); code != http.StatusTemporaryRedirect {
+		t.Errorf("redirect: %d", code)
+	}
+	if n := count(); n != 5 {
+		t.Errorf("followed a redirect")
+	}
+
+	// Requests to PostHog at once are capped.
+	h = Wrap(http.HandlerFunc(page), Config{Key: "phc_test", Host: upstream.URL, ProxyHops: -1}, "/").(*handler)
+	h.inFlight = make(chan struct{}, 1)
+	h.inFlight <- struct{}{} // one already waiting on PostHog
+	if code := post(h, "203.0.113.9"); code != http.StatusServiceUnavailable {
+		t.Errorf("past the in-flight cap: %d", code)
+	}
+
+	// A body that never finishes is cut off.
+	h = Wrap(http.HandlerFunc(page), Config{Key: "phc_test", Host: upstream.URL}, "/").(*handler)
+	h.readTimeout = 200 * time.Millisecond
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: games.example\r\nContent-Length: 100\r\n\r\n{", CapturePath)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("slow body: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("slow body: %d", resp.StatusCode)
+	}
+	if n := count(); n != 5 {
+		t.Errorf("PostHog got %d events, want 5", n)
 	}
 }

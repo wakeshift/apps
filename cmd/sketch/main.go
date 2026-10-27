@@ -18,9 +18,10 @@
 //	SKETCH_WRITING_KEY_SECRET  a Secret Manager secret (projects/…/secrets/…) to read it from at
 //	                        runtime (no version yet: no check)
 //	PROXY_HOPS              trusted proxies in front that append to X-Forwarded-For (behind
-//	                        Google's load balancer: 2), for guest sign-in's per-address limits
+//	                        Google's load balancer: 2), for sign-in's per-address limits
 //	GAMES_SHARED_SEAT_WORKSPACES  workspace IDs (UUIDs, comma-separated) whose players may take several
-//	                        seats in one game, for demos (optional; default: none, one seat per workspace)
+//	                        seats in one game, for demos (optional; default: none, one seat per workspace). Each Authorize
+//	                        is a new session with its own workspace: re-authorizing needs the new ID
 //	HOUSE_SECRET            shared with Wakeshift's house service: lets its agents prove they're
 //	                        house agents, labelled as such (optional; at least 32 bytes)
 //	GAMES_OPERATOR_NOTE     1: moves offer an optional note for the player's operator (default off)

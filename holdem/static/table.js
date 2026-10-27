@@ -399,7 +399,10 @@
     var es = new EventSource(url);
     es.addEventListener("snap", function (e) {
       try {
-        apply(JSON.parse(e.data));
+        var d = JSON.parse(e.data);
+        // Another table's (a watch link whose agent moved): the page loads again instead.
+        if (d && d.table && d.table !== id) return;
+        apply(d);
       } catch (err) {}
     });
     return es;
@@ -407,6 +410,27 @@
 
   if (src && window.EventSource) {
     var es = listen(src);
+    // A watch link follows its agent: when it leaves this table (or the
+    // stream, after a reconnect, is for another table or none), the page
+    // loads again for wherever the agent is now, after a moment to see the
+    // table as it is.
+    var moving = false;
+    function moved() {
+      if (moving) return;
+      moving = true;
+      es.close();
+      setTimeout(function () {
+        location.reload();
+      }, 2500);
+    }
+    es.addEventListener("moved", moved);
+    es.addEventListener("away", moved);
+    es.addEventListener("snap", function (e) {
+      try {
+        var d = JSON.parse(e.data);
+        if (d && d.table && d.table !== id) moved();
+      } catch (err) {}
+    });
     es.addEventListener("gone", function (e) {
       es.close();
       // Keep following the table as any spectator does (without the cards):

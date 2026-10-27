@@ -9,7 +9,9 @@
 // to the page's pattern (/games/:id) and no query string or fragment. It
 // builds a fresh request, so the visitor's cookies, IP address
 // (X-Forwarded-For) and browser never reach PostHog. Nothing is stored in
-// the browser, and nothing anyone types is sent.
+// the browser, and nothing anyone types is sent. It forwards a limited
+// number of events a minute, from each address and in all, so a script
+// can't flood the PostHog project.
 //
 // apps/analytics/analytics.ts is the same for the TypeScript apps; the
 // copies in apps/holdem and apps/try must match it (TestTypeScriptCopies).
@@ -24,15 +26,19 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -52,12 +58,34 @@ const (
 type Config struct {
 	Key  string // the project API key (public by design); empty: off
 	Host string // the ingestion host (default DefaultHost)
+	// ProxyHops is how many trusted proxies in front append to
+	// X-Forwarded-For, to find each visitor's address for the per-address
+	// limit (0: the connection's address). Negative: the address isn't
+	// known, and only the overall limit applies.
+	ProxyHops int
 }
 
-// FromEnv reads WAKESHIFT_POSTHOG_KEY and WAKESHIFT_POSTHOG_HOST.
+// FromEnv reads WAKESHIFT_POSTHOG_KEY, WAKESHIFT_POSTHOG_HOST and
+// WAKESHIFT_ANALYTICS_PROXY_HOPS (unset or not a number: the address isn't
+// known).
 func FromEnv() Config {
-	return Config{Key: strings.TrimSpace(os.Getenv("WAKESHIFT_POSTHOG_KEY")), Host: strings.TrimSpace(os.Getenv("WAKESHIFT_POSTHOG_HOST"))}
+	hops, err := strconv.Atoi(strings.TrimSpace(os.Getenv("WAKESHIFT_ANALYTICS_PROXY_HOPS")))
+	if err != nil {
+		hops = -1
+	}
+	return Config{Key: strings.TrimSpace(os.Getenv("WAKESHIFT_POSTHOG_KEY")), Host: strings.TrimSpace(os.Getenv("WAKESHIFT_POSTHOG_HOST")), ProxyHops: hops}
 }
+
+// The limits on what /ingest forwards, for each instance: events a minute
+// from one address (an IPv6 address counts as its /64) and in all, and
+// requests to PostHog at once. Past them, events are refused (429, 503).
+const (
+	PerAddress   = 60
+	PerInstance  = 600
+	InFlight     = 32
+	maxAddresses = 100_000 // addresses tracked in a minute; past it, a new one is refused
+	readTimeout  = 10 * time.Second
+)
 
 // Enabled is whether a key is set.
 func (c Config) Enabled() bool { return c.Key != "" }
@@ -76,17 +104,28 @@ func Wrap(next http.Handler, cfg Config, pages ...string) http.Handler {
 		return next
 	}
 	host := strings.TrimSuffix(cmp.Or(cfg.Host, DefaultHost), "/")
-	return &handler{next: next, key: cfg.Key, capture: host + "/i/v0/e/", pages: compile(pages),
-		client: &http.Client{Timeout: 5 * time.Second}, origin: http.NewCrossOriginProtection()}
+	return &handler{next: next, key: cfg.Key, capture: host + "/i/v0/e/", pages: compile(pages), hops: cfg.ProxyHops,
+		client: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse // only ever the capture URL
+		}},
+		origin:      http.NewCrossOriginProtection(),
+		limit:       &limiter{perAddress: PerAddress, total: PerInstance},
+		inFlight:    make(chan struct{}, InFlight),
+		readTimeout: readTimeout}
 }
 
 type handler struct {
-	next    http.Handler
-	key     string
-	capture string // PostHog's capture URL
-	pages   []pattern
-	client  *http.Client
-	origin  *http.CrossOriginProtection
+	next     http.Handler
+	key      string
+	capture  string // PostHog's capture URL
+	pages    []pattern
+	hops     int
+	client   *http.Client
+	origin   *http.CrossOriginProtection
+	limit    *limiter
+	inFlight chan struct{} // a slot per request to PostHog
+	// readTimeout is how long a request's body may take to arrive.
+	readTimeout time.Duration
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -135,14 +174,33 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
-	if err != nil || len(body) > maxBody {
-		http.Error(w, "too large", http.StatusRequestEntityTooLarge)
+	// A body that trickles in doesn't hold the request open.
+	http.NewResponseController(w).SetReadDeadline(time.Now().Add(h.readTimeout))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	if err != nil {
+		if errors.As(err, new(*http.MaxBytesError)) {
+			http.Error(w, "too large", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "unreadable body", http.StatusBadRequest)
+		}
 		return
 	}
 	ev, ok := event(h.pages, r.Host, body)
 	if !ok {
 		w.WriteHeader(http.StatusNoContent) // dropped: nothing for the page to do about it
+		return
+	}
+	// Only events PostHog would get count against the limits, and only the
+	// request to PostHog holds a slot.
+	select {
+	case h.inFlight <- struct{}{}:
+		defer func() { <-h.inFlight }()
+	default:
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+		return
+	}
+	if !h.limit.allow(clientAddr(r, h.hops), time.Now()) {
+		http.Error(w, "too many events", http.StatusTooManyRequests)
 		return
 	}
 	ev["api_key"] = h.key
@@ -165,6 +223,71 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request) {
 	w.Write(reply)
 }
 
+// limiter counts events in fixed one-minute windows: perAddress from each
+// address, and total in all.
+type limiter struct {
+	perAddress, total int
+	mu                sync.Mutex
+	window            time.Time
+	all               int
+	seen              map[string]int
+}
+
+// allow records an event from addr ("": not known), reporting whether it's
+// within the limits.
+func (l *limiter) allow(addr string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.seen == nil || now.Sub(l.window) >= time.Minute || now.Before(l.window) {
+		l.window, l.all, l.seen = now, 0, map[string]int{}
+	}
+	if l.all >= l.total {
+		return false
+	}
+	if addr != "" {
+		n, ok := l.seen[addr]
+		if n >= l.perAddress || (!ok && len(l.seen) >= maxAddresses) {
+			return false
+		}
+		l.seen[addr] = n + 1
+	}
+	l.all++
+	return true
+}
+
+// clientAddr is the visitor's address, as the hops trusted proxies in front
+// wrote it in X-Forwarded-For (else the connection's), with an IPv6 address
+// as its /64; "" if hops is negative.
+func clientAddr(r *http.Request, hops int) string {
+	if hops < 0 {
+		return ""
+	}
+	var s string
+	if hops > 0 {
+		// Only an entry the proxies added: with fewer entries than hops, or
+		// one that isn't an address, the header isn't theirs.
+		if parts := strings.Split(r.Header.Get("X-Forwarded-For"), ","); len(parts) >= hops {
+			s = strings.TrimSpace(parts[len(parts)-hops])
+		}
+	}
+	ip, err := netip.ParseAddr(s)
+	if err != nil {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		if ip, err = netip.ParseAddr(host); err != nil {
+			return host
+		}
+	}
+	ip = ip.Unmap()
+	if ip.Is6() {
+		p, _ := ip.Prefix(64)
+		return p.String()
+	}
+	return ip.String()
+}
+
 // The events a page may send, and the property each may carry with the
 // values allowed. Anything else is dropped.
 var (
@@ -177,7 +300,10 @@ var (
 	}
 	ctas    = map[string]bool{"start_building": true, "contact_us": true, "quickstart": true, "try_it": true}
 	agentID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
-	uuidRe  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	// hostRe is a host name or IPv4 address, with an optional port: the Host
+	// header is the visitor's to set, and PostHog gets it as $host.
+	hostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[0-9]{1,5})?$`)
+	uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
 
 func allowed(prop, v string) bool {
@@ -197,16 +323,25 @@ func allowed(prop, v string) bool {
 // elsewhere, neither with a query string or fragment; and the event is
 // marked to make no person profile and no location.
 func event(pages []pattern, host string, body []byte) (map[string]any, bool) {
-	var in struct {
-		Event      string         `json:"event"`
-		DistinctID string         `json:"distinct_id"`
-		Properties map[string]any `json:"properties"`
-	}
-	if json.Unmarshal(body, &in) != nil {
+	// Fields by their exact names (encoding/json would also match "EVENT"),
+	// as analytics.ts reads them.
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil {
 		return nil, false
 	}
+	var in struct {
+		Event      string
+		DistinctID string
+		Properties map[string]any
+	}
+	if json.Unmarshal(raw["event"], &in.Event) != nil {
+		return nil, false
+	}
+	json.Unmarshal(raw["distinct_id"], &in.DistinctID)
+	json.Unmarshal(raw["properties"], &in.Properties)
 	prop, known := events[in.Event]
-	if !known {
+	name, _, _ := strings.Cut(host, ":") // without the port
+	if !known || len(name) > 253 || !hostRe.MatchString(strings.ToLower(host)) {
 		return nil, false
 	}
 	str := func(k string) string { s, _ := in.Properties[k].(string); return s }

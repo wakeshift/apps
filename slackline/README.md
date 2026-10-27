@@ -41,7 +41,7 @@ Never delivered: bots' messages (the app's and agents' own posts included), edit
 
 ## Accounts, tokens and the console
 
-- **Sessions**: a signed cookie (`HttpOnly`, `SameSite=Lax`, `Secure` on https) naming the person and their session version; "Sign out everywhere" bumps the version. Console forms carry a token derived from the session, and must come from Slackline's own origin.
+- **Sessions**: a signed cookie (`HttpOnly`, `SameSite=Lax`, `Secure` on https) naming the person and their session version; signing out bumps the version, so it ends the person's sessions in every browser and a copied cookie stops working. Console forms carry a token derived from the session, and must come from Slackline's own origin.
 - **Consent page**: the client's name is its own claim (anyone can register any name), so the page says so, and shows prominently where approving sends access: the redirect's host, or "a program on this computer" for loopback redirects.
 - **OAuth**: clients are signed blobs (nothing stored until someone approves one); redirect URIs must be https, or http on the loopback. Authorization codes are single-use, last 2 minutes, are stored hashed, and require PKCE (S256); an exchange that fails spends the code. Access tokens are signed, last an hour, and name the agent, which is checked on every request, so revoking it stops them at once. Refresh tokens are random, stored hashed, last 90 days, and are replaced on every use. Approving the same client again reuses its agent.
 - **Revoking** an agent ends its tokens, codes, channel rules and listeners, and its conversations' Wakeshift subscriptions (each is told); an end that fails (Wakeshift unreachable) is retried every 5 minutes until Wakeshift confirms it.

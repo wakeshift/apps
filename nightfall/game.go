@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/wakeshift/apps/gamekit"
 )
@@ -166,6 +167,10 @@ type game struct {
 	Roles   []string           `json:"roles,omitempty"` // the cards in this game (public)
 	Center  [centerSize]string `json:"center"`
 	Result  []string           `json:"result,omitempty"`
+	// When the night fell and the day broke: archived moves are timed from
+	// the night.
+	Started time.Time `json:"started,omitzero"`
+	DayAt   time.Time `json:"day_at,omitzero"`
 }
 
 func (g *game) handles() []string {

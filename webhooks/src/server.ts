@@ -171,13 +171,14 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     wake.attach(server, { identify: () => ({ user: l.hook }) });
     // The call as Wakeshift needs it: the client's name (from the server),
     // the webhook as the user, and the arguments wake.args adds.
-    const callOf = (extra: Parameters<typeof wake.call>[0], args: Record<string, unknown>) => wake.call(extra, { server, user: l.hook, args });
+    // tool: the tool being called (a connector beacon in its result names it).
+    const callOf = (extra: Parameters<typeof wake.call>[0], args: Record<string, unknown>, tool: string) => wake.call(extra, { server, user: l.hook, args, tool });
     // The other tools' results carry what's waiting for a conversation that
     // can't be woken (and a Codex thread's beacon): the result as it was
     // if that fails.
-    const annotated = async (extra: Parameters<typeof wake.call>[0], args: Record<string, unknown>, result: CallToolResult): Promise<CallToolResult> => {
+    const annotated = async (tool: string, extra: Parameters<typeof wake.call>[0], args: Record<string, unknown>, result: CallToolResult): Promise<CallToolResult> => {
       try {
-        return await wake.annotate(callOf(extra, args), result);
+        return await wake.annotate(callOf(extra, args, tool), result);
       } catch (err) {
         log("warn", "annotate failed", { err: String(err) });
         return result;
@@ -203,7 +204,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
             ],
           };
         }
-        const sub = await received.subscribe(extra, hookArgs, { server, user: l.hook, wakeArgs: args });
+        const sub = await received.subscribe(extra, hookArgs, { server, user: l.hook, wakeArgs: args, tool: "watch" });
         // The page names the conversation by a label: its session key acts
         // as the conversation, so it's never shown, stored or logged here.
         const who = conversationLabel(sub.session);
@@ -226,7 +227,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
       "unwatch",
       { description: "Stop waking this conversation for your webhook.", inputSchema: { ...wake.args } },
       async (args, extra) => {
-        const ended = await received.unsubscribe(extra, hookArgs, { server, user: l.hook, wakeArgs: args });
+        const ended = await received.unsubscribe(extra, hookArgs, { server, user: l.hook, wakeArgs: args, tool: "unwatch" });
         const n = ended ? 1 : 0;
         const who = args.session_key ? conversationLabel(args.session_key) : session.watchedAs;
         if (n > 0 && who) {
@@ -245,7 +246,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
       },
       async ({ limit, ...args }, extra) => {
         const posts = await state.posts(l.hook, limit ?? 3);
-        return annotated(extra, args, {
+        return annotated("recent_posts", extra, args, {
           content: [
             {
               type: "text",
@@ -267,7 +268,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
           ? `Checked URL, for services (it checks ${checkNames[c.check]}): ${c.url}\n` + `Open URL, for tests (anyone with it can post): ${url}\n`
           : `Open URL (anyone with it can post): ${url}\n` +
             `There's no checked URL yet. For GitHub, Stripe, Linear or a bearer token, the user makes one on the webhook's page (below); give a service that one, not the open URL.\n`;
-        return annotated(extra, args, {
+        return annotated("webhook_info", extra, args, {
           content: [
             {
               type: "text",

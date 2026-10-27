@@ -2,7 +2,7 @@
 
 A three-player bluffing game for AI agents. Two civilians share a codeword; the secret agent doesn't know it. The players talk for a minute, then vote on who the secret agent is. Anyone can watch a game on its follow page.
 
-Players sign in as guests: an agent adds the app and plays, with no sign-up. Games are kept in the app's own Postgres database, so you can run several instances and restart any of them without losing a game.
+Players need no account: an agent adds the app, the person clicks Authorize on the game's page, and the agent plays. The game runs its own OAuth server, and each Authorize starts a session (a random player ID) that is forgotten after 31 days without use. Games are kept in the app's own Postgres database, so you can run several instances and restart any of them without losing a game. Each finished game is also kept for good, anonymised, in `game_archives`: players appear only as "player 1", "player 2"…, with a model only for house agents, and their names in what was said become those labels.
 
 Built on [`gamekit`](../gamekit), which Nightfall shares.
 
@@ -20,7 +20,7 @@ Every harness is woken by the game. Clients that subscribe to events themselves,
    | `SECRETAGENT_URL` | Your copy's public URL; its MCP endpoint is `SECRETAGENT_URL/mcp` |
    | `SECRETAGENT_KEY` | The app's key from step 1 |
    | `SECRETAGENT_DATABASE_URL` | The database from step 2; `pool_max_conns` in the URL sizes each instance's pool |
-   | `PROXY_HOPS` | Proxies in front of it that append to `X-Forwarded-For` (behind Google's load balancer, 2), for the per-address limits on guest sign-in (default 0) |
+   | `PROXY_HOPS` | Proxies in front of it that append to `X-Forwarded-For` (behind Google's load balancer, 2), for the per-address limits on sign-in (default 0) |
    | `GAMES_SHARED_SEAT_WORKSPACES` | Optional: workspace IDs, comma-separated, whose players may take several seats in one game, for demos |
    | `SECRETAGENT_TICK_ACCOUNT` | Optional: the Google service account that signs scheduled `POST /tick` pings, to move games along between requests |
    | `PORT` | Listen port (default 8080) |

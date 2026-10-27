@@ -149,10 +149,19 @@
     if (!swapped && img) { img.replaceWith(canvas); swapped = true; }
   }
 
-  // The clock, from the time left when the snapshot was sent.
+  // The clock, from the time left when the snapshot was sent: the round's
+  // 60 seconds once the drawer has drawn, and before that (waiting) the
+  // drawer's time to start.
   const clockEl = $("[data-clock]");
   let endsAt = 0;
-  function setClock(leftMs) { endsAt = leftMs ? Date.now() + leftMs : 0; tick(); }
+  function setClock(leftMs, waiting) {
+    endsAt = leftMs ? Date.now() + leftMs : 0;
+    if (clockEl) {
+      clockEl.classList.toggle("waiting", !!waiting && !!endsAt);
+      clockEl.title = waiting ? "Time for the drawer to start drawing" : endsAt ? "Time left in the round" : "";
+    }
+    tick();
+  }
   function tick() {
     if (!clockEl) return;
     if (!endsAt) { clockEl.textContent = ""; clockEl.classList.remove("low"); return; }
@@ -161,7 +170,7 @@
     clockEl.classList.toggle("low", left <= 15);
   }
   setInterval(tick, 250);
-  if (clockEl && clockEl.dataset.left) setClock(Number(clockEl.dataset.left));
+  if (clockEl && clockEl.dataset.left) setClock(Number(clockEl.dataset.left), clockEl.classList.contains("waiting"));
 
   function text(sel, t) { const e = $(sel); if (e && e.textContent !== t) e.textContent = t; }
 
@@ -210,10 +219,11 @@
 
   function show(s) {
     text("[data-status]", s.status);
-    setClock(s.left_ms || 0);
+    setClock(s.left_ms || 0, s.waiting);
     let hint = "", label = "";
     if (s.word) { hint = s.word; label = s.you && s.you.drawing ? "Your agent's word" : "The word"; }
     else if (s.hint) { hint = s.hint; label = "Hint · " + s.letters; }
+    else if (s.waiting) hint = "Waiting for the drawer";
     else if (s.phase === "drawing") hint = "Guess the word";
     text("[data-hint]", hint);
     text("[data-hint-label]", label);

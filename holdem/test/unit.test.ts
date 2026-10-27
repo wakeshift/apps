@@ -3,7 +3,8 @@
 // a number the tests move.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chipsInPlay, type TableState, toAct as engineToAct } from "../engine/src/index.js";
+import { act as engineAct, chipsInPlay, createTable, sit, startHand, type TableState, toAct as engineToAct } from "../engine/src/index.js";
+import { archiveHand } from "../src/archive.js";
 import { Casino, DAILY_BANKROLL, GameError, MIN_HANDS, REMOVED_SUBSCRIPTION_GRACE_MS, type Notifier } from "../src/casino.js";
 import type { Db } from "../src/db.js";
 import { ADJECTIVES, ANIMALS, displayName, freshName, randomName, tableName } from "../src/names.js";
@@ -11,6 +12,7 @@ import { handPage, landingPage, leaderboardPage, streetsOf, tableBody, tablePage
 import { describe as describeState, tableFrom } from "../src/tools.js";
 import { championSvg } from "../src/og.js";
 import { legalDoc } from "../src/legal.js";
+import { cleanMessage } from "../src/moderation.js";
 import { testDb } from "./testdb.js";
 
 interface Wake {
@@ -137,7 +139,8 @@ test("two players sit down, a hand starts, the first to act is woken, and money 
   const first = wakes[0]!;
   const toAct = first.player === a.id ? a : b;
   assert.equal(first.data.type, "turn");
-  assert.match(first.text, /^Your move at Agent Hold'em, /);
+  // The clock comes straight after the name, so a line cut short keeps it.
+  assert.match(first.text, /^Your move at Agent Hold'em, [^:]+: act by \d\d:\d\d:\d\d UTC, hand 1, /);
   const s = await casino.state(toAct.id);
   // The wake carries the player's own cards, their choices and the turn's ID.
   for (const c of s.table!.you.cards) assert.ok(first.text.includes(cardWord(c)), "the wake has their cards");
@@ -432,8 +435,9 @@ test("a watch link and table talk don't deadlock with a hand in progress, which 
     await gate;
     await c.query("UPDATE seats SET turn_at = now() WHERE player = $1", [a.id]);
   });
+  await casino.watchLink(a.id, (m) => `hash${m.nonce}`);
   await holding;
-  const watch = casino.recordWatch(a.id, () => "hash", true);
+  const watch = casino.watchLink(a.id, (m) => `hash${m.nonce}`, true);
   const talk = casino.say(a.id, "Nice hand.");
   await new Promise((r) => setTimeout(r, 300)); // both reach their locks
   release();
@@ -605,6 +609,7 @@ test("pages render real data: landing, table, leaderboard, a finished hand with 
   assert.match(landingPage({ mcpUrl: "https://holdem.example/mcp", liveTables: 0, tables: [], resetIn: 3600, top: [], featured: null }), /No tables are running right now/);
   assert.match(landing, /claude mcp add --transport http holdem https:\/\/holdem\.example\/mcp/);
   assert.match(landing, /codex mcp add holdem --url https:\/\/holdem\.example\/mcp/);
+  assert.match(landing, /hermes mcp add holdem --url https:\/\/holdem\.example\/mcp --auth oauth/);
   // The agent picker: tier 1 and 2 agents first, the rest under More agents.
   const pills = [...landing.matchAll(/<button type="button" class="ap-pill" data-agent="([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual(pills, ["claude-code", "codex", "claude-cowork", "cursor", "opencode", "antigravity", "chatgpt", "hermes", "openclaw", "copilot", "other"]);
@@ -682,4 +687,88 @@ test("random play with raises and all-ins: players bust, rejoin while they have 
   const finished = await db.query<{ n: string }>("SELECT count(*)::text AS n FROM hands WHERE ended_at IS NOT NULL");
   // All in so often, the money ends up with one or two players in a few hands.
   assert.ok(Number(finished.rows[0]!.n) >= 3);
+});
+
+test("an archived hand scrubs every name it may hold, a departed player's too, in any case and spelling", () => {
+  let s = createTable({ smallBlind: 1, bigBlind: 2, minBuyIn: 40, maxBuyIn: 100, seats: 6 });
+  s = sit(s, 0, "p_a", 100);
+  s = sit(s, 3, "p_b", 100);
+  s = startHand(s, { handId: "t1-1" });
+  while (engineToAct(s)) s = engineAct(s, engineToAct(s)!.player, { type: "fold" });
+  const known = (id: string, name: string, house = false, model: string | null = null) => [id, { id, name, house, model }] as const;
+  const at = new Date("2026-10-21T12:00:00Z");
+  const rec = archiveHand({
+    h: s.hand!,
+    stake: "1-2",
+    pace: "standard",
+    smallBlind: 1,
+    bigBlind: 2,
+    players: new Map([known("p_a", "Brave Otter", false, "Opus 9"), known("p_b", "Quiet Heron", true, "Haiku 5.5"), known("p_gone", "Lucky Lynx")]),
+    seated: [null, null, null, "p_b"],
+    former: ["p_gone"],
+    notes: [],
+    talk: [{ player: "p_a", text: "Miss LUCKY-LYNX already. quiet_heron, brave otters are fine.", at: new Date(at.getTime() + 500) }],
+    startedAt: at,
+    endedAt: new Date(at.getTime() + 2000),
+    talkMax: 280,
+  });
+  assert.deepEqual(rec.talk, [{ ms: 500, from: "seat 1", text: "Miss other player 1 already. seat 4, brave otters are fine." }]);
+  assert.deepEqual(rec.seats.map((x) => [x.role, x.house, x.model]), [["seat 1", undefined, undefined], ["seat 4", true, "Haiku 5.5"]]);
+  assert.equal(rec.button.startsWith("seat "), true);
+  assert.ok(!JSON.stringify(rec).includes("p_"));
+});
+
+test("a finished hand is archived by seat: hole cards, actions and talk, no player's name or ID, and a model only for house seats", async (t) => {
+  const db = await testDb(t);
+  const { casino, clock } = room(db);
+  const a = await casino.identify("c_conversation_1", "guest:1", { harness: "claude-code", model: "Opus 9", subscription: "sub_1" });
+  const h = await casino.identify("c_house_2", "guest:house2", { harness: "house", model: "Haiku 5.5", house: true });
+  const ja = await casino.join(a.id, {});
+  const jh = await casino.join(h.id, {});
+  assert.equal(jh.table, ja.table);
+  const shout = (name: string) => name.toUpperCase().replace(" ", "-");
+  await casino.say(a.id, `Nice to meet you, ${shout(h.name)}.`);
+  clock.t += 1500;
+  // Each move carries a message naming the other player; play goes on until the first hand ends.
+  const archived = async () => (await db.query("SELECT 1 FROM hand_archives")).rowCount! > 0;
+  for (let i = 0; i < 20 && !(await archived()); i++) {
+    const turn = await Promise.all([a, h].map(async (p) => ({ p, s: await casino.state(p.id) })));
+    const mine = turn.find((x) => x.s.table?.hand?.yourTurn && !x.s.table.hand.result);
+    if (!mine) break;
+    const other = mine.p === a ? h : a;
+    const choices = mine.s.table!.legal!.choices;
+    clock.t += 1000;
+    await casino.act(mine.p.id, { type: choices.includes("check") ? "check" : "call" }, mine.s.table!.hand!.turn!, cleanMessage(`Your move, ${other.name.toLowerCase()}.`));
+  }
+  const rows = await db.query<{ played_on: string; record: Record<string, any> }>("SELECT played_on::text, record FROM hand_archives");
+  assert.equal(rows.rowCount, 1, "one finished hand, one archive");
+  const { played_on, record } = rows.rows[0]!;
+  assert.equal(played_on, casino.today());
+  const text = JSON.stringify(record);
+  const ids = await db.query<{ v: string }>("SELECT unnest(ARRAY[id, conversation, guest, name, coalesce(subscription, '')]) AS v FROM players");
+  const hands = await db.query<{ id: string; table_id: string; commitment: string; result: { seed: string } | null }>("SELECT id, table_id, commitment, result FROM hands");
+  for (const v of [...ids.rows.map((r) => r.v), ...hands.rows.flatMap((r) => [r.id, r.table_id, r.commitment, r.result?.seed ?? ""]), "Opus 9", "claude-code"]) {
+    if (v) assert.ok(!text.toLowerCase().includes(v.toLowerCase()), `the archive has ${v}: ${text}`);
+  }
+  assert.equal(record.seats.length, 2);
+  const seatOf = new Map<string, any>();
+  for (const s of record.seats) {
+    assert.match(s.role, /^seat [1-6]$/);
+    assert.equal(s.hole.length, 2, "every seat's hole cards");
+    assert.deepEqual(Object.keys(s).sort(), (s.house ? ["allIn", "folded", "hole", "house", "model", "net", "role", "shown", "stack"] : ["allIn", "folded", "hole", "net", "role", "shown", "stack"]).sort());
+    seatOf.set(s.house ? "h" : "a", s);
+  }
+  assert.equal(seatOf.get("h").model, "Haiku 5.5");
+  assert.equal(seatOf.get("a").model, undefined, "a real player's reported model isn't kept");
+  const ra = seatOf.get("a").role, rh = seatOf.get("h").role;
+  assert.equal(record.board.length, 5);
+  assert.ok(record.events.some((e: any) => e.kind === "post"));
+  const moves = record.events.filter((e: any) => e.kind === "action");
+  assert.ok(moves.length >= 2);
+  for (const m of moves) {
+    assert.equal(m.message, `Your move, ${m.seat === ra ? rh : ra}.`);
+    assert.ok(m.ms > 0 && m.ms <= record.lengthMs);
+  }
+  assert.deepEqual(record.talk.map((l: any) => [l.from, l.text]), [[ra, `Nice to meet you, ${rh}.`]]);
+  assert.ok(record.events.some((e: any) => e.kind === "award" && e.winners.every((w: string) => w === ra || w === rh)));
 });

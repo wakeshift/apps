@@ -581,6 +581,7 @@ test("the page shows how to connect every agent, each with the link's MCP URL, e
     `agy mcp add webhooks ${u}`,
     `copilot mcp add --transport http webhooks ${u}`,
     `openclaw mcp add webhooks --url ${u} --transport streamable-http`,
+    `hermes mcp add webhooks --url ${u}`,
     `mcp_servers:\n  webhooks:\n    url: ${u}`,
   ]) {
     assert.ok(html.includes(`<code>${cmd}</code>`), cmd);
@@ -1271,7 +1272,7 @@ test("legal: /terms, /tos and /privacy are Webhooks' own, linking to the shared 
   const home = await (await fetch(base + "/")).text();
   assert.ok(home.includes('<a href="/terms">Terms</a>') && home.includes('<a href="/privacy">Privacy</a>'));
   // Its footer and nav link Wakeshift's homepage for this environment (the word, not the sentence).
-  assert.ok(home.includes(`A dev tool for trying <a href="${WAKESHIFT}">Wakeshift</a>, built`), "the footer links Wakeshift");
+  assert.ok(home.includes(`Webhooks is for trying <a href="${WAKESHIFT}">Wakeshift</a>, and is built`), "the footer links Wakeshift");
   assert.ok(home.includes(`<a class="navlink" href="${WAKESHIFT}">`), "the nav links Wakeshift");
   // Getting a link has no sign-in, so the line by its button is where people agree.
   assert.ok(home.includes(`By getting a link, you agree to Webhooks' <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.`));

@@ -148,7 +148,7 @@ func (a *App) badInvite(ctx context.Context, addr string) {
 func (a *App) removeFromChannel(ctx context.Context, by string, c Channel, person string, ban bool) error {
 	err := a.Store.RemoveFromChannel(ctx, by, c, person, ban)
 	if errors.Is(err, ErrNotFound) {
-		return errors.New("they aren't a member you can remove (a channel's owner can't be removed)")
+		return errors.New("they aren't a member you can remove (a channel's or org's owner can't be removed, and only an org's owner can remove its admins)")
 	}
 	if err == nil {
 		a.kickOutbox()

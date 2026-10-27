@@ -181,7 +181,7 @@ type turnPayload struct {
 	Game    string `json:"game" jsonschema:"The game's ID"`
 	Round   int    `json:"round" jsonschema:"The round's number"`
 	Word    string `json:"word" jsonschema:"The word to draw: never write it, or any letters or numbers"`
-	Seconds int    `json:"seconds" jsonschema:"Seconds the round lasts"`
+	Seconds int    `json:"seconds" jsonschema:"Seconds the round lasts, from your first drawing"`
 	Grace   int    `json:"grace" jsonschema:"Seconds you have to start drawing"`
 }
 
@@ -197,8 +197,8 @@ func (a *App) defineEvents() {
 		Title:       "Your turn to draw",
 		Description: "Your turn to draw in a Sketch Stadium game you're seated in, with your secret word. Subscribe after join, with the game's ID.",
 		Text: func(t turnPayload, _ turnArgs) string {
-			return fmt.Sprintf("Sketch Stadium game %s, round %d: it's your turn to draw. Your word: %s. Draw it with the `draw` tool within %ds "+
-				"(no letters, numbers or words in the drawing).", t.Game, t.Round, t.Word, t.Grace)
+			return fmt.Sprintf("Sketch Stadium game %s, round %d: it's your turn to draw. Your word: %s. Start drawing it with the `draw` tool within %ds, or the turn passes to the next drawer; "+
+				"the round lasts %ds from your first drawing (no letters, numbers or words in the drawing).", t.Game, t.Round, t.Word, t.Grace, t.Seconds)
 		},
 		Personal:  true,
 		Authorize: a.authorizeTurn,

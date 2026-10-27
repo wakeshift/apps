@@ -177,23 +177,27 @@ func (a *App) view(ctx context.Context, g *game, me *player) map[string]any {
 		}
 	case g.isDrawing(me):
 		out["your_word"] = g.Word
-		out["seconds_left"] = secondsLeft(now, g.RoundEnd)
 		out["rules"] = drawRules
 		out["svg_rules"] = svgRules
 		if !g.Drawn {
-			out["note"] = fmt.Sprintf("You're drawing: draw %q with the `draw` tool within %ds, or you forfeit the round. "+
-				"You can't guess or chat this round.", g.Word, secondsLeft(now, g.RoundStart.Add(a.grace())))
+			out["seconds_to_start"] = secondsLeft(now, g.RoundStart.Add(a.grace()))
+			out["round_seconds"] = int(a.round().Seconds())
+			out["note"] = fmt.Sprintf("You're drawing: start drawing %q with the `draw` tool within %ds, or the turn passes to the next drawer. "+
+				"The round lasts %s from your first drawing. You can't guess or chat this round.", g.Word, secondsLeft(now, g.RoundStart.Add(a.grace())), gamekit.Human(a.round()))
 		} else {
+			out["seconds_left"] = secondsLeft(now, g.RoundEnd)
 			out["note"] = "You're drawing. Add to it with `draw` until someone guesses it; check your drawing with `canvas`."
 		}
 	default:
-		out["seconds_left"] = secondsLeft(now, g.RoundEnd)
 		if h := g.hint(); h != "" {
 			out["hint"] = h
 		}
-		out["note"] = "Look at the drawing with the `canvas` tool, then `guess` the word."
-		if len(g.Strokes) == 0 {
-			out["note"] = "Nothing's drawn yet: you'll be woken when the drawing arrives."
+		if g.Drawn {
+			out["seconds_left"] = secondsLeft(now, g.RoundEnd)
+			out["note"] = "Look at the drawing with the `canvas` tool, then `guess` the word."
+		} else {
+			out["note"] = fmt.Sprintf("Nothing's drawn yet: the drawer has %ds to start, and the round lasts %s from its first drawing. You'll be woken when the drawing arrives.",
+				secondsLeft(now, g.RoundEnd), gamekit.Human(a.round()))
 		}
 	}
 	return out
@@ -266,7 +270,7 @@ func (a *App) addTools(srv *mcp.Server) {
 		})
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "draw", Description: "Add to your drawing, when it's your turn to draw: with svg (best for filled shapes and curves) or with strokes, one or the other each call. " +
-		"Start within 30 seconds of your round starting, or you forfeit it. The guessers see your drawing every few seconds. " + svgRules + " " +
+		"Start within 30 seconds of your round starting, or the turn passes to the next drawer; the round then lasts 60 seconds from your first drawing. The guessers see your drawing as you draw it. " + svgRules + " " +
 		"strokes: up to 10 a call, each a line (2 points) or a polyline (up to 32 points) with [x, y] from 0 to 100, a color from the same palette and a width from 1 to 6. " +
 		drawRules},
 		func(ctx context.Context, req *mcp.CallToolRequest, in drawIn) (*mcp.CallToolResult, map[string]any, error) {

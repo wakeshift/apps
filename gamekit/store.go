@@ -296,6 +296,10 @@ func (s *Server) save(tx *Tx, g State, alreadyEnded bool) error {
 		end := tx.Now.Add(b.end)
 		_, err = tx.Exec(tx.Ctx, `UPDATE games SET phase = $2, open = false, state = $3, ended_at = $4, deadline_at = $5, updated_at = $4 WHERE id = $1`,
 			b.ID, b.Phase, state, tx.Now, end)
+		if err == nil {
+			// It archives nothing more: its link to its archive goes (archive.go).
+			_, err = tx.Exec(tx.Ctx, `DELETE FROM archive_rooms WHERE game_id = $1`, b.ID)
+		}
 	} else {
 		// Once a game has ended, the kit's lifecycle owns its deadline.
 		_, err = tx.Exec(tx.Ctx, `UPDATE games SET phase = $2, open = $3 AND ended_at IS NULL, state = $4,
@@ -329,8 +333,11 @@ func (s *Server) stop(tx *Tx, id, reason string) error {
 		id, tx.Now, "This game had to stop: "+reason+" Call the `join` tool to play another."); err != nil {
 		return err
 	}
-	_, err := tx.Exec(tx.Ctx, `UPDATE games SET open = false, stopped = $2, ended_at = coalesce(ended_at, $3), deadline_at = $4, updated_at = $3 WHERE id = $1`,
-		id, reason, tx.Now, tx.Now.Add(stopLinger))
+	if _, err := tx.Exec(tx.Ctx, `UPDATE games SET open = false, stopped = $2, ended_at = coalesce(ended_at, $3), deadline_at = $4, updated_at = $3 WHERE id = $1`,
+		id, reason, tx.Now, tx.Now.Add(stopLinger)); err != nil {
+		return err
+	}
+	_, err := tx.Exec(tx.Ctx, `DELETE FROM archive_rooms WHERE game_id = $1`, id)
 	return err
 }
 

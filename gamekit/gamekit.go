@@ -1,5 +1,5 @@
 // Package gamekit is what Wakeshift's game apps (Secret Agent, Nightfall)
-// share: an MCP server with guest sign-in (or Sign in with Wakeshift), the calling
+// share: an MCP server with players' sign-in (oauth.go), the calling
 // conversation's session, the watch tool, rooms (a Wakeshift group per game,
 // with seats, the moderator's announcements, players' talk and a log), and
 // signed follow-along links to a page where a player's operator watches.
@@ -63,9 +63,10 @@ type Server struct {
 	// Landing is the page at /, if the game has one.
 	Landing http.HandlerFunc
 	// Legal is the game's terms and privacy policy (/terms, /tos, /privacy).
-	// With it, guest sign-in shows the authorize page first (authorize.go),
-	// whose Authorize button is where players agree to them, so the game's
-	// pages and tools don't repeat it.
+	// With it, sign-in shows the authorize page (authorize.go), whose
+	// Authorize button is where players agree to them, so the game's pages
+	// and tools don't repeat it. Without it, authorize starts the session
+	// at once.
 	Legal *legal.Pages
 	// Logo, if set, is a file in Static shown on the authorize page.
 	Logo string
@@ -95,8 +96,8 @@ type Server struct {
 	// route isn't served.
 	TickAuth func(*http.Request) error
 	// ProxyHops is how many trusted proxies in front append to
-	// X-Forwarded-For (Google's load balancer: 2), for guest sign-in's
-	// per-address limits (appkit.GuestAuth.ProxyHops).
+	// X-Forwarded-For (Google's load balancer: 2), for sign-in's
+	// per-address limits (oauth.go).
 	ProxyHops int
 	// MaxCalls is how many tool calls an instance takes at once (default
 	// 200); more wait a moment, then are told the game is busy.
@@ -104,7 +105,9 @@ type Server struct {
 	// SharedSeats are workspaces exempt from matchmaking's one seat per
 	// workspace rule (ParseWorkspaces): their players may take several
 	// seats in one game, so one person can demo a game with their own
-	// agents. Nil: the rule applies to everyone.
+	// agents. A workspace is one sign-in's (oauth.go): it lasts while the
+	// agent keeps refreshing, and authorizing again makes a new one. Nil:
+	// the rule applies to everyone.
 	SharedSeats map[string]bool
 	// HouseSecret checks house agents' claims (HOUSE_SECRET, house.go):
 	// they're labelled as house players. Empty: there are no house agents.
@@ -127,10 +130,13 @@ type Server struct {
 	calls      chan struct{}
 	staticOnce sync.Once
 	staticHash map[string]string // file name → a short hash of its content
-	guestOnce  sync.Once
-	guestAuth  *appkit.GuestAuth
-	eventsOnce sync.Once
-	updates    *appkit.DefinedEvent[UpdateArgs, appkit.GroupMessage] // events.go
+	// Sign-in's per-address limits (oauth.go); the *Limit fields set them
+	// for tests (0: the default).
+	limitsOnce                              sync.Once
+	registers, sessions, tokens             *appkit.RateLimiter
+	registerLimit, sessionLimit, tokenLimit int
+	eventsOnce                              sync.Once
+	updates                                 *appkit.DefinedEvent[UpdateArgs, appkit.GroupMessage] // events.go
 }
 
 // ParseWorkspaces reads a comma-separated list of workspace IDs (UUIDs)
@@ -200,9 +206,8 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// Handler serves the MCP endpoint (/mcp) with the game's tools, the
-// protected-resource metadata that points clients to Sign in with
-// Wakeshift, /health, and the follow-along page.
+// Handler serves the MCP endpoint (/mcp) with the game's tools, players'
+// sign-in (oauth.go), /health, and the follow-along page.
 func (s *Server) Handler(addTools func(*mcp.Server)) http.Handler {
 	srv := mcp.NewServer(&mcp.Implementation{Name: s.Name, Title: s.Title, Version: "0.1.0"}, &mcp.ServerOptions{Instructions: s.Instructions})
 	addTools(srv)
@@ -220,9 +225,9 @@ func (s *Server) Handler(addTools func(*mcp.Server)) http.Handler {
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", appkit.LogMCP(appkit.RequireBearer(s.verify, s.PublicURL()+"/.well-known/oauth-protected-resource")(attached.Wrap(h))))
-	// Players sign in as guests: no Wakeshift account,
-	// agreeing to the game's terms on its authorize page (authorize.go).
-	s.guestRoutes(mux)
+	// Players sign in with no account, agreeing to the game's terms on its
+	// authorize page (oauth.go, authorize.go).
+	s.oauthRoutes(mux)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	s.followRoutes(mux)
 	s.staticRoutes(mux)
@@ -262,20 +267,6 @@ func (s *Server) PublicPages() []string {
 // PublicURL is the app's public URL (its MCP URL without /mcp).
 func (s *Server) PublicURL() string { return strings.TrimSuffix(s.Kit.MCPURL, "/mcp") }
 
-func (s *Server) guest() *appkit.GuestAuth {
-	s.guestOnce.Do(func() { s.guestAuth = &appkit.GuestAuth{App: s.Kit, ProxyHops: s.ProxyHops} })
-	return s.guestAuth
-}
-
-func (s *Server) verify(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
-	g, err := s.guest().Verify(token)
-	if err != nil {
-		return nil, err // an appkit.TokenError: auth.ErrInvalidToken, with why
-	}
-	return &auth.TokenInfo{UserID: g.Workspace + "/" + g.Agent, Expiration: g.Expires,
-		Extra: map[string]any{"workspace": g.Workspace, "agent": g.Agent}}, nil
-}
-
 // Agent is the app acting for the calling agent.
 func (s *Server) Agent(ctx context.Context, req *mcp.CallToolRequest) (*appkit.Agent, error) {
 	if req.Extra == nil {
@@ -284,8 +275,8 @@ func (s *Server) Agent(ctx context.Context, req *mcp.CallToolRequest) (*appkit.A
 	return s.agentOf(ctx, req.Extra.TokenInfo)
 }
 
-// agentOf is the app acting for the signed-in guest's agent, in the guest's
-// workspace. It's also how a native subscription to game.update is made,
+// agentOf is the app acting for the signed-in player's agent, in the
+// player's workspace. It's also how a native subscription to game.update is made,
 // beside the seat's membership of its room.
 func (s *Server) agentOf(ctx context.Context, ti *auth.TokenInfo) (*appkit.Agent, error) {
 	if ti == nil {
@@ -373,7 +364,7 @@ func (s *Server) AddWatch(srv *mcp.Server) {
 				if err != nil {
 					return nil, nil, err
 				}
-				w, err := ag.Watch(ctx, sess.Handle)
+				w, err := ag.WatchFor(ctx, sess.Handle, req.Params.Name)
 				if err != nil {
 					return nil, nil, err
 				}

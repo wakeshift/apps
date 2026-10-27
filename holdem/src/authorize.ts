@@ -1,22 +1,20 @@
-// The authorize page: where a player agrees to Agent Hold'em's terms. Guest
-// sign-in (the SDK's GuestAuth) redirects back with a code at once; Agent
-// Hold'em puts this page in front of it: its name and logo, "By authorizing,
-// you agree to Agent Hold'em's Terms and Privacy Policy" linking its own
-// /terms and /privacy, and an Authorize button.
+// The authorize page: where a player agrees to Agent Hold'em's terms, and
+// where its sign-in starts (oauth.ts). It shows Agent Hold'em's name and
+// logo, "By authorizing, you agree to Agent Hold'em's Terms and Privacy
+// Policy" linking its own /terms and /privacy, and an Authorize button.
 //
-// The page is Agent Hold'em's, not the SDK's. GET /oauth/authorize runs the
-// SDK's authorize to check the request (client, redirect URI, PKCE) and, if
-// it would issue a code, shows the page instead, so the code never leaves;
-// anything else is the SDK's answer as it is. The button posts back with a
-// CSRF token (an HMAC under a key derived from HOLDEM_SECRET, good for 15
-// minutes, bound to a SameSite=Strict, HttpOnly cookie); with a valid one,
-// the original authorize request goes to the SDK unchanged, which redirects
-// back with the code. Nothing is stored. The games on the Go kit have the
-// same page (apps/gamekit/authorize.go).
+// GET /oauth/authorize checks the request (client, redirect URI, PKCE) and
+// shows the page; a refused request is said on a plain page, never by
+// redirecting. The button posts back with a CSRF token (an HMAC under a key
+// derived from HOLDEM_SECRET, good for 15 minutes, bound to a
+// SameSite=Strict, HttpOnly cookie) carrying the authorize request; with a
+// valid one, the request is checked again, the session starts and the
+// player's agent gets its code. The games on the Go kit have the same page
+// (apps/gamekit/authorize.go).
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { type IncomingMessage, ServerResponse } from "node:http";
-import type { GuestAuth } from "@wakeshift/sdk";
+import type { SignIn } from "./oauth.js";
 
 const STYLE = `*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#f5f1e8;color:#1d1b17;font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}main{width:100%;max-width:400px;padding:32px;background:#fff;border:1px solid #ddd5c4;border-radius:16px;text-align:center}img{width:64px;height:64px;border-radius:12px;object-fit:contain}h1{margin:12px 0 8px;font-size:22px;line-height:1.3}p{margin:0 0 20px;color:#57524a}.terms{font-size:14px}a{color:#c25418}button{width:100%;padding:12px 16px;border:0;border-radius:10px;background:#1d1b17;color:#fff;font:inherit;font-weight:600;cursor:pointer}button:hover{background:#3a362f}button:focus-visible{outline:3px solid #c25418;outline-offset:2px}`;
 
@@ -41,7 +39,7 @@ interface Form {
 }
 
 export interface AuthorizePageOptions {
-  guests: GuestAuth;
+  signIn: SignIn;
   /** HOLDEM_SECRET: the CSRF tokens' key is derived from it. */
   secret: string;
   /** The public URL, e.g. https://holdem.wakeshift.ai. */
@@ -66,7 +64,10 @@ export class AuthorizePage {
     if (url.pathname !== "/oauth/authorize") return false;
     if (req.method === "POST") await this.click(req, res);
     else if (req.method === "GET" || req.method === "HEAD") await this.page(req, res, url);
-    else return false; // the SDK's 405
+    else {
+      res.writeHead(405, { Allow: "GET, HEAD, POST", "Content-Type": "text/plain" });
+      res.end("method not allowed");
+    }
     return true;
   }
 
@@ -80,7 +81,7 @@ export class AuthorizePage {
     if (!p || !sig || extra !== undefined) return undefined;
     const want = createHmac("sha256", this.key).update(p).digest();
     const got = Buffer.from(sig, "base64url");
-    if (got.length !== want.length || !timingSafeEqual(got, want)) return undefined;
+    if (got.toString("base64url") !== sig || got.length !== want.length || !timingSafeEqual(got, want)) return undefined; // canonical only: one signature, one encoding
     try {
       const f = JSON.parse(Buffer.from(p, "base64url").toString("utf8")) as Form;
       return typeof f.q === "string" && typeof f.n === "string" && typeof f.e === "number" ? f : undefined;
@@ -89,22 +90,12 @@ export class AuthorizePage {
     }
   }
 
-  // page: the SDK's authorize, run to check the request; the page if it
-  // would issue a code, else its answer as it is.
+  // page: the page, for a request that checks out.
   private async page(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-    const probe = new Recorder();
-    await this.o.guests.handle(req, probe as unknown as ServerResponse);
-    const location = String(probe.headers["location"] ?? "");
-    let code = "";
-    try {
-      code = location ? (new URL(location).searchParams.get("code") ?? "") : "";
-    } catch {
-      // not a code
-    }
-    if (probe.statusCode !== 302 || !code) {
-      // The SDK's own refusal (an unknown client, a bad redirect URI or PKCE): send it on.
-      res.writeHead(probe.statusCode, probe.headers);
-      res.end(req.method === "HEAD" ? undefined : Buffer.concat(probe.body));
+    const a = this.o.signIn.checkAuthorize(url.searchParams);
+    if (typeof a === "string") {
+      res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(req.method === "HEAD" ? undefined : a + "\n");
       return;
     }
     const had = cookie(req, AUTHORIZE_COOKIE);
@@ -132,8 +123,8 @@ export class AuthorizePage {
     res.end(req.method === "HEAD" ? undefined : html);
   }
 
-  // click: the Authorize button. With a valid CSRF token, the original
-  // authorize request goes to the SDK, which redirects back with the code.
+  // click: the Authorize button. With a valid CSRF token, the session
+  // starts and the player's agent gets its code.
   private async click(req: IncomingMessage, res: ServerResponse): Promise<void> {
     let body = "";
     try {
@@ -147,41 +138,10 @@ export class AuthorizePage {
     if (!f || Math.floor(this.now() / 1000) > f.e || want.length === 0 || got.length !== want.length || !timingSafeEqual(got, want)) {
       return void res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" }).end("This page has expired. Go back to your agent and sign in again.\n");
     }
-    // The authorize request the page was shown for, as the SDK saw it.
-    const get = Object.create(req, { method: { value: "GET" }, url: { value: "/oauth/authorize?" + f.q } }) as IncomingMessage;
-    res.setHeader("Cache-Control", "no-store");
-    await this.o.guests.handle(get, res);
-  }
-}
-
-// Recorder keeps the SDK's answer to an authorize request (the parts of a
-// ServerResponse GuestAuth.handle uses), to send on or drop.
-class Recorder {
-  statusCode = 200;
-  headersSent = false;
-  readonly headers: Record<string, string | number | string[]> = {};
-  readonly body: Buffer[] = [];
-
-  setHeader(name: string, value: string | number | string[]): this {
-    this.headers[name.toLowerCase()] = value;
-    return this;
-  }
-
-  getHeader(name: string): string | number | string[] | undefined {
-    return this.headers[name.toLowerCase()];
-  }
-
-  writeHead(status: number, headers?: Record<string, string | number | string[]>): this {
-    this.statusCode = status;
-    for (const [k, v] of Object.entries(headers ?? {})) this.setHeader(k, v);
-    this.headersSent = true;
-    return this;
-  }
-
-  end(chunk?: string | Buffer): this {
-    if (chunk !== undefined) this.body.push(Buffer.from(chunk));
-    this.headersSent = true;
-    return this;
+    // The authorize request the page was shown for, checked again.
+    const a = this.o.signIn.checkAuthorize(new URLSearchParams(f.q));
+    if (typeof a === "string") return void res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" }).end(a + "\n");
+    await this.o.signIn.startSession(req, res, a);
   }
 }
 

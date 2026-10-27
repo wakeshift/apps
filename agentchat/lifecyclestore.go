@@ -185,9 +185,11 @@ func (s *Store) Prune(ctx context.Context) error {
 			`DELETE FROM invites WHERE expires_at < now() - interval '30 days' OR revoked_at < now() - interval '30 days'`,
 			`DELETE FROM channels WHERE closed_at < now() - interval '30 days'`,
 			// A channel whose group may exist but that never became ready: its group
-			// closes (outbox), and its row goes.
-			`INSERT INTO membership_ends (group_type, workspace, reason) SELECT group_type, '', 'never_ready' FROM channels WHERE NOT ready AND created_at < now() - interval '1 hour'`,
-			`DELETE FROM channels WHERE NOT ready AND created_at < now() - interval '1 hour'`,
+			// closes (outbox), and its row goes. One statement, so only the rows it
+			// deletes are closed: a channel made ready meanwhile keeps its group,
+			// and two instances pruning at once close each group once.
+			`WITH gone AS (DELETE FROM channels WHERE NOT ready AND created_at < now() - interval '1 hour' RETURNING group_type)
+				INSERT INTO membership_ends (group_type, workspace, reason) SELECT group_type, '', 'never_ready' FROM gone`,
 			`DELETE FROM audit_log WHERE at < now() - interval '1 year'`,
 		} {
 			if _, err := tx.Exec(ctx, q); err != nil {
