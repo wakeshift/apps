@@ -14,7 +14,7 @@ import { testDb } from "./testdb.js";
 /** A casino on db with a fake clock; real: the real pauses between hands, else a short one. */
 function room(db: Db, real = false, start = Date.parse("2026-10-21T12:00:00Z")) {
   const clock = { t: start };
-  const notify: Notifier = { turn: async () => {}, result: async () => {}, removed: async () => {}, endSubscription: async () => {} };
+  const notify: Notifier = { turn: async () => {}, result: async () => {}, handResult: async () => {}, removed: async () => {}, endSubscription: async () => {} };
   const casino = new Casino({ db, notify, now: () => clock.t, ...(real ? {} : { handPauseMs: 1000 }) });
   return { casino, clock };
 }

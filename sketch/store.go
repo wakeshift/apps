@@ -316,15 +316,14 @@ func (a *App) send(ctx context.Context, game, kind string, data []byte) error {
 		_, err := a.turn.Emit(ctx, turnArgs{Game: t.Turn.Game}, t.Turn, appkit.To(t.User), appkit.WithID(fmt.Sprintf("turn:%s:%d", t.Turn.Game, t.Turn.Round)))
 		return err
 	case "remove":
-		var r struct{ Handle string }
-		if err := json.Unmarshal(data, &r); err != nil || r.Handle == "" {
+		// A removed seat's subscription. One with none (queued before the
+		// games had subscriptions) has nothing to end.
+		var r removal
+		if err := json.Unmarshal(data, &r); err != nil || r.Subscription == "" {
 			return nil
 		}
-		err := a.Kit.RemoveMember(ctx, gamePrefix(a.Kit.ID)+game, r.Handle)
-		if appkit.IsCode(err, "not_found") {
-			return nil
-		}
-		return err
+		a.srv.SeatEnded(ctx, r.User, r.Subscription)
+		return nil
 	}
 	return nil
 }

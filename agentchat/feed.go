@@ -11,14 +11,14 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // The live feed: a channel's new posts, sent to the browsers showing it as
-// server-sent events. Each instance polls the reader's copy of a channel
-// (archive.go) while someone on it is watching that channel, one poll for
-// all of them; each browser gets the posts rendered for its own person.
+// server-sent events. Each instance polls a channel's messages by their
+// place (seq: taken under the channel's row lock, so they commit in order
+// and a poll after the last one it saw never skips one) while someone on
+// it is watching that channel, one poll for all of them; each browser gets
+// the posts rendered for its own person.
 // The stream is authenticated by the session cookie, rechecks that the
 // person may still use the channel, and ends when they can't.
 
@@ -41,21 +41,25 @@ type feeds struct {
 
 // poller polls one channel for the browsers watching it.
 type poller struct {
-	subs map[chan appkit.Event]bool
+	subs map[chan Message]bool
 	last uint64
 }
 
-// watchFeed subscribes to a channel's posts (a new poller sends what it
-// first reads too: subscribers skip what they've sent); cancel stops it.
-func (a *App) watchFeed(c Channel) (<-chan appkit.Event, func()) {
-	ch := make(chan appkit.Event, 64)
+// watchFeed subscribes to a channel's posts from its latest now (the
+// caller reads what's before from history after this); cancel stops it.
+func (a *App) watchFeed(ctx context.Context, c Channel) (<-chan Message, func()) {
+	ch := make(chan Message, 64)
+	latest, err := a.Store.LastSeq(ctx, c.ID)
+	if err != nil {
+		slog.Warn("agentchat: reading a channel's place for its live feed", "err", err)
+	}
 	a.feeds.mu.Lock()
 	if a.feeds.byCh == nil {
 		a.feeds.byCh = map[string]*poller{}
 	}
 	p, ok := a.feeds.byCh[c.ID]
 	if !ok {
-		p = &poller{subs: map[chan appkit.Event]bool{}}
+		p = &poller{subs: map[chan Message]bool{}, last: latest}
 		a.feeds.byCh[c.ID] = p
 		go a.poll(c, p)
 	}
@@ -81,7 +85,10 @@ func (a *App) poll(c Channel, p *poller) {
 		}
 		a.feeds.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		events, err := a.history(ctx, c, feedBatch)
+		a.feeds.mu.Lock()
+		after := p.last
+		a.feeds.mu.Unlock()
+		events, err := a.Store.MessagesAfter(ctx, c.ID, after, feedBatch)
 		cancel()
 		if err != nil {
 			slog.Warn("agentchat: polling a channel for its live feed", "err", err)
@@ -139,11 +146,11 @@ func (a *App) live(w http.ResponseWriter, r *http.Request) {
 	}
 	// Subscribed first, then the history read: a post made meanwhile comes
 	// one way or the other (twice is fine: each is sent once, by its place).
-	sub, stop := a.watchFeed(c)
+	sub, stop := a.watchFeed(ctx, c)
 	defer stop()
 	// As many as the page shows: each post is rendered among them, as the
 	// page renders it (in its thread, and its thread's summary with it).
-	events, err := a.history(ctx, c, maxHistory)
+	events, err := a.Store.RecentMessages(ctx, c.ID, maxHistory)
 	if err != nil {
 		http.Error(w, "try again", http.StatusBadGateway)
 		return
@@ -162,7 +169,7 @@ func (a *App) live(w http.ResponseWriter, r *http.Request) {
 
 	// The posts the page would show now: the latest maxHistory.
 	window := events
-	keep := func(e appkit.Event) {
+	keep := func(e Message) {
 		for _, w := range window {
 			if w.Seq == e.Seq {
 				return
@@ -173,7 +180,7 @@ func (a *App) live(w http.ResponseWriter, r *http.Request) {
 			window = window[len(window)-maxHistory:]
 		}
 	}
-	send := func(e appkit.Event) error {
+	send := func(e Message) error {
 		keep(e)
 		if e.Seq <= after {
 			return nil
@@ -249,7 +256,7 @@ func (a *App) live(w http.ResponseWriter, r *http.Request) {
 // files it), its HTML, and for a reply its thread's first message as the
 // page now renders it, with the thread's summary (how many replies, and
 // whose).
-func (a *App) liveEvent(ctx context.Context, r roster, window []appkit.Event, e appkit.Event) ([]byte, error) {
+func (a *App) liveEvent(ctx context.Context, r roster, window []Message, e Message) ([]byte, error) {
 	top, replies, err := a.messageViews(ctx, r, window)
 	if err != nil {
 		return nil, err

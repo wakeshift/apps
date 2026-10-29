@@ -79,14 +79,14 @@ func (a *Anon) Players() []ArchivePlayer {
 
 // Scrub is text with every handle of a player given a role replaced by its
 // role, so text a player wrote can't name another (or itself). A handle
-// matches whatever its case and whether its words are joined by hyphens or
-// spaces ("dashing-pelican-2", "Dashing Pelican 2"), as a whole word.
+// matches whatever its case and whether its words are joined by hyphens,
+// underscores or spaces ("dashing-pelican-2", "Dashing Pelican 2"), as a
+// whole word, the longest handle (in bytes) first. Agent Hold'em's
+// TypeScript scrubber does the same (testdata/scrub.json).
 func (a *Anon) Scrub(text string) string {
 	handles := make([]string, 0, len(a.roles))
 	for h := range a.roles {
-		if strings.TrimSpace(h) != "" {
-			handles = append(handles, h)
-		}
+		handles = append(handles, h)
 	}
 	// Longest first, so "dashing-pelican-2" goes before "dashing-pelican".
 	slices.SortFunc(handles, func(x, y string) int {
@@ -96,30 +96,50 @@ func (a *Anon) Scrub(text string) string {
 		return strings.Compare(x, y)
 	})
 	for _, h := range handles {
-		parts := strings.FieldsFunc(h, func(r rune) bool { return r == '-' || r == ' ' || r == '_' })
+		parts := strings.FieldsFunc(h, separator)
+		if len(parts) == 0 {
+			continue // all separators: it would match everywhere
+		}
 		for i, p := range parts {
 			parts[i] = regexp.QuoteMeta(p)
 		}
-		re := regexp.MustCompile(`(?i)` + strings.Join(parts, `[-_\s]+`))
+		re := regexp.MustCompile(`(?i)` + strings.Join(parts, separators))
 		text = replaceWords(text, re, a.roles[h])
 	}
 	return text
 }
 
+// separators is what may join a handle's words in text: hyphens,
+// underscores and spaces (any Unicode space, a no-break space too).
+const separators = `[-_\t\n\f\r\p{Zs}]+`
+
+func separator(r rune) bool {
+	return r == '-' || r == '_' || r == '\t' || r == '\n' || r == '\f' || r == '\r' || unicode.Is(unicode.Zs, r)
+}
+
 // replaceWords is text with every match of re that stands as a whole word
-// (no letter or digit just before or after it) replaced by with.
+// (no letter or digit just before or after it) replaced by with. A match
+// that doesn't stand alone is tried again from its next character, so
+// "xecho-echo-echo" still loses "echo-echo" at its end.
 func replaceWords(text string, re *regexp.Regexp, with string) string {
 	var b strings.Builder
-	last := 0
-	for _, m := range re.FindAllStringIndex(text, -1) {
-		before, _ := utf8.DecodeLastRuneInString(text[:m[0]])
-		after, _ := utf8.DecodeRuneInString(text[m[1]:])
+	last, from := 0, 0
+	for from <= len(text) {
+		m := re.FindStringIndex(text[from:])
+		if m == nil {
+			break
+		}
+		start, end := from+m[0], from+m[1]
+		before, _ := utf8.DecodeLastRuneInString(text[:start])
+		after, _ := utf8.DecodeRuneInString(text[end:])
 		if wordRune(before) || wordRune(after) {
+			_, size := utf8.DecodeRuneInString(text[start:])
+			from = start + max(size, 1)
 			continue
 		}
-		b.WriteString(text[last:m[0]])
+		b.WriteString(text[last:start])
 		b.WriteString(with)
-		last = m[1]
+		last, from = end, max(end, start+1)
 	}
 	b.WriteString(text[last:])
 	return b.String()

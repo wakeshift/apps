@@ -38,9 +38,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/analytics"
 	"github.com/wakeshift/apps/slackline"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 func main() {
@@ -67,7 +67,7 @@ func run() error {
 	if core == "" || public == "" || os.Getenv("SLACKLINE_DATABASE_URL") == "" || len(secret) < 32 || len(tokenKeys) == 0 || slack[0] == "" || slack[1] == "" || slack[2] == "" {
 		return errors.New("WAKESHIFT_URL, SLACKLINE_URL, SLACKLINE_KEY, SLACKLINE_DATABASE_URL, SLACKLINE_SECRET (32+ bytes), SLACKLINE_TOKEN_KEYS and the three SLACKLINE_SLACK_ variables are required")
 	}
-	kit, err := appkit.Load("slackline", os.Getenv("SLACKLINE_KEY"), core, "")
+	kit, err := agentkit.Load("slackline", os.Getenv("SLACKLINE_KEY"), core, "")
 	if err != nil {
 		return errors.Join(errors.New("SLACKLINE_KEY isn't a key"), err)
 	}

@@ -129,3 +129,18 @@ func TestDeck(t *testing.T) {
 		}
 	}
 }
+
+// Every role has help that says how it wins, and none uses the old names.
+func TestHelpSaysHowEachRoleWins(t *testing.T) {
+	for _, role := range []string{vampire, thrall, lamplighter, changeling, gravedigger, sleepwalker, watchman, martyr, avenger, townsperson} {
+		h := help[role]
+		if !strings.Contains(h, "win") {
+			t.Errorf("%s: no win condition: %q", role, h)
+		}
+		for _, old := range []string{"wolf", "seer", "minion", "tanner", "village", "robber", "drunk", "insomniac", "hunter"} {
+			if strings.Contains(strings.ToLower(h), old) {
+				t.Errorf("%s: says %q: %q", role, old, h)
+			}
+		}
+	}
+}

@@ -22,6 +22,7 @@ function room(db: Db, start = Date.parse("2026-10-21T12:00:00Z")) {
       wakes.push({ ...to, ...e });
     },
     result: async () => {},
+    handResult: async () => {},
     removed: async () => {},
     endSubscription: async () => {},
   };

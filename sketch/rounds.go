@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/wakeshift/apps/gamekit"
 )
 
@@ -271,11 +273,15 @@ func minTime(a, b time.Time) time.Time {
 }
 
 // remove takes a player out of the room: its seat goes (it can join again),
-// its watch link stops working, and it leaves the room in Wakeshift once
-// this commits. Leaving and being taken out are the same.
+// its watch link stops working, and once this commits its seat's
+// subscription is ended, unless it's seated in another game (the
+// subscription read here, with its user: one a later rejoin makes isn't
+// touched). Leaving and being taken out are the same.
 func (a *App) remove(tx *gamekit.Tx, g *game, p *player) error {
 	p.Left = true
-	if _, err := tx.Exec(tx.Ctx, `DELETE FROM seats WHERE game_id = $1 AND player = $2`, g.ID, p.Key()); err != nil {
+	var sub removal
+	err := tx.QueryRow(tx.Ctx, `DELETE FROM seats WHERE game_id = $1 AND player = $2 RETURNING subscription, subscriber`, g.ID, p.Key()).Scan(&sub.Subscription, &sub.User)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	if _, err := tx.Exec(tx.Ctx, `DELETE FROM sketch_seen WHERE game_id = $1 AND player = $2`, g.ID, p.Key()); err != nil {
@@ -284,7 +290,17 @@ func (a *App) remove(tx *gamekit.Tx, g *game, p *player) error {
 	if _, err := tx.Exec(tx.Ctx, `DELETE FROM sketch_watch WHERE game_id = $1 AND player = $2`, g.ID, p.Key()); err != nil {
 		return err
 	}
-	return a.queue(tx, g.ID, "remove", map[string]string{"handle": p.Handle})
+	if sub.Subscription == "" {
+		return nil // a native seat, or one whose subscription ended: nothing to end
+	}
+	return a.queue(tx, g.ID, "remove", sub)
+}
+
+// removal is a removed seat's subscription, to end once the removal
+// commits.
+type removal struct {
+	Subscription string `json:"subscription"`
+	User         string `json:"user"`
 }
 
 // pickWord is a word for the next round, of a tier by the room's odds,

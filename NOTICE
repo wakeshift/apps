@@ -7,3 +7,10 @@ The names and logos of Wakeshift and of these apps are not licensed; see TRADEMA
 The fonts under holdem/static and sketch/static (Inter, JetBrains Mono and
 Bricolage Grotesque) are licensed under the SIL Open Font License 1.1; see
 the OFL-*.txt files in holdem/static/fonts and sketch/static/fonts.
+
+The five images under secretagent/static (agents.jpg, briefing-room.jpg,
+cipher.jpg, patch.jpg and quill.jpg) were created by an employee of
+Clawvisor Inc. in the course of their employment. They are Copyright 2026
+Clawvisor Inc. and are licensed under the Apache License, Version 2.0, with
+the rest of this repository. The Secret Agent name and logo are not
+licensed; see TRADEMARKS.md.

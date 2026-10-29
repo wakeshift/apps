@@ -1,8 +1,10 @@
-// Package gamekit is what Wakeshift's game apps (Secret Agent, Nightfall)
-// share: an MCP server with players' sign-in (oauth.go), the calling
-// conversation's session, the watch tool, rooms (a Wakeshift group per game,
-// with seats, the moderator's announcements, players' talk and a log), and
-// signed follow-along links to a page where a player's operator watches.
+// Package gamekit is what Wakeshift's game apps (Secret Agent, Nightfall,
+// Sketch Stadium) share: an MCP server with players' sign-in (oauth.go),
+// the calling conversation's session, rooms (seats, each with its
+// conversation's game.update subscription, the moderator's announcements,
+// players' talk and a log, sent to the seated players: events.go,
+// outbox.go), and signed follow-along links to a page where a player's
+// operator watches.
 //
 // A game keeps its own rules; the kit keeps its state, in the game's
 // database (store.go), so any number of instances serve the games and a
@@ -25,6 +27,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/agentpicker"
 	"github.com/wakeshift/apps/legal"
 	"github.com/wakeshift/wakeshift-go/appkit"
@@ -72,10 +75,8 @@ type Server struct {
 	Logo string
 	Now  func() time.Time
 
-	// The games: where they're kept, their rooms' group prefix
-	// ("app.nightfall.game."), and seats per game.
+	// The games: where they're kept, and seats per game.
 	Store    *Store
-	Prefix   string
 	MaxSeats int
 	// LobbyPhase, for a game that stays open to joiners while it plays
 	// (Sketch Stadium's rooms), is the phase it waits for players in: the
@@ -117,7 +118,7 @@ type Server struct {
 	OperatorNote bool
 	// PlayerName, if set, is the name a player (PlayerKey) asks its game's
 	// room for, the same in every game it plays: a lowercase handle
-	// ([a-z][a-z0-9-], at most 24 characters). Wakeshift adds -2, -3… if
+	// ([a-z][a-z0-9-], at most 24 characters). The kit adds -2, -3… if
 	// another player in the room has it. Nil: a random animal per game.
 	PlayerName func(key string) string
 
@@ -136,7 +137,8 @@ type Server struct {
 	registers, sessions, tokens             *appkit.RateLimiter
 	registerLimit, sessionLimit, tokenLimit int
 	eventsOnce                              sync.Once
-	updates                                 *appkit.DefinedEvent[UpdateArgs, appkit.GroupMessage] // events.go
+	updates                                 *appkit.DefinedEvent[UpdateArgs, Update] // events.go
+	attached                                *appkit.Attachment                       // Handler's, for AddTool
 }
 
 // ParseWorkspaces reads a comma-separated list of workspace IDs (UUIDs)
@@ -207,21 +209,28 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // Handler serves the MCP endpoint (/mcp) with the game's tools, players'
-// sign-in (oauth.go), /health, and the follow-along page.
+// sign-in (oauth.go), /health, and the follow-along page. addTools adds the
+// game's tools (with AddTool, AddWait): Wakeshift is attached to the server
+// first, after the server's own middleware, so the block a wrapped tool's
+// reply gets stays last.
 func (s *Server) Handler(addTools func(*mcp.Server)) http.Handler {
-	srv := mcp.NewServer(&mcp.Implementation{Name: s.Name, Title: s.Title, Version: "0.1.0"}, &mcp.ServerOptions{Instructions: s.Instructions})
-	addTools(srv)
-	// The operator note: its legacy name, and off unless OperatorNote (thinking.go).
+	srv := mcp.NewServer(&mcp.Implementation{Name: s.Name, Title: s.Title, Version: "0.2.0"}, &mcp.ServerOptions{Instructions: s.Instructions})
+	// The operator note: off unless OperatorNote (thinking.go).
 	srv.AddReceivingMiddleware(s.operatorNotes)
-	// Codex threads: a fresh connector beacon while one is watching and its
-	// connector isn't connected (appkit/codex.go).
-	srv.AddReceivingMiddleware(appkit.ConnectorBeacons(s.Agent, appkit.AllTools))
 	// Harnesses nothing wakes: a note on results while messages wait for
-	// the wait tool (AddWatch).
-	srv.AddReceivingMiddleware(appkit.InboxNotes(s.Agent, "", appkit.AllTools))
-	// game.update for clients that subscribe with MCP Events (events.go).
+	// the wait tool (AddWait).
+	srv.AddReceivingMiddleware(agentkit.InboxNotes(s.Agent, "", agentkit.AllTools))
+	// game.update, defined before Attach, which serves it to clients that
+	// subscribe with MCP Events (events.go). House agents subscribe that
+	// way too.
 	s.events()
-	attached := s.Kit.Attach(srv, appkit.AttachOptions{Identify: s.identify})
+	attached := s.Kit.Attach(srv, appkit.AttachOptions{Identify: s.identify, Events: appkit.EventsOptions{Native: s.houseCall}})
+	// join is what subscribes a conversation (game.update's Authorize
+	// refuses everyone but a client that subscribes itself, which uses MCP
+	// Events, not this tool), so subscribe_events isn't offered.
+	srv.RemoveTools("subscribe_events")
+	s.attached = attached
+	addTools(srv)
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", appkit.LogMCP(appkit.RequireBearer(s.verify, s.PublicURL()+"/.well-known/oauth-protected-resource")(attached.Wrap(h))))
@@ -245,6 +254,16 @@ func (s *Server) Handler(addTools func(*mcp.Server)) http.Handler {
 		s.Legal.Routes(mux)
 	}
 	return mux
+}
+
+// houseCall says whether a tool call comes from a house agent (house.go):
+// it subscribes to game.update with MCP Events itself.
+func (s *Server) houseCall(_ context.Context, req *mcp.CallToolRequest) bool {
+	if s.HouseSecret == "" || req == nil || req.Extra == nil || req.Extra.Header == nil {
+		return false
+	}
+	_, ok := s.verifyHouse(req.Extra.Header)
+	return ok
 }
 
 // PublicPages are the pages that count visits (apps/analytics): the landing
@@ -276,8 +295,7 @@ func (s *Server) Agent(ctx context.Context, req *mcp.CallToolRequest) (*appkit.A
 }
 
 // agentOf is the app acting for the signed-in player's agent, in the
-// player's workspace. It's also how a native subscription to game.update is made,
-// beside the seat's membership of its room.
+// player's workspace.
 func (s *Server) agentOf(ctx context.Context, ti *auth.TokenInfo) (*appkit.Agent, error) {
 	if ti == nil {
 		return nil, errors.New("not signed in")
@@ -294,96 +312,43 @@ func (s *Server) agentOf(ctx context.Context, ti *auth.TokenInfo) (*appkit.Agent
 	return ag, err
 }
 
-// Session is the calling conversation's session: a Codex thread's own
-// (Wakeshift's connector for Codex wakes it), else the handle passed (from
-// watch).
-func (s *Server) Session(ctx context.Context, ag *appkit.Agent, req *mcp.CallToolRequest, explicit string) (string, error) {
-	if req.Params == nil {
-		return explicit, nil
-	}
-	thread := appkit.CodexThread(req.Params.GetMeta())
-	if thread == "" {
-		return explicit, nil
-	}
-	sess, err := ag.ConversationSession(ctx, thread)
-	return sess.Handle, err
+// sessionIn is a tool's input with only Wakeshift's arguments.
+type sessionIn struct {
+	appkit.WakeArgs
 }
 
-// SeatSession is the session a join seats: the conversation's (Session).
-// A join that names none is refused, not seated as the agent as a whole,
-// which the game would wake in every later conversation too.
-func (s *Server) SeatSession(ctx context.Context, ag *appkit.Agent, req *mcp.CallToolRequest, explicit string) (string, error) {
-	session, err := s.Session(ctx, ag, req, explicit)
-	if err == nil && session == "" {
-		err = errors.New("pass session: the handle the `watch` tool gave this conversation (call `watch` first if you haven't)")
-	}
-	return session, err
-}
-
-type watchIn struct {
-	Session string `json:"session,omitempty" jsonschema:"Resume a session you already have (its handle), keeping its place"`
-}
-
-// AddWatch adds the watch and unwatch tools: the conversation's session and
-// a stream of what wakes it (for a Codex thread, a beacon for Wakeshift's
-// connector for Codex, which holds the stream), and stopping it; and
-// wait_for_messages, for harnesses nothing can wake.
-func (s *Server) AddWatch(srv *mcp.Server) {
-	appkit.WaitTool{Agent: s.Agent, App: s.Title,
+// AddWait adds wait_for_messages, for harnesses nothing can wake, and
+// unwatch, which stops this conversation being woken (join again to be
+// woken once more).
+func (s *Server) AddWait(srv *mcp.Server) {
+	agentkit.WaitTool{Agent: s.Agent, App: s.Title,
 		Reply: "Answer the moderator and players with " + s.Title + "'s tools."}.Add(srv)
-	AddTool(s, srv, &mcp.Tool{Name: "unwatch", Description: "Stop new messages waking this conversation (the opposite of watch). In Claude Code, pass session (from watch); a Codex thread needs nothing."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in watchIn) (*mcp.CallToolResult, map[string]any, error) {
-			ag, err := s.Agent(ctx, req)
-			if err != nil {
+	AddTool(s, srv, &mcp.Tool{Name: "unwatch", Description: "Stop the game waking this conversation. Pass session_key (from join); a Codex thread needs nothing. Join again to be woken once more."},
+		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+			if call.Agent == nil {
+				return nil, nil, errors.New("not signed in")
+			}
+			if _, err := s.events().Unsubscribe(ctx, call, UpdateArgs{}); err != nil && !appkit.IsCode(err, "unknown_session") {
 				return nil, nil, err
 			}
-			session, err := s.Session(ctx, ag, req, in.Session)
+			out := map[string]any{"note": agentkit.UnwatchNote}
+			if call.Native {
+				return nil, out, nil
+			}
+			session, err := s.conversation(ctx, call)
 			if err != nil {
 				return nil, nil, err
 			}
 			if session == "" {
-				return nil, nil, errors.New("pass session: the handle watch gave you")
+				return nil, nil, errors.New("pass session_key: the one join gave you")
 			}
-			if err := ag.Unwatch(ctx, session); appkit.IsCode(err, "unknown_session") {
+			if err := agentkit.Unwatch(ctx, call.Agent, session); appkit.IsCode(err, "unknown_session") {
 				return nil, nil, fmt.Errorf("you have no session %s", session)
 			} else if err != nil {
 				return nil, nil, err
 			}
-			return nil, map[string]any{"session": session, "note": appkit.UnwatchNote}, nil
-		})
-	AddTool(s, srv, &mcp.Tool{Name: "watch", Description: "Start (or resume) your session and get a stream of what wakes you in " + s.Title + ": " +
-		"the moderator's announcements and the other players' messages. In Claude Code, run the result's monitor command with the Monitor tool (persistent); other clients can read url as a WebSocket. " +
-		`If a {"type":"hub.rotate","url":…} line arrives, watch that URL from then on (with the monitor command, run curl -sN on it again).`},
-		func(ctx context.Context, req *mcp.CallToolRequest, in watchIn) (*mcp.CallToolResult, map[string]any, error) {
-			ag, err := s.Agent(ctx, req)
-			if err != nil {
-				return nil, nil, err
-			}
-			if thread := codexThreadOf(req); thread != "" {
-				sess, err := ag.ConversationSession(ctx, thread)
-				if err != nil {
-					return nil, nil, err
-				}
-				w, err := ag.WatchFor(ctx, sess.Handle, req.Params.Name)
-				if err != nil {
-					return nil, nil, err
-				}
-				install := ""
-				if sess.Connector != nil && sess.Connector.Install != nil {
-					install = sess.Connector.Install.Command
-				}
-				return &mcp.CallToolResult{Meta: appkit.ConnectorMeta(w.Beacon)},
-					map[string]any{"session": sess.Handle, "note": appkit.CodexWatchNote(sess.Handle, install) + " Then call the `join` tool. When the moderator or a player messages you, answer with " + s.Title + "'s tools, and say here in one line what you did."}, nil
-			}
-			link, err := ag.SessionLink(ctx, appkit.LinkRequest{Session: in.Session})
-			if appkit.IsCode(err, "unknown_session") {
-				return nil, nil, fmt.Errorf("you have no session %s; call the `watch` tool without session to start one", in.Session)
-			}
-			if err != nil {
-				return nil, nil, err
-			}
-			return nil, map[string]any{"url": link.URL, "monitor": "curl -sN '" + link.LinesURL() + "'", "expires_at": link.ExpiresAt.Format(time.RFC3339), "session": link.Session,
-				"note": "You're " + link.Session + ": pass session=" + link.Session + " to every " + s.Title + " tool, so this conversation is your player."}, nil
+			out["session_key"] = session
+			return nil, out, nil
 		})
 }
 

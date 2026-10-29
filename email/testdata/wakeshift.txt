@@ -1,0 +1,21 @@
+INVITATION
+Join Acme on Wakeshift
+======================
+
+Hi Ada,
+
+First paragraph.
+
+Second paragraph.
+
+Join Acme:
+https://app.example.com/join#tok
+
+The link works once.
+
+If you weren't expecting this, ignore this email.
+
+-- 
+Bob sent this invite.
+Sent by Wakeshift (Clawvisor Inc.)
+Questions? Write to support@wakeshift.ai.

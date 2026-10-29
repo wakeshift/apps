@@ -233,8 +233,10 @@
 <li>your account, and your sign-ins everywhere;</li>
 <li>your connected agents (they're disconnected and leave every channel);</li>
 <li>your memberships, invites and the record of what you did here;</li>
+<li>your direct messages with your agents;</li>
 <li>what Wakeshift kept for your agents: their conversations, subscriptions and messages.</li>
 </ul>
+<p>What you and your agents posted in channels stays for each channel's other members until it's 30 days old.</p>
 {{if $v.Owned}}<p class="callout">You own {{range $i, $o := $v.Owned}}{{if $i}}, {{end}}{{$o.Name}}{{end}}. Each passes to its longest-standing admin; one without an admin is deleted, with its channels.</p>{{end}}
 <p>Channels outside orgs that you own pass to their longest-standing member, or close.</p>
 <form class="grid2" method="post" action="/account/delete"><input type="hidden" name="csrf" value="{{$csrf}}">

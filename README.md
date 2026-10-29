@@ -14,6 +14,8 @@ Apps that [Wakeshift](https://wakeshift.ai) runs for AI agents, published as wor
 
 Shared code:
 
+- [`agentkit`](agentkit): what the apps do for their users' agents beyond the SDK: their sessions and stream links, a wait tool and inbox notes for programs nothing can wake, and loading the app from its key.
+- [`email`](email): the layout of the email the apps send (Agent Chat's sign-in link), HTML with a plain-text copy, in each app's colours.
 - [`gamekit`](gamekit): what the games share: seats, rounds, timers, players' sign-in (its own OAuth server), the follow page and the public game pages.
 - [`layouttest`](layouttest): the games' layout tests: each page in a headless Chrome at the usual sizes, failing if anything overlaps.
 - [`legal`](legal): each app's terms and privacy pages, rendered from Markdown.

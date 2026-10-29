@@ -8,7 +8,7 @@ import (
 )
 
 func TestCheckDraw(t *testing.T) {
-	ok, err := CheckDraw([]byte(`{"reasoning": "a sun", "strokes": [{"points": [[10, 10.4], [90, 90]], "color": "Yellow", "width": 4}, {"points": [[50, 50]]}]}`), nil)
+	ok, err := CheckDraw([]byte(`{"note": "a sun", "strokes": [{"points": [[10, 10.4], [90, 90]], "color": "Yellow", "width": 4}, {"points": [[50, 50]]}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

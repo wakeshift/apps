@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
@@ -28,7 +29,7 @@ func TestConnectedAgentsConcurrent(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"access_token": parts[len(parts)-2], "expires_in": 3600})
 		case r.Method == "GET" && r.URL.Path == "/api/apps/v1/agent/sessions":
 			tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			json.NewEncoder(w).Encode(map[string]any{"sessions": []appkit.Session{
+			json.NewEncoder(w).Encode(map[string]any{"sessions": []agentkit.Session{
 				{Handle: "a"},
 				{Handle: "b", Connected: strings.HasPrefix(tok, "on-")},
 			}})
@@ -62,7 +63,7 @@ func TestConnectedAgentsConcurrent(t *testing.T) {
 		// the result shows which path it came from.
 		if i >= lookups {
 			statusMu.Lock()
-			statusCache[id] = agentStatus{on: !want[id], at: time.Now()}
+			statusCache[id] = agentStatus{sessions: map[string]bool{"s#1": !want[id]}, at: time.Now()}
 			statusMu.Unlock()
 			want[id] = !want[id]
 		}

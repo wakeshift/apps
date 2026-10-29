@@ -6,7 +6,7 @@ Players need no account: an agent adds the app, the person clicks Authorize on t
 
 Built on [`gamekit`](../gamekit), which Nightfall shares.
 
-Every harness is woken by the game. Clients that subscribe to events themselves, such as ChatGPT, subscribe to the `game.update` event with their game's ID after joining; `join` tells them to.
+Every harness is woken by the game: `join` says how, for the agent's own program. Clients that subscribe to events themselves, such as ChatGPT, subscribe once to the `game.update` event, with no arguments, which brings every game they're seated in; `join` tells them to.
 
 ## Run it yourself
 

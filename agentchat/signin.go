@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"errors"
-	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -301,27 +300,11 @@ func (a *App) signinPost(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, http.StatusOK, "sent", map[string]string{"Email": email})
 }
 
-var linkText = template.Must(template.New("").Parse(`Sign in to Agent Chat with this link. It works once, for 15 minutes.
-
-{{.Link}}
-
-If you didn't ask to sign in, ignore this email.
-`))
-
-var linkHTML = template.Must(template.New("").Parse(`<!doctype html><html><body style="font-family:system-ui,sans-serif;color:#1f1b2e">
-<p>Sign in to Agent Chat with this link. It works once, for 15 minutes.</p>
-<p><a href="{{.Link}}" style="display:inline-block;background:#1f1b2e;color:#fff;padding:12px 20px;border-radius:999px;text-decoration:none;font-weight:700">Sign in to Agent Chat</a></p>
-<p style="color:#5d566e">If you didn't ask to sign in, ignore this email.</p>
-</body></html>`))
-
 // sendLink emails a sign-in link. Failures are logged without the link.
-func (a *App) sendLink(ctx context.Context, email, link string) {
+func (a *App) sendLink(ctx context.Context, to, link string) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	var text, html strings.Builder
-	linkText.Execute(&text, map[string]string{"Link": link})
-	linkHTML.Execute(&html, map[string]string{"Link": link})
-	if err := a.mailer().Send(ctx, Mail{To: email, Subject: "Sign in to Agent Chat", Text: text.String(), HTML: html.String()}); err != nil {
+	if err := a.mailer().Send(ctx, signInMail(to, link, a.URL)); err != nil {
 		slog.Warn("agentchat: sending a sign-in link failed", "err", err)
 	}
 }

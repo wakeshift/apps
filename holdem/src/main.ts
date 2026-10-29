@@ -16,7 +16,7 @@ import { Wakeshift } from "@wakeshift/sdk";
 import { analyticsFromEnv } from "./analytics.js";
 import { Casino, type Notifier } from "./casino.js";
 import { Db, type Log } from "./db.js";
-import { defineHoldemEvents, type HoldemEvents } from "./events.js";
+import { defineHoldemEvents, holdemNotifier, type HoldemEvents } from "./events.js";
 import { SignIn } from "./oauth.js";
 import { holdemHttp } from "./server.js";
 
@@ -44,22 +44,7 @@ await db.migrate();
 // The casino is made before its events (they read it), so the notifier
 // reaches them through this holder.
 const events: { current?: HoldemEvents } = {};
-const notify: Notifier = {
-  // A personal event: only the player's own sign-in, at their own table.
-  turn: async (to, event) => {
-    await events.current!.turn.emit({ table: to.table }, event.data, { to: to.guest, id: event.id });
-  },
-  result: async (table, event) => {
-    await events.current!.handResult.emit({ table }, event.data, { id: event.id });
-  },
-  // The last personal event at that table: the player timed out and was removed.
-  removed: async (to, event) => {
-    await events.current!.turn.emit({ table: to.table }, event.data, { to: to.guest, id: event.id });
-  },
-  endSubscription: async (guest, subscription) => {
-    await events.current!.turn.end(guest, subscription);
-  },
-};
+const notify: Notifier = holdemNotifier(() => events.current!);
 const casino = new Casino({ db, notify, log });
 events.current = defineHoldemEvents(wake, casino);
 const houseSecret = process.env.HOUSE_SECRET?.trim() || undefined;

@@ -15,9 +15,9 @@ import (
 // ── Deleting an account ──────────────────────────────────────────────────
 
 // DeleteAccount deletes a person and everything of theirs, at once: their
-// orgs pass to their longest-standing admin, or are deleted (their
-// channels' groups closed); channels outside orgs they own pass to their
-// longest-standing member, or are closed. A deletions row (the outbox
+// orgs pass to their longest-standing admin, or are deleted (with their
+// channels); channels outside orgs they own pass to their longest-standing
+// member, or are closed; their DMs, with their messages, are deleted. A deletions row (the outbox
 // that forgets their Wakeshift workspace) and an audit entry (with no
 // email) are written in the same transaction.
 func (s *Store) DeleteAccount(ctx context.Context, person string) error {
@@ -66,28 +66,24 @@ func (s *Store) DeleteAccount(ctx context.Context, person string) error {
 				return err
 			}
 			if tag.RowsAffected() == 0 {
-				var group string
-				if err := tx.QueryRow(ctx, `UPDATE channels SET closed_at = now() WHERE id = $1 RETURNING group_type`, ch).Scan(&group); err != nil {
+				// No one to pass it to: it closes, and every agent leaves it.
+				if _, err := tx.Exec(ctx, `UPDATE channels SET closed_at = now() WHERE id = $1`, ch); err != nil {
 					return err
 				}
-				if _, err := tx.Exec(ctx, `INSERT INTO membership_ends (group_type, workspace, reason) VALUES ($1, '', 'owner_deleted')`, group); err != nil {
+				if _, err := tx.Exec(ctx, `DELETE FROM channel_agents WHERE channel_id = $1`, ch); err != nil {
 					return err
 				}
 			}
 		}
-		// Their DMs close, with their groups, and go (open or closed: their
-		// agents go below).
-		if err := closeDMs(ctx, tx, "owner_deleted", "created_by = $1", person); err != nil {
-			return err
-		}
+		// Their DMs go at once, open or closed, with every message in them.
 		if _, err := tx.Exec(ctx, `DELETE FROM channels WHERE dm_agent IN (SELECT id FROM agents WHERE person_id = $1)`, person); err != nil {
 			return err
 		}
-		// Their Wakeshift workspace goes after (deletions), which ends their
-		// agents' memberships everywhere: no membership_ends needed.
-		if _, err := tx.Exec(ctx, `DELETE FROM membership_ends WHERE workspace = (SELECT workspace FROM people WHERE id = $1) AND workspace <> ''`, person); err != nil {
-			return err
-		}
+		// Their agents' memberships and watching conversations go with the
+		// agents (below); what they posted in channels stays for the
+		// channel's other members until it's 30 days old, no longer naming
+		// them as its person. Their Wakeshift workspace goes after
+		// (deletions), with their agents' subscriptions.
 		if _, err := tx.Exec(ctx, `INSERT INTO deletions (person_id) VALUES ($1) ON CONFLICT DO NOTHING`, person); err != nil {
 			return err
 		}
@@ -133,71 +129,31 @@ func (s *Store) DeletionFailed(ctx context.Context, person, stage string) error 
 	return err
 }
 
-// ── Outbox ───────────────────────────────────────────────────────────────
-
-// Ending is a membership_ends row.
-type Ending struct {
-	ID                               int64
-	GroupType, Workspace, Agent, Why string
-}
-
-// PendingEnds claims membership ends not done yet (for two minutes, so
-// another instance leaves them), fewest attempts first.
-func (s *Store) PendingEnds(ctx context.Context, limit int) ([]Ending, error) {
-	rows, err := s.Pool.Query(ctx, `UPDATE membership_ends SET claimed_until = now() + interval '2 minutes' WHERE id IN (
-		SELECT id FROM membership_ends WHERE claimed_until IS NULL OR claimed_until < now() ORDER BY attempts, id LIMIT $1 FOR UPDATE SKIP LOCKED)
-		RETURNING id, group_type, workspace, agent, reason`, limit)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Ending, error) {
-		var e Ending
-		err := r.Scan(&e.ID, &e.GroupType, &e.Workspace, &e.Agent, &e.Why)
-		return e, err
-	})
-}
-
-// EndDone removes a done membership end.
-func (s *Store) EndDone(ctx context.Context, id int64) error {
-	_, err := s.Pool.Exec(ctx, `DELETE FROM membership_ends WHERE id = $1`, id)
-	return err
-}
-
-// EndFailed counts a failed attempt.
-func (s *Store) EndFailed(ctx context.Context, id int64, stage string) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE membership_ends SET attempts = attempts + 1, last_error = $2, claimed_until = NULL WHERE id = $1`, id, stage)
-	return err
-}
-
 // ── Retention ────────────────────────────────────────────────────────────
 
-// Prune deletes what's past keeping.
+// Prune deletes what's past keeping: messages 30 days after posting, and
+// memberships of conversations that joined 30 days ago and don't watch (so
+// one that joined and never watched doesn't hold a handle forever).
 func (s *Store) Prune(ctx context.Context) error {
-	// One transaction: a never-ready channel's group is queued to close in
-	// the same one that deletes its row.
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		for _, q := range []string{
-			`DELETE FROM sign_in_links WHERE expires_at < now() - interval '1 day'`,
-			`DELETE FROM sign_in_requests WHERE at < now() - interval '1 day'`,
-			`DELETE FROM sessions WHERE expires_at < now()`,
-			`DELETE FROM oauth_codes WHERE expires_at < now() - interval '1 day'`,
-			`DELETE FROM refresh_tokens WHERE expires_at < now()`,
-			`DELETE FROM invites WHERE expires_at < now() - interval '30 days' OR revoked_at < now() - interval '30 days'`,
-			`DELETE FROM channels WHERE closed_at < now() - interval '30 days'`,
-			// A channel whose group may exist but that never became ready: its group
-			// closes (outbox), and its row goes. One statement, so only the rows it
-			// deletes are closed: a channel made ready meanwhile keeps its group,
-			// and two instances pruning at once close each group once.
-			`WITH gone AS (DELETE FROM channels WHERE NOT ready AND created_at < now() - interval '1 hour' RETURNING group_type)
-				INSERT INTO membership_ends (group_type, workspace, reason) SELECT group_type, '', 'never_ready' FROM gone`,
-			`DELETE FROM audit_log WHERE at < now() - interval '1 year'`,
-		} {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
+	for _, q := range []string{
+		`DELETE FROM sign_in_links WHERE expires_at < now() - interval '1 day'`,
+		`DELETE FROM sign_in_requests WHERE at < now() - interval '1 day'`,
+		`DELETE FROM sessions WHERE expires_at < now()`,
+		`DELETE FROM oauth_codes WHERE expires_at < now() - interval '1 day'`,
+		`DELETE FROM refresh_tokens WHERE expires_at < now()`,
+		`DELETE FROM invites WHERE expires_at < now() - interval '30 days' OR revoked_at < now() - interval '30 days'`,
+		`DELETE FROM channels WHERE closed_at < now() - interval '30 days'`,
+		`DELETE FROM messages WHERE created_at < now() - interval '30 days'`,
+		`DELETE FROM channel_agents ca WHERE ca.joined_at < now() - interval '30 days'
+			AND NOT EXISTS (SELECT 1 FROM watchers w WHERE w.agent_id = ca.agent_id AND w.session = ca.session)`,
+		`DELETE FROM subscription_ends WHERE attempts >= 50`,
+		`DELETE FROM audit_log WHERE at < now() - interval '1 year'`,
+	} {
+		if _, err := s.Pool.Exec(ctx, q); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // Log is a person's latest audit entries.

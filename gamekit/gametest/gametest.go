@@ -6,6 +6,7 @@ package gametest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -135,11 +136,18 @@ func Proxy(u string) http.Handler {
 	return httputil.NewSingleHostReverseProxy(target)
 }
 
-type bearer struct{ token string }
+// bearer sends the token, and any extra headers, with every request.
+type bearer struct {
+	token string
+	extra http.Header
+}
 
 func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set("Authorization", "Bearer "+b.token)
+	for k, v := range b.extra {
+		r.Header[k] = v
+	}
 	return http.DefaultTransport.RoundTrip(r)
 }
 
@@ -147,17 +155,34 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 type Agent struct {
 	t testing.TB
 	S *mcp.ClientSession
-	// session is the conversation's, from watch: like a well-behaved agent,
-	// it passes it to join (and watches it again).
+	// Harness is the program the agent says it runs in (join's harness
+	// argument, default claude-code): Wakeshift's block in join's result
+	// then carries a stream link, which Watch reads.
+	Harness string
 	mu      sync.Mutex
+	// session is the conversation's session_key, from join: like a
+	// well-behaved agent, it passes it to join again (and to the wait).
 	session string
+	link    string // the conversation's stream link, from join's result
+	// updates is what the conversation's stream delivers, once Watch asked
+	// for it and join gave the link (reading starts then).
+	updates  chan Update
+	watching bool
+	reading  bool
 }
 
 // Connect connects an agent to a game's MCP endpoint with a token.
 func Connect(t testing.TB, mcpURL, token string) *Agent {
 	t.Helper()
+	return ConnectWith(t, mcpURL, token, nil)
+}
+
+// ConnectWith is Connect, sending extra headers with every request (a
+// house agent's claim).
+func ConnectWith(t testing.TB, mcpURL, token string, extra http.Header) *Agent {
+	t.Helper()
 	s, err := mcp.NewClient(&mcp.Implementation{Name: "test-agent"}, nil).
-		Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: mcpURL, HTTPClient: &http.Client{Transport: bearer{token}}}, nil)
+		Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: mcpURL, HTTPClient: &http.Client{Transport: bearer{token, extra}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,51 +190,167 @@ func Connect(t testing.TB, mcpURL, token string) *Agent {
 	return &Agent{t: t, S: s}
 }
 
-// Call calls a tool: its result, or the error's text. join and watch get
-// the session the agent's watch started, if the call doesn't name one.
+// Session is the conversation's session_key, from its first join.
+func (a *Agent) Session() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.session
+}
+
+// Call calls a tool: its result, or the error's text. join gets the
+// session_key the agent's first join gave it, and its harness, if the call
+// names neither.
 func (a *Agent) Call(tool string, args map[string]any) (map[string]any, string, error) {
-	if _, named := args["session"]; !named && (tool == "join" || tool == "watch") {
+	if tool == "join" {
+		args = maps.Clone(args)
+		if args == nil {
+			args = map[string]any{}
+		}
 		a.mu.Lock()
 		session := a.session
 		a.mu.Unlock()
-		if session != "" {
-			args = maps.Clone(args)
-			if args == nil {
-				args = map[string]any{}
+		_, named := args["session_key"]
+		if _, old := args["session"]; !named && !old && session != "" {
+			args["session_key"] = session
+		}
+		if _, named := args["harness"]; !named {
+			h := a.Harness
+			if h == "" {
+				h = "claude-code"
 			}
-			args["session"] = session
+			args["harness"] = h
 		}
 	}
-	out, errText, err := a.RawCall(tool, args)
-	if s, _ := out["session"].(string); tool == "watch" && s != "" {
-		a.mu.Lock()
-		if a.session == "" {
-			a.session = s
-		}
-		a.mu.Unlock()
-	}
+	out, _, errText, err := a.call(tool, args)
 	return out, errText, err
 }
 
-// RawCall calls a tool as given.
-func (a *Agent) RawCall(tool string, args map[string]any) (map[string]any, string, error) {
+// RawText calls a tool as given: its result's text (or the error's), and
+// whether it failed.
+func (a *Agent) RawText(tool string, args map[string]any) (text string, failed bool) {
+	a.t.Helper()
+	_, text, errText, err := a.call(tool, args)
+	if err != nil {
+		a.t.Fatalf("%s: %v", tool, err)
+	}
+	if errText != "" {
+		return errText, true
+	}
+	return text, false
+}
+
+func (a *Agent) call(tool string, args map[string]any) (out map[string]any, text, errText string, err error) {
 	res, err := a.S.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: args})
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
+	}
+	var texts []string
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			texts = append(texts, tc.Text)
+		}
 	}
 	if res.IsError {
-		var text []string
-		for _, c := range res.Content {
-			if tc, ok := c.(*mcp.TextContent); ok {
-				text = append(text, tc.Text)
-			}
-		}
-		return nil, strings.Join(text, " "), nil
+		return nil, "", strings.Join(texts, " "), nil
 	}
 	b, _ := json.Marshal(res.StructuredContent)
-	var out map[string]any
 	json.Unmarshal(b, &out)
-	return out, "", nil
+	text = strings.Join(texts, "\n")
+	if tool == "join" {
+		// The conversation's session_key and stream link, from its first
+		// join.
+		a.mu.Lock()
+		if s, _ := out["session_key"].(string); s != "" && a.session == "" {
+			a.session = s
+		}
+		if l := streamURL(text); l != "" && a.link == "" {
+			a.link = l
+		}
+		start := a.watching && a.link != "" && !a.reading
+		a.reading = a.reading || start
+		a.mu.Unlock()
+		if start {
+			a.read()
+		}
+	}
+	return out, text, "", nil
+}
+
+// read reads the conversation's stream into updates until the test ends.
+func (a *Agent) read() {
+	ws, _, err := websocket.Dial(context.Background(), a.link, nil)
+	if err != nil {
+		a.t.Errorf("reading the stream: %v", err)
+		return
+	}
+	ws.SetReadLimit(1 << 20)
+	a.t.Cleanup(func() { ws.CloseNow() })
+	go func() {
+		for {
+			_, b, err := ws.Read(context.Background())
+			if err != nil {
+				return
+			}
+			var m struct {
+				Type  string
+				Event struct {
+					Subject string
+					Data    json.RawMessage
+					From    struct{ Kind string }
+				}
+			}
+			json.Unmarshal(b, &m)
+			// Wakeshift's own notices (the game ended the subscription) aren't
+			// the game's updates.
+			if m.Type != "event" || m.Event.From.Kind == "hub" {
+				continue
+			}
+			var u Update
+			if err := json.Unmarshal(m.Event.Data, &u.Update); err != nil {
+				a.t.Errorf("an update's payload: %v: %s", err, b)
+				return
+			}
+			u.Line = m.Event.Subject
+			a.updates <- u
+		}
+	}()
+}
+
+// linkRE finds the conversation's stream link in the block Wakeshift adds
+// to a join's result for Claude Code: its wait loop's u='…/v1/stream/wait?link=…',
+// or a monitor's curl -sN '…/v1/stream?link=…'.
+var linkRE = regexp.MustCompile(`(?:\bu=|curl -sN )'(https?://[^']+/v1/stream(?:/wait)?\?[^']+)'`)
+
+// streamURL is the WebSocket URL of the stream link in a tool result's
+// text, or "".
+func streamURL(text string) string {
+	m := linkRE.FindStringSubmatch(text)
+	if m == nil {
+		return ""
+	}
+	u, err := url.Parse(m[1])
+	if err != nil || u.Query().Get("link") == "" {
+		return ""
+	}
+	u.Path, u.RawQuery = "/v1/stream", url.Values{"link": {u.Query().Get("link")}}.Encode()
+	switch u.Scheme {
+	case "https":
+		u.Scheme = "wss"
+	case "http":
+		u.Scheme = "ws"
+	}
+	return u.String()
+}
+
+// Try calls a tool that may fail: its result, or the error's text. A
+// failed request fails the test.
+func (a *Agent) Try(tool string, args map[string]any) (map[string]any, string) {
+	a.t.Helper()
+	out, errText, err := a.Call(tool, args)
+	if err != nil {
+		a.t.Fatalf("%s: %v", tool, err)
+	}
+	return out, errText
 }
 
 // Must calls a tool that must succeed.
@@ -222,36 +363,99 @@ func (a *Agent) Must(tool string, args map[string]any) map[string]any {
 	return out
 }
 
-// Watch starts the agent's session and reads its stream: next is the
-// subject of what wakes it next.
+// Watch reads the stream of the conversation the agent joined with (join
+// first): next is the subject of what wakes it next.
 func (a *Agent) Watch() (session string, next func() (subject string)) {
 	a.t.Helper()
-	w := a.Must("watch", nil)
-	ws, _, err := websocket.Dial(context.Background(), w["url"].(string), nil)
-	if err != nil {
-		a.t.Fatal(err)
-	}
-	ws.SetReadLimit(1 << 20)
-	a.t.Cleanup(func() { ws.CloseNow() })
-	return w["session"].(string), func() string {
+	session, nextFrom := a.WatchFrom()
+	return session, func() string {
 		a.t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		for {
-			_, b, err := ws.Read(ctx)
-			if err != nil {
-				a.t.Fatal(err)
+		subject, _ := nextFrom()
+		return subject
+	}
+}
+
+// WatchFrom is Watch, with who each update is from: the player's handle,
+// or "app" for the game's moderator. It reads game.update's payload (its
+// subject and from); Text is what an agent reads first (Next's line).
+func (a *Agent) WatchFrom() (session string, next func() (subject, from string)) {
+	a.t.Helper()
+	nextUpdate := a.Updates()
+	return a.Session(), func() (string, string) {
+		a.t.Helper()
+		u := nextUpdate()
+		from := u.From
+		if from == "" {
+			from = "app"
+		}
+		return u.Subject, from
+	}
+}
+
+// Update is a game.update as a player's stream delivers it: its payload,
+// and the line an agent reads first (Line).
+type Update struct {
+	gamekit.Update
+	Line string
+}
+
+// Stream is the updates the conversation the agent joins with is woken
+// by, as Updates reads them (from its join, if it hasn't joined yet).
+func (a *Agent) Stream() <-chan Update {
+	a.mu.Lock()
+	if a.updates == nil {
+		a.updates = make(chan Update, 1000)
+	}
+	a.watching = true
+	start := a.link != "" && !a.reading
+	a.reading = a.reading || start
+	ch := a.updates
+	a.mu.Unlock()
+	if start {
+		a.read()
+	}
+	return ch
+}
+
+// Updates reads the stream of the conversation the agent joins with:
+// from now, if it has joined, else from its join (the stream opens as soon
+// as join gives its link, as a Claude Code conversation's Monitor would).
+// next is the next update that wakes it.
+func (a *Agent) Updates() (next func() Update) {
+	a.t.Helper()
+	a.Stream()
+	return func() Update {
+		a.t.Helper()
+		select {
+		case u := <-a.updates:
+			return u
+		case <-time.After(20 * time.Second):
+			a.mu.Lock()
+			link := a.link
+			a.mu.Unlock()
+			if link == "" {
+				a.t.Fatal("nothing heard: the agent never joined (as Claude Code), so it has no stream")
 			}
-			var m struct {
-				Type  string
-				Event struct{ Subject string }
-			}
-			json.Unmarshal(b, &m)
-			if m.Type == "event" {
-				return m.Event.Subject
-			}
+			a.t.Fatal("nothing heard for 20 seconds")
+			return Update{}
 		}
 	}
+}
+
+// GetJSON gets u, which must answer 200, as a JSON object.
+func GetJSON(t testing.TB, u string) map[string]any {
+	t.Helper()
+	resp, err := http.Get(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	json.NewDecoder(resp.Body).Decode(&out)
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET %s: %d %v", u, resp.StatusCode, out)
+	}
+	return out
 }
 
 // Put writes a game as it stands (its state, as JSON: a pointer to the
@@ -384,7 +588,9 @@ func Spectated(t testing.TB, base, id string) map[string]string {
 // Archive is the one archived game in store (game_archives), as JSON; it
 // fails the test unless there's exactly one. It checks that the record
 // names none of the game's seats: no handle, workspace, agent, session or
-// player key, in any case, and not the game's ID.
+// player key, in any case, and not the game's ID. Each is looked for as a
+// whole word, so a handle inside another word (yak in a codeword, kayak)
+// isn't a leak.
 func Archive(t testing.TB, store *gamekit.Store) string {
 	t.Helper()
 	ctx := context.Background()
@@ -405,11 +611,42 @@ func Archive(t testing.TB, store *gamekit.Store) string {
 	if len(forbidden) == 0 {
 		t.Fatal("no seats to check the archive against")
 	}
-	low := strings.ToLower(rec)
+	// Its text as decoded, so a JSON escape (\n) doesn't adjoin a word.
+	var decoded any
+	if err := json.Unmarshal([]byte(rec), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(jsonStrings(decoded, nil), "\n")
 	for _, f := range forbidden {
-		if f != "" && strings.Contains(low, strings.ToLower(f)) {
+		if f != "" && wholeWord(f).MatchString(text) {
 			t.Errorf("the archive has %q in it: %s", f, rec)
 		}
 	}
 	return rec
+}
+
+// wholeWord matches s, in any case, where no letter or digit adjoins it.
+func wholeWord(s string) *regexp.Regexp {
+	return regexp.MustCompile(`(?i)(^|[^\pL\pN])` + regexp.QuoteMeta(s) + `($|[^\pL\pN])`)
+}
+
+// jsonStrings appends every string in v, a decoded JSON value, keys too.
+func jsonStrings(v any, out []string) []string {
+	switch v := v.(type) {
+	case string:
+		out = append(out, v)
+	case []any:
+		for _, e := range v {
+			out = jsonStrings(e, out)
+		}
+	case map[string]any:
+		for k, e := range v {
+			out = jsonStrings(e, append(out, k))
+		}
+	default:
+		if v != nil {
+			out = append(out, fmt.Sprint(v))
+		}
+	}
+	return out
 }

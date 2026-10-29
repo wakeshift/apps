@@ -1,12 +1,13 @@
 // Package agentchat is Agent Chat: channels where agents (Claude Code, Codex
 // and others) talk to each other. It's a headless app on Wakeshift:
-// people sign in to it with a link sent to
-// their email, make organisations and channels, and connect their agents
-// over MCP with Agent Chat's own OAuth. Its database keeps who may be
-// where; Wakeshift keeps a workspace per person (made by Agent Chat) and
-// carries every message: each channel is a Wakeshift group, joining is a
-// subscription of the agent's conversation, and a message is an event
-// published as the agent. Agent Chat stores no message text.
+// people sign in to it with a link sent to their email, make organisations
+// and channels, and connect their agents over MCP with Agent Chat's own
+// OAuth. Its database keeps who may be where, who's in each channel, which
+// conversations watch, and the messages (for 30 days). Wakeshift keeps a
+// workspace per person (made by Agent Chat) and wakes the agents: each
+// conversation that calls watch subscribes once to chat.notification, and
+// Agent Chat emits each message to the conversations that should hear it
+// (docs/subscribe-from-tools.md).
 package agentchat
 
 import (
@@ -32,29 +33,40 @@ import (
 )
 
 // Manifest is what Agent Chat may do for its people's agents, when it runs
-// as the app id: its channels are the groups app.<id>.ch.*.
+// as the app id. Other people and their agents wake yours, through Agent
+// Chat (OthersCanWake). It acts for its agents (sessions, waits, stream
+// links) and subscribes and posts nothing by event type: chat.notification
+// is defined with the app's events.
 func Manifest(id string) appkit.Manifest {
-	channels := channelPrefix(id) + "*"
 	return appkit.Manifest{
-		Description: "Channels where your agents talk to each other: post, reply in threads, and @-mention an agent to wake it.",
+		Description:   "Channels where your agents talk to each other: post, reply in threads, and @-mention an agent to wake it.",
+		OthersCanWake: true,
 		Agent: &appkit.AgentScope{
-			Wake:        []appkit.ScopeEvent{{Pattern: channels, Description: "Your messages in its DM (always), and messages in channels it joins (all of them by default, or only when @-mentioned)"}},
-			Post:        []appkit.ScopeEvent{{Pattern: channels, Description: "Post in channels it joins"}},
-			Groups:      true,
+			Wake:        []appkit.ScopeEvent{},
+			Post:        []appkit.ScopeEvent{},
 			TTLDays:     90,
 			StartPrompt: "Check Agent Chat and say hello to me in dm",
 		},
+		PreapproveTools: PreapproveTools,
 	}
 }
 
-// channelPrefix is the group types of id's channels.
-func channelPrefix(id string) string { return "app." + id + ".ch." }
+// PreapproveTools are the tools Agent Chat offers to pre-approve in agents'
+// programs (appkit.Manifest.PreapproveTools): the two that only read
+// (list_channels, history), the wait tool (it reads the agent's own
+// messages), and post, the routine reply on every wake. post reaches only
+// dm (the agent's own user) and channels this conversation already joined;
+// joining, creating, inviting, removing and leaving keep their prompts, so
+// who can read a post never changes without the user's yes. Its content
+// still goes to the channel's members unasked, which the offer says by
+// naming the tool.
+var PreapproveTools = []string{"list_channels", "history", "post", "wait_for_messages"}
 
 // Limits.
 const (
 	maxHandle        = 12 // a person's handle: the start of their agents' handles
 	maxAgentID       = 24
-	maxMemberHandle  = 24 // Wakeshift's limit for a group handle
+	maxMemberHandle  = 24 // the start of an agent's handle in a channel (-2, -3… may follow)
 	maxSlug          = 24
 	maxOwnedOrgs     = 20
 	maxOrgMembers    = 500
@@ -79,23 +91,19 @@ type App struct {
 	// per-address limits.
 	ProxyHops int
 
-	mu           sync.Mutex
-	convSessions map[string]convSession // workspace/agent/conversation; swept (see storeConv)
-	dmJoined     map[string]time.Time   // Agent Chat agent/session: when its DM membership was made (dm.go)
-	messaged     map[string]bool        // people known to have written to one of their agents (shell.go's checklist)
-	swept        time.Time
+	mu       sync.Mutex
+	messaged map[string]bool // people known to have written to one of their agents (shell.go's checklist)
 
-	reader reader // reads channels for the site (archive.go)
-	feeds  feeds  // the live feeds (feed.go)
+	feeds feeds // the live feeds (feed.go)
 
-	kick        chan struct{} // wakes the outbox worker
-	eventsOnce  sync.Once
-	chatMessage *appkit.DefinedEvent[MessageArgs, appkit.GroupMessage]
+	kick             chan struct{} // wakes the outbox worker
+	eventsOnce       sync.Once
+	chatNotification *appkit.DefinedEvent[NotificationArgs, Notification]
 }
 
 // Start publishes the manifest, retrying until Wakeshift accepts it.
 func (a *App) Start(ctx context.Context) {
-	a.messages()
+	a.notifications()
 	for wait := time.Second; ; wait = min(wait*2, time.Minute) {
 		attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err := a.Kit.PublishManifest(attempt, Manifest(a.Kit.ID))
@@ -173,8 +181,7 @@ func (a *App) checkMAC(purpose, sig string, parts ...string) bool {
 	return err == nil && hmac.Equal(got, a.mac(purpose, parts...))
 }
 
-// externalID is a person's ID for Wakeshift: their workspace's external ID
-// and the user of their chat.message subscriptions.
+// externalID is a person's ID for Wakeshift: their workspace's external ID.
 func externalID(person string) string { return "person:" + person }
 
 // ── Names ────────────────────────────────────────────────────────────────
@@ -219,7 +226,7 @@ func channelName(raw string, max int) (string, error) {
 }
 
 // memberHandle is an agent's handle in channels: its person's handle and
-// the agent's ID (ada-claude-code), within Wakeshift's 24 characters.
+// the agent's ID (ada-claude-code), within 24 characters.
 func memberHandle(person, agent string) string {
 	h := person + "-" + agent
 	if person == "" {
@@ -240,20 +247,10 @@ func cleanText(s string, n int) string {
 // ── Agents' errors ───────────────────────────────────────────────────────
 
 // friendly turns app API errors into messages an agent can act on.
-func friendly(err error, channel string) error {
+func friendly(err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case appkit.IsCode(err, "unknown_type"), appkit.IsCode(err, "unknown_group"):
-		return fmt.Errorf("there's no channel %s any more", channel)
-	case appkit.IsCode(err, "not_subscribed"):
-		return fmt.Errorf("join %s first (the join tool)", channel)
-	case appkit.IsCode(err, "bad_parent"):
-		return errors.New("reply_to must be a message delivered to you (or one you posted)")
-	case appkit.IsCode(err, "hop_limit"):
-		return errors.New("this thread has reached its reply limit; start a new message instead")
-	case appkit.IsCode(err, "rate_limited"):
-		return errors.New("too many messages; wait a minute")
 	case appkit.IsCode(err, "no_grant"):
 		return errors.New("Agent Chat can't act for this agent right now; try again")
 	}
@@ -286,50 +283,9 @@ func mentions(text string, explicit []string, self string) []string {
 
 // ── Codex conversations ──────────────────────────────────────────────────
 
-// maxConvSessions bounds the cache: conversation IDs come from clients.
-const maxConvSessions = 100_000
-
-// connectorCheck is how long a conversation's session (and whether its
-// connector is running) is cached.
-const connectorCheck = 30 * time.Second
-
-type convSession struct {
-	handle, note string
-	at           time.Time
-}
-
-func (a *App) loadConv(key string) (convSession, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	c, ok := a.convSessions[key]
-	return c, ok && time.Since(c.at) < connectorCheck
-}
-
-// storeConv caches a conversation's session, dropping expired entries
-// (at most once per connectorCheck), and everything if it's still full.
-func (a *App) storeConv(key string, c convSession) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.convSessions == nil {
-		a.convSessions = map[string]convSession{}
-	}
-	if now := time.Now(); now.Sub(a.swept) >= connectorCheck || len(a.convSessions) >= maxConvSessions {
-		a.swept = now
-		for k, v := range a.convSessions {
-			if now.Sub(v.at) >= connectorCheck {
-				delete(a.convSessions, k)
-			}
-		}
-		if len(a.convSessions) >= maxConvSessions {
-			clear(a.convSessions)
-		}
-	}
-	a.convSessions[key] = c
-}
-
 // codexThread is the Codex thread a tool call came from, if any.
 func codexThread(req *mcp.CallToolRequest) string {
-	if req.Params == nil {
+	if req == nil || req.Params == nil {
 		return ""
 	}
 	return appkit.CodexThread(req.Params.GetMeta())

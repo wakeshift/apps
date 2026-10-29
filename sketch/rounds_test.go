@@ -68,7 +68,10 @@ func newFixture(t *testing.T, players int) *fixture {
 		t.Fatal(err)
 	}
 	for _, p := range g.Players {
-		if _, err := store.Pool.Exec(bg, `INSERT INTO seats (game_id, player, workspace, agent, session, name, handle, reserved_at, seated_at) VALUES ($1, $2, $3, $4, $5, $6, $6, now(), now())`,
+		// Each seat's conversation subscribed to game.update when it joined
+		// (its subscription is sub-<handle>, as Wakeshift made it).
+		if _, err := store.Pool.Exec(bg, `INSERT INTO seats (game_id, player, workspace, agent, session, name, handle, reserved_at, seated_at, subscription, subscriber)
+			VALUES ($1, $2, $3, $4, $5, $6, $6, now(), now(), 'sub-' || $6, $3 || '/' || $4)`,
 			f.id, p.Key(), p.Workspace, p.Agent, p.Session, p.Handle); err != nil {
 			t.Fatal(err)
 		}
@@ -365,10 +368,13 @@ func TestAwayPlayersAreRemoved(t *testing.T) {
 	if _, _, err := f.a.watcher(bg, secret); err != errNoWatch {
 		t.Fatalf("the removed player's watch link: %v", err)
 	}
+	// Its seat's subscription is ended once the removal commits: the
+	// removal carries it, and its user, as the seat had them.
 	var removes int
-	f.a.Store.Pool.QueryRow(bg, `SELECT count(*) FROM sketch_outbox WHERE game_id = $1 AND kind = 'remove' AND data->>'handle' = $2`, f.id, away.Handle).Scan(&removes)
+	f.a.Store.Pool.QueryRow(bg, `SELECT count(*) FROM sketch_outbox WHERE game_id = $1 AND kind = 'remove' AND data->>'subscription' = 'sub-' || $2
+		AND data->>'user' = $3`, f.id, away.Handle, away.Workspace+"/"+away.Agent).Scan(&removes)
 	if removes != 1 {
-		t.Fatalf("%d room removals queued", removes)
+		t.Fatalf("%d seat ends queued", removes)
 	}
 	if g.Drawer == away.Key() {
 		t.Fatal("the removed player draws")

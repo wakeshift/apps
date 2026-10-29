@@ -3,10 +3,8 @@ package agentchat
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"slices"
-	"sync"
 	"time"
 )
 
@@ -284,12 +282,9 @@ func (a *App) renderYou(w http.ResponseWriter, r *http.Request, p Person, tab st
 	a.render(w, r, http.StatusOK, "settings", v)
 }
 
-// agentChannels are the channels each of a person's agents is in, by its
-// ID. Wakeshift is asked about each agent for at most a few seconds: one
-// it doesn't answer for in time (or at all) is shown in no channels,
-// rather than the page failing for it.
+// agentChannels are the channels each of a person's agents is in (through
+// any of its conversations), by its ID.
 func (a *App) agentChannels(ctx context.Context, p Person) (map[string][]Channel, error) {
-	out := map[string][]Channel{}
 	agents, err := a.Store.AgentsOf(ctx, p.ID)
 	if err != nil {
 		return nil, err
@@ -298,38 +293,28 @@ func (a *App) agentChannels(ctx context.Context, p Person) (map[string][]Channel
 	if err != nil {
 		return nil, err
 	}
-	byGroup := map[string]Channel{}
+	byID := map[string]Channel{}
 	for _, c := range chans {
-		byGroup[c.GroupType] = c
+		byID[c.ID] = c
 	}
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	var mu sync.Mutex
-	var wg sync.WaitGroup
+	var ids []string
 	for _, ag := range agents {
-		wg.Go(func() {
-			w, err := a.Kit.ActAs(ctx, ag.Workspace, ag.Agent)
-			if err != nil {
-				slog.Warn("agentchat: acting for an agent to list its channels", "err", err)
-				return
-			}
-			groups, err := w.Groups(ctx)
-			if err != nil {
-				slog.Warn("agentchat: listing an agent's channels", "err", err)
-				return
-			}
-			var in []Channel
-			for _, g := range groups {
-				if c, ok := byGroup[g.Type]; ok {
-					in = append(in, c)
-				}
-			}
-			mu.Lock()
-			out[ag.ID] = in
-			mu.Unlock()
-		})
+		ids = append(ids, ag.ID)
 	}
-	wg.Wait()
+	mems, err := a.Store.AgentsMemberships(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]Channel{}
+	for agent, ms := range mems {
+		seen := map[string]bool{}
+		for _, m := range ms {
+			if c, ok := byID[m.ChannelID]; ok && !seen[c.ID] {
+				seen[c.ID] = true
+				out[agent] = append(out[agent], c)
+			}
+		}
+	}
 	return out, nil
 }
 

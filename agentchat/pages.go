@@ -228,8 +228,8 @@ func (a *App) createOrg(w http.ResponseWriter, r *http.Request, p Person) {
 		a.failed(w, r, err)
 		return
 	}
-	// Every org starts with #general (if its group can't be made now, the
-	// owner makes channels in the settings).
+	// Every org starts with #general (if it can't be made now, the owner
+	// makes channels in the settings).
 	if _, err := a.createChannel(r.Context(), p.ID, o.Slug, "general", cleanText("Everything "+name+": announcements, questions, hellos", maxTopic)); err != nil {
 		slog.Warn("agentchat: making a new org's general channel", "err", err)
 	}

@@ -17,7 +17,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Wakeshift } from "@wakeshift/sdk";
 import { Links } from "../src/links.js";
-import { tryServer } from "../src/server.js";
+import { tryServer, webhookEvent } from "../src/server.js";
 import { openDb, roundRobin, testDatabase } from "./testdb.js";
 
 const harness = process.env.WAKESHIFT_SDK_HARNESS;
@@ -382,7 +382,8 @@ test("try against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (
 
   // Unwatch (Codex): only Claude Code hears the next post.
   const unwatched = (await codex.callTool({ name: "unwatch", arguments: {}, _meta: codexMeta })) as CallToolResult;
-  assert.equal(textOf(unwatched), "Stopped watching your webhook.");
+  // What else the result carries (the thread's beacon, if any) comes after.
+  assert.match(textOf(unwatched), /^Stopped watching your webhook\./);
   assert.equal((await nextLive("unwatch")).client, "codex-mcp-client");
   r = await post(hookUrl, "after unwatch", { "Content-Type": "text/plain" });
   assert.equal(((await r.json()) as any).matched, 1);
@@ -538,7 +539,7 @@ test("an expired link's webhook is forgotten in Wakeshift, and only that one", {
   };
   const expiring = await watch();
   const kept = await watch();
-  const subs = async (hook: string) => (await wake.topicStatus(`ev/webhook.received/${hook}`)).subscriptions;
+  const subs = async (hook: string) => (await webhookEvent(wake).status({ hook })).subscriptions;
   assert.equal(await subs(expiring.hook), 1);
   assert.equal(await subs(kept.hook), 1);
   // Six days on, one of them is used; a day and a bit later the other has expired.

@@ -42,25 +42,6 @@ func (s *Store) LiveAgentFor(ctx context.Context, person string, clientHash []by
 	return scanAgent(s.Pool.QueryRow(ctx, `SELECT `+agentCols+` FROM agents WHERE person_id = $1 AND client_hash = $2 AND revoked_at IS NULL`, person, clientHash))
 }
 
-// AgentByWakeshift is the live agent acting as agent in workspace.
-func (s *Store) AgentByWakeshift(ctx context.Context, workspace, agent string) (Agent, error) {
-	return scanAgent(s.Pool.QueryRow(ctx, `SELECT `+agentCols+` FROM agents WHERE workspace = $1 AND agent = $2 AND revoked_at IS NULL`, workspace, agent))
-}
-
-// PeopleByWorkspace maps Wakeshift workspaces to their people.
-func (s *Store) PeopleByWorkspace(ctx context.Context, workspaces []string) (map[string]Person, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT `+personCols+` FROM people WHERE workspace = ANY($1) AND workspace <> ''`, workspaces)
-	if err != nil {
-		return nil, err
-	}
-	list, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (Person, error) { return scanPerson(r) })
-	out := map[string]Person{}
-	for _, p := range list {
-		out[p.Workspace] = p
-	}
-	return out, err
-}
-
 // AgentsOf are a person's connected agents, newest first.
 func (s *Store) AgentsOf(ctx context.Context, person string) ([]Agent, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT `+agentCols+` FROM agents WHERE person_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC`, person)
@@ -110,26 +91,26 @@ func (s *Store) ConnectAgent(ctx context.Context, p Person, clientHash []byte, c
 }
 
 // DisconnectAgent stops a person's agent: its tokens and codes end, its DM
-// closes, and it leaves every channel (outbox).
+// closes, it leaves every channel, and its conversations stop watching
+// (the outbox ends their subscriptions in Wakeshift, by ID).
 func (s *Store) DisconnectAgent(ctx context.Context, person, id string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		var ws, agent string
-		err := tx.QueryRow(ctx, `UPDATE agents SET revoked_at = now() WHERE id = $1 AND person_id = $2 AND revoked_at IS NULL RETURNING workspace, agent`, id, person).
-			Scan(&ws, &agent)
+		var held string
+		err := tx.QueryRow(ctx, `UPDATE agents SET revoked_at = now() WHERE id = $1 AND person_id = $2 AND revoked_at IS NULL RETURNING id`, id, person).Scan(&held)
 		if err != nil {
 			return notFound(err)
 		}
-		for _, q := range []string{`DELETE FROM oauth_codes WHERE agent_id = $1`, `DELETE FROM refresh_tokens WHERE agent_id = $1`} {
+		for _, q := range []string{`DELETE FROM oauth_codes WHERE agent_id = $1`, `DELETE FROM refresh_tokens WHERE agent_id = $1`,
+			`DELETE FROM channel_agents WHERE agent_id = $1`} {
 			if _, err := tx.Exec(ctx, q, id); err != nil {
 				return err
 			}
 		}
-		// Its DM closes (and its group with it).
-		if err := closeDMs(ctx, tx, "disconnected", "dm_agent = $1", id); err != nil {
+		if err := closeDMs(ctx, tx, "dm_agent = $1", id); err != nil {
 			return err
 		}
-		// group_type '': every group the agent is in.
-		if _, err := tx.Exec(ctx, `INSERT INTO membership_ends (group_type, workspace, agent, reason) VALUES ('', $1, $2, 'disconnected')`, ws, agent); err != nil {
+		if _, err := tx.Exec(ctx, `WITH gone AS (DELETE FROM watchers WHERE agent_id = $1 RETURNING subscriber, subscription)
+			INSERT INTO subscription_ends (subscriber, subscription) SELECT subscriber, subscription FROM gone WHERE subscription <> ''`, id); err != nil {
 			return err
 		}
 		return audit(ctx, tx, person, "", "agent.disconnected", map[string]any{"agent": id})
@@ -208,17 +189,16 @@ func (s *Store) RotateRefresh(ctx context.Context, token string, clientHash []by
 	return agent, err
 }
 
-// LiveAgents are the connected agents acting as the given Wakeshift agents
-// (keys workspace/agent), by that key.
-func (s *Store) LiveAgents(ctx context.Context, keys []string) (map[string]Agent, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT `+agentCols+` FROM agents WHERE workspace || '/' || agent = ANY($1) AND revoked_at IS NULL`, keys)
+// AgentsByIDs are the given agents (connected or not), by ID.
+func (s *Store) AgentsByIDs(ctx context.Context, ids []string) (map[string]Agent, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT `+agentCols+` FROM agents WHERE id = ANY($1)`, ids)
 	if err != nil {
 		return nil, err
 	}
 	list, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (Agent, error) { return scanAgent(r) })
 	out := map[string]Agent{}
 	for _, a := range list {
-		out[a.Workspace+"/"+a.Agent] = a
+		out[a.ID] = a
 	}
 	return out, err
 }

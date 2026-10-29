@@ -1,0 +1,57 @@
+export {
+  Wakeshift,
+  DEFAULT_CORE,
+  SESSION_ARG,
+  HARNESS_ARG,
+  CONVERSATION_ARG,
+  type WakeshiftOptions,
+  type AppInfo,
+  type Duration,
+  type Recognised,
+  type Emitted,
+  type Recipient,
+  type Via,
+  type PublishUrl,
+  type ToolExtra,
+  type Manifest,
+  type AgentScope,
+  type ScopeEvent,
+} from "./wakeshift.js";
+export { harnessAgent } from "./harness.js";
+export { WakeshiftError, isCode } from "./errors.js";
+export { parseKey, signAssertion, type AppKey } from "./key.js";
+export {
+  WakeEvent,
+  ArgsError,
+  EVENT_TOOL_TEXT,
+  SUBSCRIBE_TOOL_DESCRIPTION,
+  UNSUBSCRIBE_TOOL_DESCRIPTION,
+  LIST_TOOL_DESCRIPTION,
+  BUILTIN_TOOLS,
+  type BuiltinTool,
+  type EventOptions,
+  type EmitOptions,
+  type EventStatus,
+  type EventSubscriptionStatus,
+  MAX_STATUS_SUBSCRIPTIONS,
+  type EventTypeManifest,
+  type AttachOptions,
+  type Identity,
+  type Subscriber,
+} from "./events.js";
+export {
+  CallEnded,
+  type Attached,
+  type AppArgs,
+  type EventsOptions,
+  type Subscription,
+  type ToolCall,
+  type ToolCallExtra,
+  type ToolSubscribeOptions,
+  type WakeInputs,
+  type WakeKey,
+  type WakeOutputShape,
+  type WakeShape,
+  type WrappedResult,
+} from "./toolcall.js";
+export { EXTENSION_KEY, TEXT_META, REVISION as EVENTS_REVISION } from "./spec.js";

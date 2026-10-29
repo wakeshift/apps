@@ -23,16 +23,10 @@ import (
 // It's offered only with Server.OperatorNote (GAMES_OPERATOR_NOTE), and
 // described in neutral words: a tool argument described as the model's
 // private reasoning makes Opus's safeguards refuse every request that
-// carries the tool list (reasoning_extraction). The argument was called
-// reasoning before; a call that still sends that (an old cached schema)
-// has it taken as the note, though it's never advertised (operatorNotes).
+// carries the tool list (reasoning_extraction).
 
 // NoteArg is the operator note's argument.
 const NoteArg = "note"
-
-// legacyNoteArg is the operator note's old name, still taken but never
-// advertised. TODO(remove) once Wakeshift's house agents send note.
-const legacyNoteArg = "reasoning"
 
 // ReasoningMax is the longest note kept, in characters; longer is cut.
 // Each game's tools describe the argument in their own struct tags (Go
@@ -50,13 +44,12 @@ func OperatorNoteEnv() bool {
 	return v == "1" || v == "true"
 }
 
-// operatorNotes takes a call's legacy reasoning argument as its note, and
-// with OperatorNote off, leaves the note out of tools/list and drops it
-// from calls (ignored, not refused).
+// operatorNotes, with OperatorNote off, leaves the note out of tools/list
+// and drops it from calls (ignored, not refused).
 func (s *Server) operatorNotes(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-		if call, ok := req.(*mcp.CallToolRequest); ok && call.Params != nil {
-			call.Params.Arguments = NoteArgs(call.Params.Arguments, s.OperatorNote)
+		if call, ok := req.(*mcp.CallToolRequest); ok && call.Params != nil && !s.OperatorNote {
+			call.Params.Arguments = dropNote(call.Params.Arguments)
 		}
 		res, err := next(ctx, method, req)
 		if list, ok := res.(*mcp.ListToolsResult); ok && err == nil && list != nil && !s.OperatorNote {
@@ -66,26 +59,18 @@ func (s *Server) operatorNotes(next mcp.MethodHandler) mcp.MethodHandler {
 	}
 }
 
-// NoteArgs is a call's raw arguments with the legacy reasoning argument
-// taken as the note (on) or the note dropped (off). Anything that isn't a
-// JSON object is left as it is (the tool's own validation refuses it).
-func NoteArgs(raw json.RawMessage, on bool) json.RawMessage {
+// dropNote is a call's raw arguments without the note. Anything that
+// isn't a JSON object is left as it is (the tool's own validation refuses
+// it).
+func dropNote(raw json.RawMessage) json.RawMessage {
 	var args map[string]json.RawMessage
 	if len(raw) == 0 || json.Unmarshal(raw, &args) != nil {
 		return raw
 	}
-	legacy, hasLegacy := args[legacyNoteArg]
-	_, hasNote := args[NoteArg]
-	if !hasLegacy && (on || !hasNote) {
+	if _, has := args[NoteArg]; !has {
 		return raw
 	}
-	delete(args, legacyNoteArg)
-	switch {
-	case !on:
-		delete(args, NoteArg)
-	case !hasNote:
-		args[NoteArg] = legacy
-	}
+	delete(args, NoteArg)
 	out, err := json.Marshal(args)
 	if err != nil {
 		return raw

@@ -35,7 +35,7 @@ func TestStoreThroughput(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(st.Close)
-		instances = append(instances, &Server{Name: "load", Store: st, MaxSeats: 3, Prefix: "app.load.game.",
+		instances = append(instances, &Server{Name: "load", Store: st, MaxSeats: 3,
 			NewState: func() State { return &testGame{} },
 			NewGame: func(g State, now time.Time) {
 				g.(*testGame).Phase = "waiting"

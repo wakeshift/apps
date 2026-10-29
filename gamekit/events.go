@@ -3,43 +3,69 @@ package gamekit
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
-// Events: what a game offers clients that subscribe with MCP Events
-// themselves (ChatGPT, house agents). Every player joins its game's room in
-// Wakeshift, which wakes the conversation that joined. game.update is that
-// room's posts as an event (appkit.EventDef.Group): a client that speaks
-// MCP Events subscribes to it, and Wakeshift sends it, by webhook, what its
-// seat's membership of the room would have woken its conversation with.
-// The game sends nothing itself.
-//
-// The room is what gives a game its players' handles, their presence (Away)
-// and who may post as a player, across workspaces.
+// Events: game.update, one personal event for everything said in the games
+// a conversation plays (docs/subscribe-from-tools.md, "The games on one
+// update event"). The kit keeps who's seated (seats) and each seat's
+// conversation's subscription: join subscribes the conversation, with no
+// arguments, and each entry of a room's log is emitted to the game's other
+// seated players by their subscriptions' IDs (outbox.go). A client that
+// subscribes with MCP Events itself (ChatGPT, house agents) subscribes once,
+// with no arguments, and is reached by its native subscription.
 
-// UpdateArgs is a game.update subscription's arguments: each update carries
-// them too (its game).
-type UpdateArgs struct {
-	Game string `json:"game" jsonschema:"The game's ID, from join"`
+// UpdateArgs: game.update takes no arguments: one subscription brings
+// every game the conversation is seated in (each update says its game).
+type UpdateArgs struct{}
+
+// Update is one thing said in a game, for one recipient class (the players
+// it mentions, or the others).
+type Update struct {
+	ID        string          `json:"id" jsonschema:"The update's ID"`
+	Game      string          `json:"game" jsonschema:"The game's ID"`
+	From      string          `json:"from" jsonschema:"The player who said it, by handle; empty for the game's moderator"`
+	Subject   string          `json:"subject,omitempty" jsonschema:"A one-line summary"`
+	Text      string          `json:"text" jsonschema:"What was said, in full"`
+	Mentions  []string        `json:"mentions,omitempty" jsonschema:"The players it names, by handle"`
+	Mentioned bool            `json:"mentioned" jsonschema:"You are among those it names"`
+	Data      json.RawMessage `json:"data,omitempty"`
+	At        time.Time       `json:"at"`
 }
 
-// identify is a signed-in caller: the player (its session's ID, verify's
-// TokenInfo UserID, the same for every conversation of the agent: the
-// app's user, as Wakeshift knows it), and the app acting for its agent
-// (agentOf), for game.update's native subscriptions. Acting for an agent,
-// the SDK makes subscriptions as the agent's user (PlayerUser).
+// maxUpdateText is Wakeshift's limit on an occurrence's text.
+const maxUpdateText = 1000
+
+// updateText is what an agent reads first. A player's line is always
+// labelled as a player's, so it can't pass for the moderator's; only the
+// moderator's lines go unlabelled.
+func updateText(u Update, _ UpdateArgs) string {
+	text := strings.Join(strings.Fields(u.Text), " ")
+	if text == "" {
+		text = strings.Join(strings.Fields(u.Subject), " ")
+	}
+	if u.From != "" {
+		text = u.From + " (a player) said: " + text
+	}
+	return truncate(text, maxUpdateText)
+}
+
+// identify is a signed-in caller: the player's agent's user (PlayerUser:
+// the same for every conversation of the agent), and the app acting for
+// it (agentOf). A conversation's game.update subscription belongs to that
+// user, and so does a native client's.
 func (s *Server) identify(ctx context.Context, ti *auth.TokenInfo) (appkit.Identity, error) {
 	ag, err := s.agentOf(ctx, ti)
 	if err != nil {
 		return appkit.Identity{}, err
 	}
-	return appkit.Identity{User: ti.UserID, Agent: ag}, nil
+	return appkit.Identity{User: ag.User(), Agent: ag}, nil
 }
 
 // PlayerUser is who a seated player's subscriptions belong to: its agent's
@@ -48,16 +74,17 @@ func (s *Server) identify(ctx context.Context, ti *auth.TokenInfo) (appkit.Ident
 func PlayerUser(p Player) string { return p.Workspace + "/" + p.Agent }
 
 // events defines game.update (once per server): before the manifest is
-// published (Start) and before the endpoint serves events (Handler).
-func (s *Server) events() *appkit.DefinedEvent[UpdateArgs, appkit.GroupMessage] {
+// published (Start) and before Attach (Handler).
+func (s *Server) events() *appkit.DefinedEvent[UpdateArgs, Update] {
 	s.eventsOnce.Do(func() {
-		e, err := appkit.DefineEvent(s.Kit, "game.update", appkit.EventDef[UpdateArgs, appkit.GroupMessage]{
-			Title:       s.Title + " game updates",
-			Description: "What the moderator and the other players say in a " + s.Title + " game you're seated in. Subscribe to it after join, with the game's ID, to be woken by the game.",
-			Group: func(_ context.Context, _ appkit.Subscriber, a UpdateArgs) (string, error) {
-				return s.room(a.Game), nil
-			},
-			Authorize: s.authorizeUpdates,
+		e, err := appkit.DefineEvent(s.Kit, "game.update", appkit.EventDef[UpdateArgs, Update]{
+			Title: s.Title + " game updates",
+			Description: "What the moderator and the other players say in the " + s.Title + " games you're seated in. Joining a game subscribes you; " +
+				"a client that subscribes to events itself subscribes once, with no arguments. Players' lines are labelled as theirs: the moderator speaks for the game.",
+			Text:             updateText,
+			Personal:         true,
+			DeleteOnDelivery: true,
+			Authorize:        s.authorizeUpdates,
 		})
 		if err != nil {
 			panic(err) // a programming error: the definition is fixed
@@ -67,18 +94,18 @@ func (s *Server) events() *appkit.DefinedEvent[UpdateArgs, appkit.GroupMessage] 
 	return s.updates
 }
 
-// authorizeUpdates lets a client that speaks MCP Events subscribe to a
-// game it's seated in, and marks its seats native: they're present while
-// the subscription is live. Other harnesses are refused: joining the game
-// already wakes them (through its room).
-func (s *Server) authorizeUpdates(ctx context.Context, sub appkit.Subscriber, args UpdateArgs) bool {
-	if !sub.Native || sub.User == "" || args.Game == "" {
+// authorizeUpdates lets a client that speaks MCP Events subscribe, as its
+// own agent, if it has any open seat (and it marks every such seat native:
+// present while the subscription lives). Other harnesses are refused: join
+// subscribes their conversation.
+func (s *Server) authorizeUpdates(ctx context.Context, sub appkit.Subscriber, _ UpdateArgs) bool {
+	if !sub.Native || sub.User == "" {
 		return false
 	}
-	tag, err := s.Store.Pool.Exec(ctx, `UPDATE seats SET native = true, native_at = $3
-		WHERE game_id = $1 AND workspace || '/' || agent = $2 AND handle IS NOT NULL`, args.Game, sub.User, s.now())
+	tag, err := s.Store.Pool.Exec(ctx, `UPDATE seats s SET native = true, native_at = $2 FROM games g
+		WHERE g.id = s.game_id AND g.closed_at IS NULL AND s.workspace || '/' || s.agent = $1 AND s.handle IS NOT NULL`, sub.User, s.now())
 	if err != nil {
-		slog.Warn(s.Name+": noting a native subscriber", "game", args.Game, "err", err)
+		slog.Warn(s.Name+": noting a native subscriber", "err", err)
 		return false
 	}
 	return tag.RowsAffected() > 0
@@ -104,9 +131,11 @@ func (s *Server) nativePlayers(ctx context.Context, game string) (map[string][]s
 	return out, rows.Err()
 }
 
-// subscribedTo reports whether user has a live game.update subscription for
-// game: what reaches a native seat. On an error it reports true: the game
-// keeps waiting for the player, as it would for one it can't check.
+// subscribedTo reports whether user has a live native game.update
+// subscription, which reaches every game it's seated in, game among them.
+// What reaches a native seat.
+// On an error it reports true: the game keeps waiting for the player, as it
+// would for one it can't check.
 func (s *Server) subscribedTo(ctx context.Context, game, user string) bool {
 	subs, err := s.Kit.EventSubscriptions(ctx, user)
 	if err != nil {
@@ -114,33 +143,10 @@ func (s *Server) subscribedTo(ctx context.Context, game, user string) bool {
 		return true
 	}
 	for _, sub := range subs {
-		var args UpdateArgs
-		if sub.Event == "game.update" && json.Unmarshal(sub.Arguments, &args) == nil && args.Game == game {
-			return true
+		if sub.Event != "game.update" || sub.Destination != "webhook" {
+			continue
 		}
+		return true
 	}
 	return false
-}
-
-// Joined finishes a join's result: for a client that subscribes to events
-// itself (ChatGPT), it marks the seat native (it's away until it
-// subscribes to game.update, which then brings it what was said since it
-// joined) and adds to view, as "subscribe", which event to subscribe to. For every other
-// harness the seat is the room's (joining wakes them) and view is
-// unchanged. player is the seat's key (PlayerKey).
-func (s *Server) Joined(ctx context.Context, req *mcp.CallToolRequest, game, player string, view map[string]any) map[string]any {
-	// A house agent (house.go) subscribes with MCP Events too.
-	_, house := HouseOf(ctx)
-	native := appkit.SpeaksEvents(req) || house
-	// A seat rejoined from a harness its room wakes goes back to the room.
-	if _, err := s.Store.Pool.Exec(ctx, `UPDATE seats SET native = $3 WHERE game_id = $1 AND player = $2 AND native <> $3`, game, player, native); err != nil {
-		slog.Warn(s.Name+": marking a seat", "game", game, "err", err)
-	}
-	if !native {
-		return view
-	}
-	if view != nil {
-		view["subscribe"] = fmt.Sprintf("To be woken by this game, subscribe to the game.update event with game %q.", game)
-	}
-	return view
 }

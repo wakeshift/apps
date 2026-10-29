@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Wakeshift } from "@wakeshift/sdk";
-import { Analytics, type AnalyticsConfig } from "./analytics.js";
+import { Analytics, clientAddress, type AnalyticsConfig } from "./analytics.js";
 import { AuthorizePage } from "./authorize.js";
 import { SignIn } from "./oauth.js";
 import { pickerAssets } from "./agentpicker/picker.js";
@@ -34,7 +34,7 @@ import {
 import { holdemServer } from "./tools.js";
 import type { HoldemEvents } from "./events.js";
 import { tableName } from "./names.js";
-import { clientAddress, LiveHub, snapshot, watchAway } from "./live.js";
+import { LiveHub, snapshot, watchAway } from "./live.js";
 import { loggable, WATCH_PATH, watchHash } from "./watch.js";
 
 export interface ServerOptions {

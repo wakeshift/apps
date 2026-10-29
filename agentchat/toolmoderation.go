@@ -17,11 +17,11 @@ import (
 
 // addModerationTools: invites to channels outside orgs, and removing
 // members (by a channel's owner, or an org's owner and admins).
-func (a *App) addModerationTools(srv *mcp.Server) {
+func (a *App) addModerationTools(srv *mcp.Server, at *appkit.Attachment) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "invite", Description: "Get an invite code and link for a channel outside orgs that you own, for another person: their agent joins with the join tool (invite=…), or they open the link. " +
 		"It works for a week, for up to 25 people, so give it only to whom you mean to. Org invites are made on Agent Chat's site."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in inviteIn) (*mcp.CallToolResult, map[string]any, error) {
-			me, err := connected(req)
+		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in inviteIn) (*mcp.CallToolResult, map[string]any, error) {
+			me, err := connected(call.Request)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -44,11 +44,11 @@ func (a *App) addModerationTools(srv *mcp.Server) {
 			}
 			return nil, map[string]any{"channel": c.Ref(), "invite": inv.Code, "link": a.URL + "/join/" + inv.Code, "expires_at": inv.Expires.UTC().Format(time.RFC3339),
 				"note": "Give this to the person whose agent should join: their agent calls the join tool with invite=" + inv.Code + ", or they open the link."}, nil
-		})
+		}))
 
 	mcp.AddTool(srv, &mcp.Tool{Name: "remove_member", Description: "Remove a member's person, with all their agents, from a channel you manage (a channel outside orgs you own, or a channel of an org you manage). From an org channel they're kept out of it (its admins can let them back in on Agent Chat's site); from a channel outside orgs, only with ban."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in removeIn) (*mcp.CallToolResult, map[string]any, error) {
-			me, err := connected(req)
+		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in removeIn) (*mcp.CallToolResult, map[string]any, error) {
+			me, err := connected(call.Request)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -59,20 +59,24 @@ func (a *App) addModerationTools(srv *mcp.Server) {
 			if !c.Manages() {
 				return nil, nil, fmt.Errorf("you don't manage %s", c.Ref())
 			}
-			g, err := a.Kit.Group(ctx, c.GroupType)
-			if err != nil {
-				return nil, nil, friendly(err, c.Ref())
-			}
-			handle := strings.TrimPrefix(strings.TrimSpace(in.Member), "@")
-			i := slices.IndexFunc(g.Members, func(m appkit.GroupMember) bool { return m.Handle == handle })
-			if i < 0 {
-				return nil, nil, fmt.Errorf("no member %s in %s", handle, c.Ref())
-			}
-			people, err := a.Store.PeopleByWorkspace(ctx, []string{g.Members[i].Workspace})
+			members, err := a.Store.ChannelMemberships(ctx, c.ID)
 			if err != nil {
 				return nil, nil, err
 			}
-			p, ok := people[g.Members[i].Workspace]
+			handle := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(in.Member), "@"))
+			i := slices.IndexFunc(members, func(m Membership) bool { return m.Handle == handle })
+			if i < 0 {
+				return nil, nil, fmt.Errorf("no member %s in %s", handle, c.Ref())
+			}
+			agents, err := a.Store.AgentsByIDs(ctx, []string{members[i].AgentID})
+			if err != nil {
+				return nil, nil, err
+			}
+			people, err := a.Store.PeopleByID(ctx, []string{agents[members[i].AgentID].PersonID})
+			if err != nil {
+				return nil, nil, err
+			}
+			p, ok := people[agents[members[i].AgentID].PersonID]
 			if !ok {
 				return nil, nil, fmt.Errorf("no member %s in %s", handle, c.Ref())
 			}
@@ -83,6 +87,6 @@ func (a *App) addModerationTools(srv *mcp.Server) {
 				return nil, nil, err
 			}
 			return nil, map[string]any{"channel": c.Ref(), "removed": p.Name, "banned": in.Ban}, nil
-		})
+		}))
 
 }

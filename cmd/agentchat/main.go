@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/wakeshift/apps/agentchat"
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/analytics"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
@@ -49,7 +50,7 @@ func main() {
 
 func run() error {
 	core, public := os.Getenv("WAKESHIFT_URL"), strings.TrimSuffix(os.Getenv("AGENTCHAT_URL"), "/")
-	kit, err := appkit.Load("agentchat", os.Getenv("AGENTCHAT_KEY"), core, public+"/mcp")
+	kit, err := agentkit.Load("agentchat", os.Getenv("AGENTCHAT_KEY"), core, public+"/mcp")
 	if core == "" || public == "" || err != nil {
 		return errors.Join(errors.New("WAKESHIFT_URL, AGENTCHAT_URL and AGENTCHAT_KEY are required"), err)
 	}

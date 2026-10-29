@@ -174,18 +174,12 @@ func (s *Store) SetRole(ctx context.Context, by, org, person, role string) error
 	})
 }
 
-// endChannelsFor writes membership_ends for a person's agents in the
-// given open channels.
-func endChannelsFor(ctx context.Context, tx pgx.Tx, person, reason string, channelQuery string, args ...any) error {
-	var ws string
-	if err := tx.QueryRow(ctx, `SELECT workspace FROM people WHERE id = $1`, person).Scan(&ws); err != nil {
-		return notFound(err)
-	}
-	if ws == "" {
-		return nil // never connected an agent: in no group
-	}
-	_, err := tx.Exec(ctx, `INSERT INTO membership_ends (group_type, workspace, reason) SELECT group_type, $1, $2 FROM channels WHERE closed_at IS NULL AND id IN (`+
-		channelQuery+`)`, append([]any{ws, reason}, args...)...)
+// endChannelsFor takes a person's agents out of the open channels a query
+// names (channelQuery, selecting channel IDs, with $2 its first argument),
+// in the transaction that ends the person's access.
+func endChannelsFor(ctx context.Context, tx pgx.Tx, person, channelQuery string, args ...any) error {
+	_, err := tx.Exec(ctx, `DELETE FROM channel_agents WHERE agent_id IN (SELECT id FROM agents WHERE person_id = $1) AND channel_id IN (`+
+		channelQuery+`)`, append([]any{person}, args...)...)
 	return err
 }
 
@@ -223,11 +217,7 @@ func (s *Store) LeaveOrg(ctx context.Context, by, org, person string, ban bool) 
 				return err
 			}
 		}
-		reason := "left"
-		if by != person {
-			reason = "removed"
-		}
-		if err := endChannelsFor(ctx, tx, person, reason, `SELECT id FROM channels WHERE org_id = $3`, org); err != nil {
+		if err := endChannelsFor(ctx, tx, person, `SELECT id FROM channels WHERE org_id = $2`, org); err != nil {
 			return err
 		}
 		action := "org.left"
@@ -301,8 +291,8 @@ func (s *Store) OrgChannelBans(ctx context.Context, org string) ([]ChannelBan, e
 	})
 }
 
-// DeleteOrg closes an org: its channels' groups close (outbox), and its
-// rows go.
+// DeleteOrg deletes an org: its channels, their memberships and messages
+// go with its rows.
 func (s *Store) DeleteOrg(ctx context.Context, by, org string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := authorize(ctx, tx, by, org, "", ownerOnly); err != nil {
@@ -313,10 +303,7 @@ func (s *Store) DeleteOrg(ctx context.Context, by, org string) error {
 }
 
 func deleteOrg(ctx context.Context, tx pgx.Tx, by, org string) error {
-	if _, err := tx.Exec(ctx, `INSERT INTO membership_ends (group_type, workspace, reason) SELECT group_type, '', 'org_deleted' FROM channels
-		WHERE org_id = $1 AND closed_at IS NULL`, org); err != nil {
-		return err
-	}
+	// Its channels' rows cascade: their memberships and messages too.
 	tag, err := tx.Exec(ctx, `DELETE FROM orgs WHERE id = $1`, org)
 	if err != nil {
 		return err

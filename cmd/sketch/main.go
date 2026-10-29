@@ -32,18 +32,11 @@
 package main
 
 import (
-	"cmp"
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/wakeshift/apps/analytics"
 	"github.com/wakeshift/apps/gamekit"
@@ -60,37 +53,15 @@ func main() {
 }
 
 func run() error {
-	core, public := os.Getenv("WAKESHIFT_URL"), strings.TrimSuffix(os.Getenv("SKETCH_URL"), "/")
-	kit, err := appkit.Load("sketch", os.Getenv("SKETCH_KEY"), core, public+"/mcp")
-	dbURL := os.Getenv("SKETCH_DATABASE_URL")
-	if core == "" || public == "" || dbURL == "" || err != nil {
-		return errors.Join(errors.New("WAKESHIFT_URL, SKETCH_URL, SKETCH_KEY and SKETCH_DATABASE_URL are required"), err)
-	}
-	shared, err := gamekit.ParseWorkspaces(os.Getenv("GAMES_SHARED_SEAT_WORKSPACES"))
-	if err != nil {
-		return fmt.Errorf("GAMES_SHARED_SEAT_WORKSPACES: %w", err)
-	}
-	house, err := gamekit.HouseSecretEnv()
-	if err != nil {
-		return err
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	open, cancel := context.WithTimeout(ctx, time.Minute)
-	store, err := gamekit.OpenStore(open, dbURL)
-	if err == nil {
-		err = sketch.Migrate(open, store)
-	}
-	cancel()
+	env, err := gamekit.LoadEnv(ctx, "sketch", sketch.Migrate)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	app := &sketch.App{Kit: kit, Store: store, SharedSeats: shared, HouseSecret: house, OperatorNote: gamekit.OperatorNoteEnv()}
-	app.ProxyHops, _ = strconv.Atoi(os.Getenv("PROXY_HOPS"))
-	if account := os.Getenv("SKETCH_TICK_ACCOUNT"); account != "" {
-		app.TickAuth = gamekit.GoogleTickAuth(public+"/tick", account)
-	}
+	defer env.Store.Close()
+	app := &sketch.App{Kit: env.Kit, Store: env.Store, TickAuth: env.TickAuth, ProxyHops: env.ProxyHops,
+		SharedSeats: env.SharedSeats, HouseSecret: env.HouseSecret, OperatorNote: env.OperatorNote}
 	if model := os.Getenv("SKETCH_WRITING_MODEL"); model != "" {
 		app.Writing = &sketch.AnthropicWriting{Model: model, Key: os.Getenv("SKETCH_WRITING_KEY"), KeySecret: os.Getenv("SKETCH_WRITING_KEY_SECRET")}
 		slog.Info("sketch: checking drawings for writing", "model", model)
@@ -104,23 +75,5 @@ func run() error {
 	// Visits to the public pages, where WAKESHIFT_POSTHOG_KEY is set (docs/analytics.md).
 	h := analytics.Wrap(app.Handler(), analytics.FromEnv(), app.PublicPages()...)
 	go app.Run(ctx) // the game timers, and what moves leave to send
-
-	srv := &http.Server{Addr: ":" + cmp.Or(os.Getenv("PORT"), "8080"), Handler: h, ReadHeaderTimeout: 10 * time.Second}
-	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	slog.Info("sketch: listening", "addr", srv.Addr, "mcp", public+"/mcp")
-	select {
-	case err := <-errc:
-		return err
-	case <-ctx.Done():
-	}
-	shutdown, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	// Cloud Scheduler's /tick and the live pages' streams hold their
-	// requests open, so Shutdown often times out on them: an ordinary
-	// scale-down, not a failure.
-	if err := srv.Shutdown(shutdown); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Warn("sketch: requests still running at shutdown", "err", err)
-	}
-	return nil
+	return env.Serve(ctx, h)
 }

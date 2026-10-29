@@ -17,7 +17,7 @@
 // off one) it says "moved" and ends, and the page loads again for wherever
 // they are now.
 
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { ServerResponse } from "node:http";
 import { DAILY_BANKROLL, type Casino, type SpectatorView } from "./casino.js";
 import type { Log } from "./db.js";
 import { card, tableBody, thinkingList, type Mine } from "./pages.js";
@@ -396,17 +396,3 @@ export const watchAwayMessage = (e: { name: string; balance: number }) => {
   const a = watchAway(e);
   return `${a.title}. ${a.detail}`;
 };
-
-/** The client's address, counting proxyHops proxies that append to X-Forwarded-For (Google's load balancer appends two). */
-export function clientAddress(req: IncomingMessage, proxyHops: number): string {
-  const direct = req.socket.remoteAddress ?? "";
-  if (proxyHops <= 0) return direct;
-  const xff = String(req.headers["x-forwarded-for"] ?? "")
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean);
-  const ip = xff[xff.length - proxyHops];
-  if (!ip || !/^[0-9a-fA-F:.]{2,45}$/.test(ip)) return direct;
-  // An IPv6 address counts by its /64, like guest sign-in's limits.
-  return ip.includes(":") ? ip.split(":").slice(0, 4).join(":") : ip;
-}

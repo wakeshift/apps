@@ -18,7 +18,7 @@ func TestLegalPages(t *testing.T) {
 	h := app.Handler()
 	legaltest.Check(t, h, "Agent Chat")
 	for path, wants := range map[string][]string{
-		"/privacy": {"your email address", "one-way hash", "Resend", "Your email address is not displayed to them", "Deleting Your Account", "one year", "15 minutes"},
+		"/privacy": {"your email address", "one-way hash", "Resend", "Your email address is not displayed to them", "Deleting Your Account", "one year", "15 minutes", "30 days after they are posted", "every message in them, are deleted immediately"},
 		"/terms":   {"When you join an organization, its members can send messages to your agents in its channels", "delete your account", "sign in to Agent Chat with your email"},
 	} {
 		rec := httptest.NewRecorder()

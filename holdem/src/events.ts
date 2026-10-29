@@ -1,32 +1,51 @@
 // Agent Hold'em's events: what an agent subscribes to, through Wakeshift.
 //
-//   holdem.turn         personal: "your move", to the one player to act, with
-//                       their own view of the table (their cards, never anyone
-//                       else's). Arguments: the table.
+//   holdem.turn         personal: "your table", to one player: your move
+//                       (with your own view of the table: your cards, never
+//                       anyone else's), your removal and, at a native seat,
+//                       each hand's result. Arguments: the table.
 //   holdem.hand_result  public: how a hand at a table ended, for anyone
 //                       watching it (spectating agents, a player's own bot).
 //
-// A turn goes to the player's sign-in (the guest) at their table, and join
-// lets each sign-in hold only one seat at a table, so it reaches exactly
-// that player's conversation.
+// A turn goes to the player's sign-in (the guest) at their table: exactly
+// the subscription join made for a bridged player's conversation, and only
+// the native (webhook) subscriptions of a native seat's (house agents,
+// ChatGPT). join lets each sign-in hold only one seat at a table.
 
 import { z } from "zod";
-import type { WakeEvent, Wakeshift } from "@wakeshift/sdk";
-import { type Casino, type TableView, turnText } from "./casino.js";
+import type { Recipient, WakeEvent, Wakeshift } from "@wakeshift/sdk";
+import { type Casino, type Notifier, type TableView, type TurnTarget, resultText, turnText } from "./casino.js";
 
 const table = z.string().min(1).max(40).describe("The table's ID (from join, or a table's link)");
 
-// A turn event is one of two kinds (the SDK takes one object, so the fields
-// of each are optional and type says which):
-//   turn     your move: the turn's ID, the hand, the street, the deadline,
-//            your own view of the table (view) and a note on table talk.
-//   removed  the last one at a table: your clock ran out, your hand was folded
-//            and you were taken off it (cash_out back in your bankroll, text).
+const shown = z.array(z.object({ player: z.string(), cards: z.array(z.string()), hand: z.string().nullable().optional() }));
+
+// A turn event is one of three kinds (the SDK takes one object, so the
+// fields of each are optional and type says which):
+//   turn         your move: the turn's ID, the hand, the street, the
+//                deadline, your own view of the table (view), a note on
+//                table talk and, for a bridged player, the last hand's
+//                result (last_hand) if it ended since they last heard.
+//   removed      the last one at a table: your clock ran out, your hand was
+//                folded and you were taken off it (cash_out back in your
+//                bankroll, text).
+//   hand_result  a native seat's: how a hand at your table ended (hand,
+//                number, pot, board, winners, net, shown), as
+//                holdem.hand_result has it.
 export const turnPayload = z.object({
-  type: z.enum(["turn", "removed"]),
+  type: z.enum(["turn", "removed", "hand_result"]),
   table: z.string(),
   turn: z.string().optional(),
   hand: z.string().optional(),
+  number: z.number().optional(),
+  pot: z.number().optional(),
+  board: z.array(z.string()).optional(),
+  winners: z.array(z.string()).optional(),
+  net: z.record(z.string(), z.number()).optional(),
+  shown: shown.optional(),
+  last_hand: z
+    .object({ number: z.number(), winners: z.array(z.string()), pot: z.number(), board: z.array(z.string()), shown })
+    .optional(),
   street: z.string().optional(),
   deadline: z.string().optional(),
   // The casino's TableView (tableFor). Every field the text line (turnText)
@@ -66,7 +85,7 @@ export const resultPayload = z.object({
   board: z.array(z.string()),
   winners: z.array(z.string()),
   net: z.record(z.string(), z.number()),
-  shown: z.array(z.object({ player: z.string(), cards: z.array(z.string()), hand: z.string().nullable().optional() })),
+  shown,
 });
 
 export interface HoldemEvents {
@@ -76,24 +95,59 @@ export interface HoldemEvents {
 
 export function defineHoldemEvents(wake: Wakeshift, casino: Casino): HoldemEvents {
   const turn = wake.defineEvent("holdem.turn", {
-    title: "Your move",
+    title: "Your table",
+    // At most 500 characters (Wakeshift's limit).
     description:
-      "It's your move at your Agent Hold'em table: your cards, the board, every stack, what happened and was said since your last turn, your choices with exact amounts, the deadline and the turn's ID to act with. Only the player to act gets it. " +
-      "Act before the deadline: out of time, your hand is folded and you're taken off the table (your stack goes back to your bankroll); then you get one last event of type \"removed\" saying so.",
+      "Your Agent Hold'em table. A \"turn\" is your move: your cards, the board, every stack, what happened since your last turn (and the last hand's result, if you haven't heard), your choices and the turn's ID. " +
+      "Act before the deadline, or your hand is folded and you're taken off the table: one last \"removed\" event says so. " +
+      "At a native seat (a client that subscribes itself), a \"hand_result\" says how each hand ended.",
     args: z.object({ table }),
     payload: turnPayload,
     personal: true,
     // Only a sign-in with a player at that table may hear its turns (and,
     // being personal, only its own).
     authorize: async (subscriber, { table }) => !!subscriber.user && (await casino.guestSeatedAt(subscriber.user, table)),
-    text: (p) => (p.type === "turn" && p.view ? turnText(p.view) : (p.text ?? "")),
+    text: (p) => {
+      if (p.type === "turn" && p.view) return turnText(p.view, p.last_hand);
+      if (p.type === "hand_result" && p.number !== undefined) return resultText({ number: p.number, table: p.table, winners: p.winners ?? [], pot: p.pot ?? 0 });
+      return p.text ?? "";
+    },
   });
   const handResult = wake.defineEvent("holdem.hand_result", {
     title: "Hand result",
     description: "How a hand at an Agent Hold'em table ended: the winners, the pot, the board and the cards shown. Public: anyone can watch a table.",
     args: z.object({ table }),
     payload: resultPayload,
-    text: (p) => `Hand ${p.number} at table ${p.table} is over: ${p.winners.join(" and ")} won $${p.pot}.`,
+    text: (p) => resultText(p),
   });
   return { turn, handResult };
+}
+
+/** Who a turn event at a player's table goes to: the subscription join made for their conversation, else (a native seat) their native subscriptions. */
+export function turnRecipient(to: TurnTarget): Recipient {
+  return to.subscription ? { user: to.guest, subscription: to.subscription } : { native: to.guest };
+}
+
+/** The casino's notifier: its wakes and results as Hold'em's events (events() is read when each is sent). */
+export function holdemNotifier(events: () => HoldemEvents): Notifier {
+  return {
+    turn: async (to, event) => {
+      await events().turn.emit({ table: to.table }, event.data, { to: turnRecipient(to), id: event.id });
+    },
+    // The shared event, for anyone watching the table (spectators).
+    result: async (table, event) => {
+      await events().handResult.emit({ table }, event.data, { id: event.id });
+    },
+    // A native seat's own copy of a hand's result, on its turn event.
+    handResult: async (to, event) => {
+      await events().turn.emit({ table: to.table }, event.data, { to: { native: to.guest }, id: event.id });
+    },
+    // The last personal event at that table: the player timed out and was removed.
+    removed: async (to, event) => {
+      await events().turn.emit({ table: to.table }, event.data, { to: turnRecipient(to), id: event.id });
+    },
+    endSubscription: async (guest, subscription) => {
+      await events().turn.end(guest, subscription);
+    },
+  };
 }

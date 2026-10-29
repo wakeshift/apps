@@ -1,6 +1,7 @@
 package sketch
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -42,8 +43,8 @@ func guesserAt(g *game, n int) string {
 // A guesser that does nothing while drawings are up (Wakeshift still
 // delivering to it, as it does for an agent whose service restarted) is
 // away for each of those rounds, and after two in a row it's taken out,
-// as if it had left: announced, its seat gone, out of the room in
-// Wakeshift. The others, who call tools, play on.
+// as if it had left: announced, its seat gone, its subscription to end.
+// The others, who call tools, play on.
 func TestSilentPlayerIsRemoved(t *testing.T) {
 	f := newFixture(t, 4)
 	g := f.step(nil)
@@ -66,7 +67,7 @@ func TestSilentPlayerIsRemoved(t *testing.T) {
 	}
 	var seats, removes int
 	f.a.Store.Pool.QueryRow(bg, `SELECT count(*) FROM seats WHERE game_id = $1 AND player = $2`, f.id, silent.Key()).Scan(&seats)
-	f.a.Store.Pool.QueryRow(bg, `SELECT count(*) FROM sketch_outbox WHERE game_id = $1 AND kind = 'remove' AND data->>'handle' = $2`, f.id, silent.Handle).Scan(&removes)
+	f.a.Store.Pool.QueryRow(bg, `SELECT count(*) FROM sketch_outbox WHERE game_id = $1 AND kind = 'remove' AND data->>'subscription' = 'sub-' || $2`, f.id, silent.Handle).Scan(&removes)
 	if seats != 0 || removes != 1 {
 		t.Fatalf("seats %d, room removals %d", seats, removes)
 	}
@@ -213,5 +214,46 @@ func TestMatchmakingSkipsGhostRooms(t *testing.T) {
 	took := f.clock().Sub(start)
 	if g.Phase != over || open() || lobby() != 0 || took > idleClose+waitCheck || !strings.Contains(f.lastSaid(), "Nobody has played in this room") {
 		t.Fatalf("the ghost room after %v: %s open %v %q", took, g.Phase, open(), f.lastSaid())
+	}
+}
+
+// A wrong guess is said to the room as the player's own words, under its
+// agent's say limit (30 a minute, across its seats and games): a guess the
+// limit refuses writes nothing, not the guess, its count or the line.
+func TestRefusedGuessWritesNothing(t *testing.T) {
+	f := newFixture(t, 4)
+	g := f.step(nil)
+	if g.Phase != drawing {
+		t.Fatalf("phase %s", g.Phase)
+	}
+	guesser := g.player(guesserAt(g, 1))
+	agent := guesser.Workspace + "/" + guesser.Agent
+	for range 30 {
+		if _, err := f.a.Store.Pool.Exec(bg, `INSERT INTO room_log (game_id, at, from_handle, text, from_agent, attempts, posted_at) VALUES ($1, $2, $3, 'hi', $4, 8, $2)`,
+			f.id, f.clock(), guesser.Handle, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := f.said()
+	_, err := f.a.srv.Update(bg, f.id, nil, func(tx *gamekit.Tx, gs gamekit.State) error {
+		g := gs.(*game)
+		_, err := f.a.guessMove(tx, g, g.player(guesser.Key()), "zzzz", "")
+		return err
+	})
+	if !errors.Is(err, gamekit.ErrRateLimited) {
+		t.Fatalf("the 31st line: %v", err)
+	}
+	g = f.load()
+	if p := g.player(guesser.Key()); p.Guessed != 0 || len(g.Guesses) != 0 || f.said() != before {
+		t.Fatalf("a refused guess wrote: guessed %d, guesses %v", p.Guessed, g.Guesses)
+	}
+	// A minute on, the same guess is taken, and said.
+	f.set(f.clock().Add(time.Minute + time.Second))
+	f.move(nil, func(tx *gamekit.Tx, g *game) error {
+		_, err := f.a.guessMove(tx, g, g.player(guesser.Key()), "zzzz", "")
+		return err
+	})
+	if g := f.load(); len(g.Guesses) != 1 || !strings.Contains(f.lastSaid(), "Guess: zzzz") {
+		t.Fatalf("after a minute: %v, %q", g.Guesses, f.lastSaid())
 	}
 }

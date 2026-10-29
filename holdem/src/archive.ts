@@ -39,7 +39,7 @@ export class Anon {
     const had = this.roles.get(p.id);
     if (had) return had;
     this.roles.set(p.id, label);
-    if (p.name.trim()) this.names.set(p.name, label);
+    if (!this.names.has(p.name)) this.names.set(p.name, label); // a name keeps its first role, as in gamekit
     this.list.push(p.house ? { role: label, house: true, ...(p.model ? { model: p.model } : {}) } : { role: label });
     return label;
   }
@@ -66,20 +66,27 @@ export class Anon {
   /**
    * Text with every name of a player given a role replaced by its role: in
    * any case, with its words joined by spaces, hyphens or underscores
-   * ("Brave Otter", "brave-otter"), as a whole word, longest name first.
+   * ("Brave Otter", "brave-otter"), as a whole word (no letter or digit
+   * beside it), longest name (in UTF-8 bytes) first. gamekit's Anon.Scrub
+   * does the same (apps/gamekit/testdata/scrub.json).
    */
   scrub(text: string): string {
-    const names = [...this.names.keys()].sort((x, y) => y.length - x.length || (x < y ? -1 : 1));
+    const names = [...this.names.keys()].sort(
+      (x, y) => Buffer.byteLength(y) - Buffer.byteLength(x) || Buffer.compare(Buffer.from(x), Buffer.from(y)),
+    );
     for (const name of names) {
-      const parts = name.split(/[-_\s]+/).filter(Boolean).map(escapeRegExp);
-      if (!parts.length) continue;
-      const re = new RegExp(`(?<![\\p{L}\\p{N}])${parts.join("[-_\\s]+")}(?![\\p{L}\\p{N}])`, "giu");
+      const parts = name.split(new RegExp(SEPARATORS, "u")).filter(Boolean).map(escapeRegExp);
+      if (!parts.length) continue; // all separators: it would match everywhere
+      const re = new RegExp(`(?<![\\p{L}\\p{Nd}])${parts.join(SEPARATORS)}(?![\\p{L}\\p{Nd}])`, "giu");
       const role = this.names.get(name)!;
       text = text.replace(re, () => role);
     }
     return text;
   }
 }
+
+/** What may join a name's words in text: hyphens, underscores and spaces (any Unicode space, a no-break space too), as in gamekit. */
+const SEPARATORS = "[-_\\t\\n\\f\\r\\p{Zs}]+";
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 

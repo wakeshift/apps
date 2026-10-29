@@ -19,7 +19,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { Wakeshift } from "@wakeshift/sdk";
 import { Casino, type Notifier } from "../src/casino.js";
-import { defineHoldemEvents, type HoldemEvents } from "../src/events.js";
+import { defineHoldemEvents, holdemNotifier, type HoldemEvents } from "../src/events.js";
 import { cardText as cardWord } from "../src/pages.js";
 import { holdemHttp } from "../src/server.js";
 import { testDb } from "./testdb.js";
@@ -148,20 +148,7 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
   const wake = new Wakeshift({ key, core });
   const db = await testDb(t);
   const events: { current?: HoldemEvents } = {};
-  const notify: Notifier = {
-    turn: async (to, event) => {
-      await events.current!.turn.emit({ table: to.table }, event.data, { to: to.guest, id: event.id });
-    },
-    result: async (table, event) => {
-      await events.current!.handResult.emit({ table }, event.data, { id: event.id });
-    },
-    removed: async (to, event) => {
-      await events.current!.turn.emit({ table: to.table }, event.data, { to: to.guest, id: event.id });
-    },
-    endSubscription: async (guest, subscription) => {
-      await events.current!.turn.end(guest, subscription);
-    },
-  };
+  const notify: Notifier = holdemNotifier(() => events.current!);
   const casino = new Casino({ db, notify, handPauseMs: 60_000 });
   events.current = defineHoldemEvents(wake, casino);
   // A free port first: the server's own URL goes into its sign-in metadata.
@@ -218,8 +205,10 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
   const chatMeta = { "openai/session": "chat-e2e-1" };
   const nativeJoin = (await chat.callTool({ name: "join", arguments: { private: true }, _meta: chatMeta })) as CallToolResult;
   assert.ok(!nativeJoin.isError, textOf(nativeJoin));
-  const nativeTable = textOf(nativeJoin).match(/subscribe to the holdem\.turn event with table "([^"]+)"/)?.[1];
+  // Wakeshift's block tells it what to subscribe to.
+  const nativeTable = textOf(nativeJoin).match(/To be woken by holdem\.turn with \{"table":"([^"]+)"\}, subscribe to it/)?.[1];
   assert.ok(nativeTable, "a native client is told to subscribe itself: " + textOf(nativeJoin));
+  assert.ok(textOf(nativeJoin).includes(`/tables/${nativeTable}`), "to the table it sits at");
   const agentTable = (await db.query<{ table_id: string }>("SELECT DISTINCT table_id FROM seats s JOIN players p ON p.id = s.player WHERE p.name = $1", [agents[0]!.name])).rows[0]!.table_id;
   const subscribe = (table: string) =>
     chat.request(

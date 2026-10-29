@@ -11,67 +11,75 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
-// Agents' tools. Every channel is a Wakeshift group; Agent Chat's database
-// says who may be in it (an org's members, or the people admitted to a
-// channel outside orgs, less anyone banned), and each tool checks that
-// before it acts.
+// Agents' tools. Agent Chat's database says who may be in a channel (an
+// org's members, or the people admitted to a channel outside orgs, less
+// anyone banned), who is (channel_agents) and which conversations watch
+// (watchers); each tool checks it before it acts. Every tool is wrapped
+// (appkit.Events), and only watch subscribes: nothing else makes a
+// conversation wakeable, so nothing re-arms one after unwatch.
 
-type empty struct{}
+type listIn struct {
+	appkit.WakeArgs
+}
 
 type leaveIn struct {
 	Channel string `json:"channel" jsonschema:"The channel (org/name, or its name)"`
-	Session string `json:"session,omitempty" jsonschema:"Your session's handle (e.g. claude-code#2): leave as this conversation only"`
+	appkit.WakeArgs
 }
 
 type createIn struct {
-	Name    string `json:"name" jsonschema:"Channel name: lowercase letters, digits and dashes"`
-	Topic   string `json:"topic" jsonschema:"What the channel is for"`
-	Org     string `json:"org,omitempty" jsonschema:"An org you manage (its short name, as list_channels shows it), for an org channel. Without it, the channel is outside orgs: you own it, and invite others with the invite tool. Its name gets a code added."`
-	Wake    string `json:"wake,omitempty" jsonschema:"all (default): woken by every message in the channel; mentions: woken only when @-mentioned"`
-	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool (e.g. claude-code#2), so this conversation is the one woken"`
+	Name  string `json:"name" jsonschema:"Channel name: lowercase letters, digits and dashes"`
+	Topic string `json:"topic" jsonschema:"What the channel is for"`
+	Org   string `json:"org,omitempty" jsonschema:"An org you manage (its short name, as list_channels shows it), for an org channel. Without it, the channel is outside orgs: you own it, and invite others with the invite tool. Its name gets a code added."`
+	Wake  string `json:"wake,omitempty" jsonschema:"all (default): once you've called watch, every message in the channel wakes you; mentions: only @-mentions of you; none: nothing does (read it with history)"`
+	appkit.WakeArgs
 }
 
 type joinIn struct {
 	Channel string `json:"channel,omitempty" jsonschema:"The channel (org/name, or its name; not needed with an invite)"`
 	Invite  string `json:"invite,omitempty" jsonschema:"An invite code (or link) to a channel outside orgs"`
-	Wake    string `json:"wake,omitempty" jsonschema:"all (default): woken by every message in the channel; mentions: woken only when @-mentioned"`
-	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool (e.g. claude-code#2), so this conversation is the one woken"`
+	Wake    string `json:"wake,omitempty" jsonschema:"all (default): once you've called watch, every message in the channel wakes you; mentions: only @-mentions of you; none: nothing does (read it with history)"`
+	appkit.WakeArgs
 }
 
 type postIn struct {
-	Channel  string   `json:"channel" jsonschema:"The channel (org/name, or its name)"`
+	Channel  string   `json:"channel" jsonschema:"The channel (org/name, or its name), or dm"`
 	Text     string   `json:"text" jsonschema:"The message. @-mention agents by their handle (e.g. @ada-codex) to wake them."`
 	Mentions []string `json:"mentions,omitempty" jsonschema:"Handles to wake, besides @-mentions in the text"`
-	ReplyTo  string   `json:"reply_to,omitempty" jsonschema:"The id of the message you are answering (one delivered to you, or your own): the post goes in its thread"`
-	Session  string   `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool (e.g. claude-code#2): your own post won't wake you"`
+	ReplyTo  string   `json:"reply_to,omitempty" jsonschema:"The id of the message you are answering (data.id in a delivered message, or the id post gave you): the post goes in its thread"`
+	appkit.WakeArgs
 }
 
 type historyIn struct {
-	Channel string `json:"channel" jsonschema:"The channel (org/name, or its name)"`
+	Channel string `json:"channel" jsonschema:"The channel (org/name, or its name), or dm"`
 	Limit   int    `json:"limit,omitempty" jsonschema:"How many recent messages (default 20, at most 100)"`
+	appkit.WakeArgs
 }
 
 type inviteIn struct {
 	Channel string `json:"channel" jsonschema:"A channel outside orgs that you own"`
+	appkit.WakeArgs
 }
 
 type removeIn struct {
 	Channel string `json:"channel" jsonschema:"The channel (org/name, or its name)"`
 	Member  string `json:"member" jsonschema:"A member's handle, as list_channels shows it (e.g. bob-codex)"`
 	Ban     bool   `json:"ban,omitempty" jsonschema:"Keep that member's person out of a channel outside orgs (org channels always do)"`
+	appkit.WakeArgs
 }
 
 type unwatchIn struct {
-	Session string `json:"session,omitempty" jsonschema:"The session to stop (its handle, from watch)"`
+	appkit.WakeArgs
 }
 
 type watchIn struct {
-	Ack     bool   `json:"ack,omitempty" jsonschema:"Set if your client acknowledges each event ({type: ack, delivery_id}); Monitor can't, so leave it unset there"`
-	Session string `json:"session,omitempty" jsonschema:"Resume a session you already have (its handle, e.g. claude-code#2), keeping its place"`
-	Label   string `json:"label,omitempty" jsonschema:"Name a new session (e.g. pipe gives claude-code@pipe); default numbered"`
+	Ack   bool   `json:"ack,omitempty" jsonschema:"Set if your client acknowledges each event ({type: ack, delivery_id}); Monitor can't, so leave it unset there"`
+	Label string `json:"label,omitempty" jsonschema:"Name a new session (e.g. pipe gives claude-code@pipe); default numbered"`
+	appkit.WakeArgs
 }
 
 type memberOut struct {
@@ -98,44 +106,8 @@ type message struct {
 	Text     string   `json:"text"`
 	Mentions []string `json:"mentions,omitempty"`
 	ReplyTo  string   `json:"reply_to,omitempty"`
+	Thread   string   `json:"thread,omitempty"`
 	At       string   `json:"at"`
-}
-
-type data struct {
-	Text    string `json:"text,omitempty"` // left out when too long for data; readers fall back to the body (the same text)
-	Channel string `json:"channel"`
-	// On a person's posts from the site: their name, and whether a reply
-	// was also sent to the channel.
-	Name        string `json:"name,omitempty"`
-	AlsoChannel bool   `json:"also_channel,omitempty"`
-	// Mentions are the handles it @-mentioned (the text's and any named
-	// besides), for the site to say whom it mentioned: each workspace's
-	// copy of a post names only that workspace's own.
-	Mentions []string `json:"mentions,omitempty"`
-}
-
-// Wakeshift's limits, in bytes (internal/appapi/agent.go).
-const (
-	maxSubject = 200
-	maxData    = 16 << 10
-)
-
-// postData is a message's data: the text again, unless encoding it (JSON
-// escapes <, > and & as six bytes each) would go over Wakeshift's limit.
-func postData(text, channel string) data {
-	return data{Text: text, Channel: channel}.fit()
-}
-
-// fit is d within Wakeshift's limit for data: without its text (readers
-// fall back to the body), then without its mentions, if it's over.
-func (d data) fit() data {
-	if b, _ := json.Marshal(d); len(b) > maxData {
-		d.Text = ""
-	}
-	if b, _ := json.Marshal(d); len(b) > maxData {
-		d.Mentions = nil
-	}
-	return d
 }
 
 // truncate cuts s to at most n bytes on a character boundary, ending with
@@ -156,7 +128,7 @@ func truncate(s string, n int) string {
 // theirs in one place only.
 func (a *App) resolve(ctx context.Context, person, raw string) (Channel, error) {
 	ref := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "#")
-	ref = strings.Replace(ref, ".", "/", 1) // acme.general, as chat.message names it (channel names have no dots)
+	ref = strings.Replace(ref, ".", "/", 1) // acme.general, as topics named it (channel names have no dots)
 	if ref == "" {
 		return Channel{}, errors.New("name a channel (org/name, or its name)")
 	}
@@ -190,98 +162,43 @@ func (a *App) resolve(ctx context.Context, person, raw string) (Channel, error) 
 	return Channel{}, fmt.Errorf("several channels are called %s: say which (%s)", ref, strings.Join(refs, ", "))
 }
 
-// groupOf is the agent's view of a channel's group, if it's in it.
-func groupOf(groups []appkit.Group, typ string) *appkit.Group {
-	for i := range groups {
-		if groups[i].Type == typ {
-			return &groups[i]
-		}
-	}
-	return nil
+// readOnly marks a tool that only reads (list_channels, history), so
+// harnesses that honour it don't ask the user before each call (Codex's
+// default approval mode never does). Never on a tool that posts, joins or
+// changes anything.
+var readOnly = &mcp.ToolAnnotations{ReadOnlyHint: true}
+
+func (a *App) addTools(srv *mcp.Server, at *appkit.Attachment) {
+	a.addChannelTools(srv, at)
+	a.addMessageTools(srv, at)
+	a.addModerationTools(srv, at)
+	a.addSessionTools(srv, at)
 }
 
-// selfHandle is the calling conversation's handle in a group (else the
-// agent's first there, else its usual handle).
-func selfHandle(g *appkit.Group, ag *appkit.Agent, session, fallback string) string {
-	out := ""
-	if g != nil {
-		for _, m := range g.Members {
-			if m.Workspace == ag.Workspace && m.Agent == ag.ID && (out == "" || session != "" && m.Session == session) {
-				out = m.Handle
-			}
-		}
-	}
-	if out == "" {
-		return fallback
-	}
-	return out
-}
-
-func (a *App) addTools(srv *mcp.Server) {
-	a.addChannelTools(srv)
-	a.addMessageTools(srv)
-	a.addModerationTools(srv)
-	a.addSessionTools(srv)
-}
-
-// channelOrGroup is a channel to leave: one the person may use, or, if
-// they no longer may (removed, the channel closed), a group the agent is
-// still in by that name.
-func (a *App) channelOrGroup(ctx context.Context, me Agent, ag *appkit.Agent, raw string) (typ, ref string, err error) {
-	c, err := a.findFor(ctx, me, raw)
-	if err == nil {
-		return c.GroupType, c.Ref(), nil
-	}
-	groups, gerr := ag.Groups(ctx)
-	if gerr != nil {
-		return "", "", friendly(gerr, "")
-	}
-	// A group's description is its channel's ref (org/name, or name), as
-	// made: only an exact match, and only one.
-	want := strings.Replace(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "#"), ".", "/", 1)
-	var found []appkit.Group
-	for _, g := range groups {
-		if g.Description == want {
-			found = append(found, g)
-		}
-	}
-	if len(found) == 1 {
-		return found[0].Type, want, nil
-	}
-	return "", "", err
-}
-
-// withDelivery adds, while this conversation's connector isn't running,
-// what the agent should tell its user (see App.session).
-func withDelivery(out map[string]any, note string) map[string]any {
-	if note != "" {
-		out["delivery"] = note
-	}
-	return out
-}
-
-// chatMessage is a delivered message as wait_for_messages shows it.
-func chatMessage(d appkit.Delivery) any {
+// chatMessage is a delivered message as wait_for_messages shows it: the
+// notification's fields, id first (what reply_to takes).
+func chatMessage(d agentkit.Delivery) any {
 	e := d.Event
-	var dd data
-	json.Unmarshal(e.Data, &dd)
-	text := dd.Text
-	if text == "" {
-		text = e.Body
+	var n Notification
+	if err := json.Unmarshal(e.Data, &n); err != nil || n.ID == "" {
+		// Not a notification (Wakeshift's own notice): as Wakeshift sent it.
+		return map[string]any{"id": e.ID, "text": e.Subject, "at": e.OccurredAt.Format(time.RFC3339)}
 	}
-	from := e.From.ID
-	if e.FromHandle != "" {
-		from = e.FromHandle
+	m := map[string]any{"id": n.ID, "channel": n.Channel, "from": n.From.Handle, "text": n.Text, "reason": n.Reason, "at": n.At.Format(time.RFC3339)}
+	if n.From.Kind == "person" {
+		m["person"] = n.From.Name
 	}
-	m := map[string]any{"id": e.ID, "channel": dd.Channel, "from": from, "text": text, "at": e.OccurredAt.Format(time.RFC3339)}
-	if e.From.Kind == "person" {
-		m["person"] = personName(dd, from)
+	if len(n.Mentions) > 0 {
+		m["mentions"] = n.Mentions
 	}
-	if len(e.Mentions) > 0 {
-		m["mentions"] = e.Mentions
+	if n.Mentioned {
+		m["mentioned"] = true
 	}
-	if e.ParentID != "" {
-		m["reply_to"] = e.ParentID
+	if n.ReplyTo != "" {
+		m["reply_to"] = n.ReplyTo
+	}
+	if n.Thread != "" {
+		m["thread"] = n.Thread
 	}
 	if d.Attempt > 1 {
 		m["redelivered"] = true
@@ -289,11 +206,28 @@ func chatMessage(d appkit.Delivery) any {
 	return m
 }
 
-// personName is the name of the person who wrote a post on the site (its
-// data's, else their handle).
-func personName(d data, handle string) string {
-	if n := cleanText(d.Name, maxName); n != "" {
-		return n
+// messageOut is a stored message as history shows it.
+func messageOut(m Message) message {
+	out := message{ID: m.ID, From: m.FromHandle, Text: m.Text, Mentions: m.Mentions, ReplyTo: m.ParentID, Thread: m.ThreadID, At: m.CreatedAt.UTC().Format(time.RFC3339)}
+	if m.FromKind == "person" {
+		out.Person = cleanText(m.FromName, maxName)
+		if out.Person == "" {
+			out.Person = m.FromHandle
+		}
 	}
-	return handle
+	if len(out.Mentions) == 0 {
+		out.Mentions = nil
+	}
+	return out
+}
+
+// checkWake is a membership's wake, as given (default all).
+func checkWake(w string) (string, error) {
+	switch w {
+	case "":
+		return "all", nil
+	case "all", "mentions", "none":
+		return w, nil
+	}
+	return "", errors.New(`wake is "all", "mentions" or "none"`)
 }

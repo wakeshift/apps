@@ -61,6 +61,26 @@ test("the visitor's address, as the proxies wrote it", () => {
   assert.equal(clientAddress(req("203.0.113.9, 10.0.0.1"), undefined), "");
 });
 
+// The live streams' and sign-in's per-address limits count by this address too
+// (an IPv6 address by its /64), so compressed forms must expand properly.
+test("the address the limits count, from compressed IPv6, mapped IPv4 and a forwarded chain", () => {
+  const req = (xff: string | undefined, remote = "192.0.2.1") =>
+    ({ headers: xff === undefined ? {} : { "x-forwarded-for": xff }, socket: { remoteAddress: remote } }) as unknown as IncomingMessage;
+  assert.equal(clientAddress(req(undefined, "::1"), 0), "0:0:0:0::/64");
+  assert.equal(clientAddress(req("::1, 10.0.0.1"), 2), "0:0:0:0::/64");
+  assert.equal(clientAddress(req("2001:db8::1, 10.0.0.1"), 2), "2001:db8:0:0::/64");
+  assert.equal(clientAddress(req("2001:DB8:0:0:ffff::9, 10.0.0.1"), 2), "2001:db8:0:0::/64");
+  assert.equal(clientAddress(req("2001:db8:1::1, 10.0.0.1"), 2), "2001:db8:1:0::/64");
+  assert.notEqual(clientAddress(req("2001:db8:1::1, 10.0.0.1"), 2), clientAddress(req("2001:db8:2::1, 10.0.0.1"), 2));
+  assert.equal(clientAddress(req("::ffff:203.0.113.9, 10.0.0.1"), 2), "203.0.113.9");
+  assert.equal(clientAddress(req(undefined, "::ffff:198.51.100.7"), 2), "198.51.100.7");
+  // A chain: the client's own entries and a spoof before the proxies' are ignored.
+  assert.equal(clientAddress(req("1.1.1.1, spoofed, 198.51.100.7, 35.191.0.1, 10.0.0.1"), 2), "35.191.0.1");
+  assert.equal(clientAddress(req("1.1.1.1, 198.51.100.7, 10.0.0.1"), 2), "198.51.100.7");
+  assert.equal(clientAddress(req("2001:db8::1,10.0.0.1"), 2), "2001:db8:0:0::/64");
+  assert.equal(clientAddress(req("198.51.100.7, 10.0.0.1"), 0), "192.0.2.1");
+});
+
 test("the script goes on the public pages only", () => {
   const a = new Analytics({ key: "phc_x" }, PUBLIC_PAGES);
   const html = "<html><head><title>x</title></head><body></body></html>";

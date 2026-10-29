@@ -13,8 +13,6 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/jackc/pgx/v5"
-
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // The ticker: what happens when nobody's calling. Every instance runs it
@@ -28,7 +26,7 @@ const (
 	tickEvery   = time.Second
 	duePerTick  = 200              // games advanced per tick, at most
 	tickWorkers = 8                // at once, per instance
-	sweepAfter  = 2 * time.Second  // times (attempts² + 1): about 5 minutes over maxAttempts
+	sweepAfter  = 2 * time.Second  // times (tries² + 1): about 5 minutes over an entry's 8 tries
 	tickHold    = 55 * time.Second // how long POST /tick keeps ticking
 	tickLease   = 30 * time.Second // a claimed step another instance may take over after
 )
@@ -98,9 +96,10 @@ func (s *Server) Tick(ctx context.Context) (int, error) {
 	close(work)
 	wg.Wait()
 
-	// Announcements nobody posted: a failed post is retried, backing off.
-	rows, _ = s.Store.Pool.Query(ctx, `SELECT DISTINCT game_id FROM room_log WHERE posted_at IS NULL AND attempts < 8
-		AND at < $1::timestamptz - make_interval(secs => $2::float8 * (attempts * attempts + 1)) LIMIT 100`, now, sweepAfter.Seconds())
+	// What nobody sent: a failed emit is retried, backing off (a
+	// rate-limited one waits for its retry_at).
+	rows, _ = s.Store.Pool.Query(ctx, `SELECT DISTINCT game_id FROM room_log WHERE posted_at IS NULL AND tries < 8
+		AND at < $1::timestamptz - make_interval(secs => $2::float8 * (tries * tries + 1)) AND (retry_at IS NULL OR retry_at <= $1) LIMIT 100`, now, sweepAfter.Seconds())
 	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		return n, err
@@ -279,71 +278,22 @@ func (s *Server) step(tx *Tx, g State) (err error) {
 	return s.Step(tx, g)
 }
 
-// deliver posts game id's unposted announcements to its room, in order,
-// unless another instance is posting them. A failed post is left for the
-// ticker to retry; the ones after it wait, to keep the order.
-func (s *Server) deliver(ctx context.Context, id string) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-	defer cancel()
-	for range 3 {
-		now := s.now()
-		// The lease is the time it runs to (to the microsecond, as Postgres
-		// keeps it): renewing or clearing it checks it's still this one's.
-		lease := now.Add(postLease).Truncate(time.Microsecond)
-		tag, err := s.Store.Pool.Exec(ctx, `UPDATE games SET posting_until = $2 WHERE id = $1 AND (posting_until IS NULL OR posting_until < $3)
-			AND EXISTS (SELECT 1 FROM room_log WHERE game_id = $1 AND posted_at IS NULL AND attempts < 8)`, id, lease, now)
-		if err != nil || tag.RowsAffected() == 0 {
-			return // nothing to post, or another instance is posting
-		}
-		type entry struct {
-			Seq           int64
-			Subject, Text string
-			Mentions      []string
-		}
-		rows, _ := s.Store.Pool.Query(ctx, `SELECT seq, subject, text, mentions FROM room_log
-			WHERE game_id = $1 AND posted_at IS NULL AND attempts < 8 ORDER BY seq LIMIT 50`, id)
-		entries, err := pgx.CollectRows(rows, pgx.RowToStructByPos[entry])
-		failed := err != nil
-		for _, e := range entries {
-			// Each post renews the lease, so while Wakeshift is slow no
-			// other instance posts the same entries.
-			renewed := s.now().Add(postLease).Truncate(time.Microsecond)
-			tag, err := s.Store.Pool.Exec(ctx, `UPDATE games SET posting_until = $3 WHERE id = $1 AND posting_until = $2`, id, lease, renewed)
-			if err != nil || tag.RowsAffected() == 0 {
-				return // the lease was lost: whoever holds it posts the rest
-			}
-			lease = renewed
-			post, cancel := context.WithTimeout(ctx, 15*time.Second)
-			_, err = s.Kit.PostToGroup(post, s.room(id), appkit.GroupPost{Subject: e.Subject, Body: e.Text,
-				Data: map[string]any{"game": id, "text": e.Text}, Mentions: e.Mentions})
-			cancel()
-			if err != nil && !appkit.IsCode(err, "unknown_group") {
-				slog.Warn(s.Name+": announcing", "game", id, "err", err)
-				s.Store.Pool.Exec(ctx, `UPDATE room_log SET attempts = attempts + 1 WHERE game_id = $1 AND seq = $2`, id, e.Seq)
-				failed = true
-				break
-			}
-			if _, err := s.Store.Pool.Exec(ctx, `UPDATE room_log SET posted_at = $3 WHERE game_id = $1 AND seq = $2`, id, e.Seq, s.now()); err != nil {
-				// Left until the lease runs out: clearing it would have the
-				// entry posted again at once.
-				slog.Warn(s.Name+": noting an announcement posted", "game", id, "err", err)
-				return
-			}
-		}
-		s.Store.Pool.Exec(ctx, `UPDATE games SET posting_until = NULL WHERE id = $1 AND posting_until = $2`, id, lease)
-		if failed {
-			return
-		}
-		// Loop: a move may have announced more while this was posting.
-	}
-}
-
-// closeRoom closes a game's group in Wakeshift (one already gone counts).
+// closeRoom ends a game's seats once it's over: each seated conversation's
+// subscription is ended in Wakeshift unless it's seated in another open
+// game (SeatEnded). The game's closed_at is set first, so its own seats
+// don't count. A seat whose subscription can't be ended now is left to
+// lapse on its own.
 func (s *Server) closeRoom(ctx context.Context, id string) error {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	if err := s.Kit.CloseGroup(ctx, s.room(id)); err != nil && !appkit.IsCode(err, "unknown_group") {
+	type seat struct{ Subscriber, Subscription string }
+	rows, _ := s.Store.Pool.Query(ctx, `SELECT DISTINCT subscriber, subscription FROM seats WHERE game_id = $1 AND subscription <> ''`, id)
+	seats, err := pgx.CollectRows(rows, pgx.RowToStructByPos[seat])
+	if err != nil {
 		return err
+	}
+	for _, st := range seats {
+		s.SeatEnded(ctx, st.Subscriber, st.Subscription)
 	}
 	return nil
 }
@@ -386,11 +336,7 @@ func (s *Server) tickRoutes(mux *http.ServeMux) {
 func GoogleTickAuth(audience, account string) func(*http.Request) error {
 	var mu sync.Mutex
 	var provider *oidc.Provider
-	return func(r *http.Request) error {
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok {
-			return errors.New("no token")
-		}
+	return tickAuth(account, func(r *http.Request) (*oidc.IDTokenVerifier, error) {
 		mu.Lock()
 		p := provider
 		mu.Unlock()
@@ -400,13 +346,29 @@ func GoogleTickAuth(audience, account string) func(*http.Request) error {
 			// client with a timeout, so a hung Google doesn't hang /tick.
 			ctx := oidc.ClientContext(context.WithoutCancel(r.Context()), &http.Client{Timeout: 10 * time.Second})
 			if p, err = oidc.NewProvider(ctx, "https://accounts.google.com"); err != nil {
-				return err
+				return nil, err
 			}
 			mu.Lock()
 			provider = p
 			mu.Unlock()
 		}
-		idt, err := p.Verifier(&oidc.Config{ClientID: audience}).Verify(r.Context(), token)
+		return p.Verifier(&oidc.Config{ClientID: audience}), nil
+	})
+}
+
+// tickAuth accepts a bearer token that verifier's verifier accepts, for
+// account's verified email. An empty account accepts nothing.
+func tickAuth(account string, verifier func(*http.Request) (*oidc.IDTokenVerifier, error)) func(*http.Request) error {
+	return func(r *http.Request) error {
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || account == "" {
+			return errors.New("no token")
+		}
+		v, err := verifier(r)
+		if err != nil {
+			return err
+		}
+		idt, err := v.Verify(r.Context(), token)
 		if err != nil {
 			return err
 		}

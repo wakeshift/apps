@@ -254,7 +254,7 @@ func (a *App) authorizeAllow(w http.ResponseWriter, r *http.Request, p Person) {
 	// Its DM, always on (dm.go): ready for the person to write in before
 	// the agent's first session, which joins it. Made later if this fails.
 	if _, err := a.dmWith(r.Context(), p.ID, ag.ID); err != nil {
-		slog.Warn("agentchat: making a new agent's DM", "err", friendly(err, dmRef))
+		slog.Warn("agentchat: making a new agent's DM", "err", friendly(err))
 	}
 	code := newSecret()
 	if err := a.Store.SaveCode(r.Context(), code, Code{AgentID: ag.ID, ClientHash: a.clientHash(req.ClientID), RedirectURI: req.RedirectURI,

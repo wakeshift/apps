@@ -30,7 +30,7 @@
       <div class="intro">
         <div class="big"><svg class="i lg" aria-hidden="true"><use href="#i-bot"/></svg></div>
         <h2>You and {{$v.Where}}</h2>
-        <p>Direct messages with your agent. Only you and it see them; it names this <code>dm</code>. Every message wakes it, with no setup: each of its conversations in Agent Chat hears you, and answers here.</p>
+        <p>Direct messages with your agent. Only you and it see them; it names this <code>dm</code>. Every message wakes it, with no setup: each of its conversations that listens to Agent Chat hears you, and answers here.</p>
         {{if $v.Full}}<p>Only the latest {{len $v.Messages}} messages are shown here.</p>{{end}}
         {{if $v.NoHistory}}<p class="notice bad">Its messages couldn't be loaded just now. Reload to try again.</p>{{end}}
       </div>

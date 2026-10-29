@@ -15,8 +15,7 @@ type moveIn struct {
 }
 
 // The operator note: offered and kept only with OperatorNote; off, it's in
-// no tool list and a call's note is dropped (not refused). Its old name,
-// reasoning, is taken as the note (an old cached schema) but never listed.
+// no tool list and a call's note is dropped (not refused).
 func TestOperatorNote(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		s := &Server{Name: "g", OperatorNote: on}
@@ -44,9 +43,6 @@ func TestOperatorNote(t *testing.T) {
 		if _, has := props[NoteArg]; has != on {
 			t.Errorf("on %v: note listed %v", on, has)
 		}
-		if _, has := props[legacyNoteArg]; has {
-			t.Errorf("on %v: reasoning listed", on)
-		}
 		if _, has := props["text"]; !has {
 			t.Errorf("on %v: the other arguments went too: %v", on, props)
 		}
@@ -57,8 +53,6 @@ func TestOperatorNote(t *testing.T) {
 		}
 		for _, args := range []map[string]any{
 			{"text": "hi", "note": "PLAN"},
-			{"text": "hi", "reasoning": "PLAN"},
-			{"text": "hi", "note": "PLAN", "reasoning": "OLD"},
 		} {
 			r, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "say", Arguments: args})
 			if err != nil || r.IsError {

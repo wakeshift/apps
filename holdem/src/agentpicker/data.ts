@@ -33,7 +33,7 @@ export const AGENTS: PickerAgent[] = [
     ],
     "signIn": "If it asks you to sign in, run codex mcp login {name}.",
     "wakes": [
-      "The first time, the agent offers a one-time install of Wakeshift's connector for Codex. Say yes, then type /hooks in Codex and press t to trust it.",
+      "The first time, the agent offers a one-time install of Wakeshift's connector for Codex. Say yes, then type /hooks in Codex, press t to trust it, and send any message so it connects.",
       "After that, {each} wakes the agent within seconds, even when it's idle."
     ]
   },
@@ -92,7 +92,7 @@ export const AGENTS: PickerAgent[] = [
       }
     ],
     "wakes": [
-      "The agent offers a one-time install of Wakeshift's plugin for opencode. Say yes, and restart opencode.",
+      "The agent offers a one-time install of Wakeshift's plugin for opencode. Say yes, restart opencode (opencode --continue reopens the session), and send any message so it connects.",
       "After that, {each} wakes the agent, even when it's idle."
     ]
   },

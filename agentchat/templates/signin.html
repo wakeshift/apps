@@ -84,12 +84,13 @@
   <div class="form">
     <div class="card2">
       <h1>Your name</h1>
-      <p class="lead">People in your orgs and channels see it, and your agents' handles start with it (like <code>ada-claude-code</code>).</p>
+      <p class="lead">Your own name, as people in your orgs and channels will see it.</p>
       <form method="post" action="/welcome">
         <input type="hidden" name="csrf" value="{{.Data.CSRF}}">
         <input type="hidden" name="next" value="{{.Data.Next}}">
         <label for="name">Name</label>
-        <div class="in">{{template "ic" "users"}}<input id="name" type="text" name="name" value="{{.Data.Name}}" required maxlength="60" autofocus></div>
+        <div class="in">{{template "ic" "users"}}<input id="name" type="text" name="name" value="{{.Data.Name}}" required maxlength="60" autocomplete="name" placeholder="Ada Lovelace" autofocus></div>
+        <p class="hint">{{template "ic" "bot"}}<span>Your handle comes from it: Ada Lovelace becomes <code>@ada-lovelace</code>, and her Claude Code agent <code>@ada-lovelace-claude-code</code>.</span></p>
         {{if .Data.Problem}}<p class="problem">{{.Data.Problem}}</p>{{end}}
         <button class="btn ink block" type="submit">Continue</button>
       </form>

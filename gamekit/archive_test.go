@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -65,35 +66,36 @@ func must[T any](v T, err error) T {
 	return v
 }
 
-// Handles in text become roles, in any case and with hyphens or spaces,
-// as whole words only, the longest handle first.
+// Handles in text become roles, in any case and with hyphens, underscores
+// or spaces, as whole words only, the longest handle first: the cases in
+// testdata/scrub.json, which Agent Hold'em's scrubber runs too.
 func TestAnonScrub(t *testing.T) {
-	var a Anon
-	a.As(Player{Handle: "dashing-pelican"}, "drawer")
-	a.Numbered(Player{Handle: "dashing-pelican-2"}, "guesser")
-	a.Numbered(Player{Handle: "otter"}, "guesser")
-	for in, want := range map[string]string{
-		"dashing-pelican":                   "drawer",
-		"Dashing Pelican 2":                 "guesser 1",
-		"DASHING-PELICAN-2 is cheating":     "guesser 1 is cheating",
-		"ask dashing  pelican":              "ask drawer",
-		"otter otter":                       "guesser 2 guesser 2",
-		"sea otters":                        "sea otters", // not a whole word
-		"rotter":                            "rotter",
-		"pelican":                           "pelican",
-		"a fish":                            "a fish",
-		"otter-dashing-pelican":             "guesser 2-drawer",
-		"dashing-pelican-2 dashing-pelican": "guesser 1 drawer",
-	} {
-		if got := a.Scrub(in); got != want {
-			t.Errorf("Scrub(%q) = %q, want %q", in, got, want)
-		}
+	b, err := os.ReadFile("testdata/scrub.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A handle that a role contains doesn't loop.
-	var b Anon
-	b.Numbered(Player{Handle: "guesser"}, "guesser")
-	if got := b.Scrub("guesser"); got != "guesser 1" {
-		t.Errorf("got %q", got)
+	var f struct {
+		Cases []struct {
+			Name    string `json:"name"`
+			Players []struct {
+				Name string `json:"name"`
+				Role string `json:"role"`
+			} `json:"players"`
+			Text string `json:"text"`
+			Want string `json:"want"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.Cases {
+		var a Anon
+		for _, p := range c.Players {
+			a.As(Player{Handle: p.Name}, p.Role)
+		}
+		if got := a.Scrub(c.Text); got != c.Want {
+			t.Errorf("%s: Scrub(%q) = %q, want %q", c.Name, c.Text, got, c.Want)
+		}
 	}
 }
 

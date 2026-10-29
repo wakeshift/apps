@@ -14,8 +14,7 @@ import (
 
 // Channel is a channel, as a person sees it.
 type Channel struct {
-	ID, OrgID, OrgSlug, OrgName, Name, Topic, GroupType string
-	CreatedBy                                           string
+	ID, OrgID, OrgSlug, OrgName, Name, Topic, CreatedBy string
 	// Role is the person's in the channel's org (owner, admin, member), or
 	// in the channel outside orgs (owner, member).
 	Role string
@@ -44,18 +43,18 @@ func (c Channel) Manages() bool { return c.Role == "owner" || c.Role == "admin" 
 // banned from the channel), and the channels outside orgs they're in.
 // Never a DM (dmstore.go).
 const visible = `
-	SELECT c.id, coalesce(c.org_id, ''), coalesce(o.slug, ''), coalesce(o.name, ''), c.name, c.topic, c.group_type, coalesce(c.created_by, ''),
+	SELECT c.id, coalesce(c.org_id, ''), coalesce(o.slug, ''), coalesce(o.name, ''), c.name, c.topic, coalesce(c.created_by, ''),
 		coalesce(om.role, cm.role)
 	FROM channels c
 	LEFT JOIN orgs o ON o.id = c.org_id
 	LEFT JOIN org_members om ON om.org_id = c.org_id AND om.person_id = $1
 	LEFT JOIN channel_members cm ON cm.channel_id = c.id AND cm.person_id = $1
-	WHERE c.closed_at IS NULL AND c.ready AND c.dm_agent IS NULL AND (om.person_id IS NOT NULL OR cm.person_id IS NOT NULL)
+	WHERE c.closed_at IS NULL AND c.dm_agent IS NULL AND (om.person_id IS NOT NULL OR cm.person_id IS NOT NULL)
 		AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.channel_id = c.id AND b.person_id = $1)`
 
 func scanChannel(row pgx.Row) (Channel, error) {
 	var c Channel
-	err := row.Scan(&c.ID, &c.OrgID, &c.OrgSlug, &c.OrgName, &c.Name, &c.Topic, &c.GroupType, &c.CreatedBy, &c.Role)
+	err := row.Scan(&c.ID, &c.OrgID, &c.OrgSlug, &c.OrgName, &c.Name, &c.Topic, &c.CreatedBy, &c.Role)
 	return c, notFound(err)
 }
 
@@ -73,15 +72,10 @@ func (s *Store) ChannelFor(ctx context.Context, person, id string) (Channel, err
 	return scanChannel(s.Pool.QueryRow(ctx, visible+` AND c.id = $2`, person, id))
 }
 
-// ChannelByGroup is a channel by its group, if the person may use it.
-func (s *Store) ChannelByGroup(ctx context.Context, person, group string) (Channel, error) {
-	return scanChannel(s.Pool.QueryRow(ctx, visible+` AND c.group_type = $2`, person, group))
-}
-
 // OrgChannels are an org's open channels.
 func (s *Store) OrgChannels(ctx context.Context, org string) ([]Channel, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT c.id, c.org_id, o.slug, o.name, c.name, c.topic, c.group_type, coalesce(c.created_by, ''), ''
-		FROM channels c JOIN orgs o ON o.id = c.org_id WHERE c.org_id = $1 AND c.closed_at IS NULL AND c.ready ORDER BY c.name`, org)
+	rows, err := s.Pool.Query(ctx, `SELECT c.id, c.org_id, o.slug, o.name, c.name, c.topic, coalesce(c.created_by, ''), ''
+		FROM channels c JOIN orgs o ON o.id = c.org_id WHERE c.org_id = $1 AND c.closed_at IS NULL ORDER BY c.name`, org)
 	if err != nil {
 		return nil, err
 	}
@@ -89,11 +83,9 @@ func (s *Store) OrgChannels(ctx context.Context, org string) ([]Channel, error) 
 }
 
 // CreateChannel stores a new channel (in org, or outside orgs owned by
-// person), with groupType(id) as its group. Making the group in Wakeshift
-// is the caller's.
-func (s *Store) CreateChannel(ctx context.Context, person, org, name, topic string, groupType func(id string) string) (Channel, error) {
+// person), ready to use.
+func (s *Store) CreateChannel(ctx context.Context, person, org, name, topic string) (Channel, error) {
 	c := Channel{ID: newID(), OrgID: org, Name: name, Topic: topic, CreatedBy: person, Role: "owner"}
-	c.GroupType = groupType(c.ID)
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := limitLock(ctx, tx, "channels:"+cmp.Or(org, "person:"+person)); err != nil {
 			return err
@@ -119,8 +111,8 @@ func (s *Store) CreateChannel(ctx context.Context, person, org, name, topic stri
 				return errTooMany
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO channels (id, org_id, name, topic, created_by, group_type) VALUES ($1, nullif($2, ''), $3, $4, $5, $6)`,
-			c.ID, org, name, topic, person, c.GroupType); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO channels (id, org_id, name, topic, created_by) VALUES ($1, nullif($2, ''), $3, $4, $5)`,
+			c.ID, org, name, topic, person); err != nil {
 			return err
 		}
 		if org == "" {
@@ -145,14 +137,8 @@ func (s *Store) OrgRole(ctx context.Context, org, person string) (string, error)
 
 // OrgChannel is one of an org's open channels.
 func (s *Store) OrgChannel(ctx context.Context, org, id string) (Channel, error) {
-	return scanChannel(s.Pool.QueryRow(ctx, `SELECT c.id, c.org_id, o.slug, o.name, c.name, c.topic, c.group_type, coalesce(c.created_by, ''), ''
-		FROM channels c JOIN orgs o ON o.id = c.org_id WHERE c.org_id = $1 AND c.id = $2 AND c.closed_at IS NULL AND c.ready`, org, id))
-}
-
-// MarkReady makes a channel usable, once its group exists in Wakeshift.
-func (s *Store) MarkReady(ctx context.Context, id string) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE channels SET ready = true WHERE id = $1`, id)
-	return err
+	return scanChannel(s.Pool.QueryRow(ctx, `SELECT c.id, c.org_id, o.slug, o.name, c.name, c.topic, coalesce(c.created_by, ''), ''
+		FROM channels c JOIN orgs o ON o.id = c.org_id WHERE c.org_id = $1 AND c.id = $2 AND c.closed_at IS NULL`, org, id))
 }
 
 // ChannelsNamed are the channels a person may use called name.
@@ -164,25 +150,19 @@ func (s *Store) ChannelsNamed(ctx context.Context, person, name string) ([]Chann
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Channel, error) { return scanChannel(r) })
 }
 
-// DropChannel deletes a channel whose group couldn't be made.
-// (One that isn't ready is deleted by Prune after an hour anyway.)
-func (s *Store) DropChannel(ctx context.Context, id string) error {
-	_, err := s.Pool.Exec(ctx, `DELETE FROM channels WHERE id = $1`, id)
-	return err
-}
-
-// CloseChannel closes a channel: its group closes (outbox).
+// CloseChannel closes a channel: every agent leaves it. Its messages go
+// with its row, 30 days later (Prune).
 func (s *Store) CloseChannel(ctx context.Context, by, id string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := authorize(ctx, tx, by, "", id, manager); err != nil {
 			return err
 		}
-		var group, org string
-		err := tx.QueryRow(ctx, `UPDATE channels SET closed_at = now() WHERE id = $1 AND closed_at IS NULL RETURNING group_type, coalesce(org_id, '')`, id).Scan(&group, &org)
+		var org string
+		err := tx.QueryRow(ctx, `UPDATE channels SET closed_at = now() WHERE id = $1 AND closed_at IS NULL RETURNING coalesce(org_id, '')`, id).Scan(&org)
 		if err != nil {
 			return notFound(err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO membership_ends (group_type, workspace, reason) VALUES ($1, '', 'closed')`, group); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM channel_agents WHERE channel_id = $1`, id); err != nil {
 			return err
 		}
 		return audit(ctx, tx, by, org, "channel.closed", map[string]any{"channel": id})
@@ -230,8 +210,7 @@ func (s *Store) RemoveFromChannel(ctx context.Context, by string, c Channel, per
 			// role meanwhile counts).
 			// Both rows locked (authorize locked by's): a promotion meanwhile
 			// waits for this removal, or this check sees it. Someone no longer
-			// in the org (their agents not yet out of its groups) has no role,
-			// and may be kept out like a member.
+			// in the org has no role, and may be kept out like a member.
 			var target, byRole string
 			err := tx.QueryRow(ctx, `SELECT role FROM org_members WHERE org_id = $1 AND person_id = $2 FOR SHARE`, c.OrgID, person).Scan(&target)
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -258,11 +237,7 @@ func (s *Store) RemoveFromChannel(ctx context.Context, by string, c Channel, per
 				return err
 			}
 		}
-		reason := "removed"
-		if by == person {
-			reason = "left"
-		}
-		if err := endChannelsFor(ctx, tx, person, reason, `SELECT $3::text`, c.ID); err != nil {
+		if err := endChannelsFor(ctx, tx, person, `SELECT $2::text`, c.ID); err != nil {
 			return err
 		}
 		action := "channel.member_removed"

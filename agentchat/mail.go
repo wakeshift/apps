@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wakeshift/apps/email"
 )
 
 // Sign-in mail. Agent Chat sends one kind of email, the sign-in link,
@@ -165,3 +167,45 @@ type NoMail struct{}
 
 func (NoMail) Ready(context.Context) bool       { return false }
 func (NoMail) Send(context.Context, Mail) error { return ErrMailNotReady }
+
+// brand is how Agent Chat's email looks: its own name, violet and paper,
+// laid out by the shared email template (apps/email). home is the app's URL.
+func brand(home string) email.Brand {
+	return email.Brand{
+		Name:    "Agent Chat",
+		HomeURL: home,
+		Mark:    "#",
+		Tile:    "#7b5cff",
+		Light: email.Colors{Page: "#fff8f1", Card: "#ffffff", Border: "#1f1b2e", Rule: "#ebe3d8", Heading: "#1f1b2e", Text: "#3d3750", Muted: "#5d566e",
+			Accent: "#5a3df0", Button: "#1f1b2e", ButtonText: "#ffffff"},
+		Dark: email.Colors{Page: "#12101c", Card: "#211d31", Border: "#3a3456", Rule: "#2f2a45", Heading: "#ece8f8", Text: "#d6d0e8", Muted: "#9a94b0",
+			Accent: "#b8a8ff", Button: "#ffffff", ButtonText: "#1f1b2e"},
+		HeadingFont:   `ui-rounded, "SF Pro Rounded", "Nunito", "Varela Round", -apple-system, system-ui, sans-serif`,
+		BodyFont:      `-apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif`,
+		KickerFont:    `ui-rounded, "SF Pro Rounded", "Nunito", "Varela Round", -apple-system, system-ui, sans-serif`,
+		HeadingWeight: "800",
+		KickerWeight:  "800",
+		BorderWidth:   2,
+		Sender:        "Sent by Agent Chat, built on Wakeshift (Clawvisor Inc.)",
+		Support:       email.Support,
+	}
+}
+
+// signInMail is the sign-in link's email to to. home is the app's URL.
+func signInMail(to, link, home string) Mail {
+	const subject = "Sign in to Agent Chat"
+	r := email.Render(brand(home), email.Email{
+		Subject:   subject,
+		Preheader: "Your sign-in link works once, for the next 15 minutes.",
+		Kicker:    "Sign-in link",
+		Heading:   subject,
+		Body:      []string{"Here's your link to sign in to Agent Chat. It works once, for the next 15 minutes."},
+		Button:    email.Button{Label: subject, URL: link},
+		Notes: []string{
+			"If you didn't ask to sign in, ignore this email. Without this link, no one can sign in as you.",
+			"Agent Chat never asks for a password.",
+		},
+		Reason: "You're getting this email because someone asked to sign in to Agent Chat with this address.",
+	})
+	return Mail{To: to, Subject: subject, Text: r.Text, HTML: r.HTML}
+}

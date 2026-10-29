@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"maps"
 	"net/http"
@@ -36,14 +35,22 @@ func kitServer(t *testing.T, conns string, core http.Handler) *Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	s := &Server{Name: "g", Store: st, MaxSeats: 3, Prefix: "app.g.game.",
+	s := &Server{Name: "g", Store: st, MaxSeats: 3,
 		NewState: func() State { return &testGame{} },
 		NewGame: func(g State, now time.Time) {
 			g.(*testGame).Phase = "waiting"
 			g.(*testGame).Deadline = now.Add(time.Hour)
 		}}
 	if core != nil {
-		srv := httptest.NewServer(core)
+		// The manifest appkit sends before the first emit (nothing published yet).
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/apps/v1/manifest" {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"description": ""}`))
+				return
+			}
+			core.ServeHTTP(w, r)
+		}))
 		t.Cleanup(srv.Close)
 		_, key, _ := ed25519.GenerateKey(rand.Reader)
 		s.Kit = &appkit.App{ID: "g", Key: key, Core: srv.URL}
@@ -242,7 +249,7 @@ func TestParseWorkspaces(t *testing.T) {
 	}
 }
 
-// Posting announcements renews its lease per post and stops once another
+// Sending updates renews its lease per entry and stops once another
 // instance has the lease, leaving that one's lease alone.
 func TestDeliverHoldsItsLease(t *testing.T) {
 	ctx := context.Background()
@@ -251,7 +258,7 @@ func TestDeliverHoldsItsLease(t *testing.T) {
 	steal := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
 	s = kitServer(t, "4", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path != "/api/apps/v1/groups/app.g.game.g1/events" {
+		if r.URL.Path != "/api/apps/v1/events/emit" {
 			http.NotFound(w, r)
 			return
 		}
@@ -262,6 +269,8 @@ func TestDeliverHoldsItsLease(t *testing.T) {
 		w.Write([]byte(`{"id":"e1"}`))
 	}))
 	if _, err := s.Store.Pool.Exec(ctx, `INSERT INTO games (id, phase, max_seats, state) VALUES ('g1', 'playing', 3, '{}');
+		INSERT INTO seats (game_id, player, workspace, agent, session, name, handle, reserved_at, seated_at, subscription, subscriber)
+			VALUES ('g1', 'w/a/s', 'w', 'a', 's', 'raven', 'raven', now(), now(), 'sub-1', 'w/a');
 		INSERT INTO room_log (game_id, at, subject, text) VALUES ('g1', now(), 'one', 'one'), ('g1', now(), 'two', 'two')`); err != nil {
 		t.Fatal(err)
 	}
@@ -301,36 +310,21 @@ func TestTruncateSubject(t *testing.T) {
 	}
 }
 
-// A seat whose reservation was swept while its player was joining the
-// room isn't taken: the player goes to the next game, seated there.
+// A seat whose reservation was swept while its player was subscribing
+// isn't taken: the player goes to the next game, seated there.
 func TestJoinSweptReservation(t *testing.T) {
 	ctx := context.Background()
-	var s *Server
-	var swept atomic.Bool
-	s = kitServer(t, "4", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/api/apps/v1/workspaces/w/agents/a/token":
-			w.Write([]byte(`{"access_token":"tok","expires_in":900}`))
-		case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/apps/v1/groups/"):
-			w.Write([]byte(`{"group":{},"created":true}`))
-		case r.URL.Path == "/api/apps/v1/agent/subscriptions":
-			w.Write([]byte(`{}`))
-		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/apps/v1/groups/"):
-			if swept.CompareAndSwap(false, true) {
-				s.Store.Pool.Exec(r.Context(), `DELETE FROM seats`) // abandoned, as another join sees it
-			}
-			w.Write([]byte(`{"members":[{"handle":"raven","workspace":"w","agent":"a","session":"s"}]}`))
-		default:
-			http.NotFound(w, r)
+	s := kitServer(t, "4", nil)
+	var swept bool
+	j := joining{workspace: "w", agent: "a", session: "s", subscribe: func(context.Context) (appkit.Subscription, error) {
+		if !swept {
+			swept = true
+			s.Store.Pool.Exec(ctx, `DELETE FROM seats`) // abandoned, as another join sees it
 		}
-	}))
-	ag, err := s.Kit.ActAs(ctx, "w", "a")
-	if err != nil {
-		t.Fatal(err)
-	}
+		return appkit.Subscription{ID: "sub-1", User: "w/a"}, nil
+	}}
 	var seated []string
-	g, p, err := s.Join(ctx, ag, "s", func(tx *Tx, g State, p Player) error {
+	g, key, err := s.join(ctx, j, func(tx *Tx, g State, p Player) error {
 		seated = append(seated, g.base().ID)
 		return nil
 	})
@@ -338,56 +332,44 @@ func TestJoinSweptReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var handle *string
-	if err := s.Store.Pool.QueryRow(ctx, `SELECT handle FROM seats WHERE game_id = $1 AND player = $2`, g.base().ID, p.Key()).Scan(&handle); err != nil {
+	if err := s.Store.Pool.QueryRow(ctx, `SELECT handle FROM seats WHERE game_id = $1 AND player = $2`, g.base().ID, key).Scan(&handle); err != nil {
 		t.Fatalf("no seat in the game it joined: %v", err)
 	}
-	if len(seated) != 1 || seated[0] != g.base().ID || handle == nil || *handle != "raven" {
+	if len(seated) != 1 || seated[0] != g.base().ID || handle == nil || *handle == "" {
 		t.Fatalf("seated in %v, joined %s as %v", seated, g.base().ID, handle)
 	}
 }
 
 // A seated player whose subscription ended (it unsubscribed, it expired,
-// its consent was revoked) is no longer in the room: it's away, so the game
-// doesn't wait for it, until it joins again and is back in the room under
-// its seat's name.
+// its consent was revoked) is away, and so is one whose conversation isn't
+// connected: the game doesn't wait for them. Joining again subscribes it
+// again, back under its seat's name.
 func TestEndedPlayersAreAwayUntilTheyRejoin(t *testing.T) {
 	ctx := context.Background()
-	type member struct {
-		Handle    string `json:"handle"`
-		Workspace string `json:"workspace"`
-		Agent     string `json:"agent"`
-		Session   string `json:"session"`
-		Connected bool   `json:"connected"`
-	}
 	var mu sync.Mutex
-	members := []member{{"raven", "w1", "a", "s", true}, {"finch", "w2", "b", "t", true}}
-	var resubscribed appkit.Subscription
-	s := kitServer(t, "4", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	status := map[string][2]bool{"sub-r": {true, true}, "sub-f": {true, true}} // live, connected
+	core := newRecCore()
+	core.on("POST /api/apps/v1/events/status", func(body map[string]any) (int, any) {
 		mu.Lock()
 		defer mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/api/apps/v1/workspaces/w1/agents/a/token":
-			w.Write([]byte(`{"access_token":"tok","expires_in":900}`))
-		case r.Method == "POST" && r.URL.Path == "/api/apps/v1/agent/subscriptions":
-			json.NewDecoder(r.Body).Decode(&resubscribed)
-			members = append(members, member{resubscribed.Handle, "w1", "a", resubscribed.Session, true})
-			w.Write([]byte(`{}`))
-		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/apps/v1/groups/"):
-			json.NewEncoder(w).Encode(map[string]any{"members": members})
-		default:
-			http.NotFound(w, r)
+		var out []any
+		for _, ref := range body["subscriptions"].([]any) {
+			id := ref.(map[string]any)["id"].(string)
+			st := status[id]
+			out = append(out, map[string]any{"id": id, "user": ref.(map[string]any)["user"], "live": st[0], "connected": st[1]})
 		}
-	}))
+		return 200, map[string]any{"subscriptions": out}
+	})
+	s := kitServer(t, "4", core)
 	var game string
-	for _, p := range []struct{ ws, agent, session, handle string }{{"w1", "a", "s", "raven"}, {"w2", "b", "t", "finch"}} {
+	for _, p := range []struct{ ws, agent, session, handle, sub string }{{"w1", "a", "s", "raven", "sub-r"}, {"w2", "b", "t", "finch", "sub-f"}} {
 		r, err := s.reserve(ctx, p.ws, p.agent, p.session)
 		if err != nil {
 			t.Fatal(err)
 		}
 		game = r.game
-		if _, err := s.Store.Pool.Exec(ctx, `UPDATE seats SET handle = $2, seated_at = now() WHERE game_id = $1 AND player = $3`,
-			r.game, p.handle, PlayerKey(p.ws, p.agent, p.session)); err != nil {
+		if _, err := s.Store.Pool.Exec(ctx, `UPDATE seats SET handle = $2, seated_at = now(), subscription = $4, subscriber = $5 WHERE game_id = $1 AND player = $3`,
+			r.game, p.handle, PlayerKey(p.ws, p.agent, p.session), p.sub, p.ws+"/"+p.agent); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -396,40 +378,33 @@ func TestEndedPlayersAreAwayUntilTheyRejoin(t *testing.T) {
 		return got
 	}
 	if got := away(); len(got) != 0 {
-		t.Fatalf("away with both in the room: %v", got)
+		t.Fatalf("away with both subscribed and connected: %v", got)
 	}
-	// Raven's subscription ends (it leaves the room); finch's agent drops off.
+	// Raven's subscription ends; finch's conversation drops off.
 	mu.Lock()
-	members = []member{{"finch", "w2", "b", "t", false}}
+	status = map[string][2]bool{"sub-r": {false, false}, "sub-f": {true, false}}
 	mu.Unlock()
 	if got := away(); !slices.Equal(got, []string{"finch", "raven"}) {
 		t.Fatalf("away: %v", got)
 	}
-	// Raven joins again: back in the room as raven, from its conversation
-	// (another member named raven isn't it).
+	// Raven joins again: subscribed again (a new subscription), seated as
+	// it was.
 	mu.Lock()
-	members = append(members, member{"raven", "w3", "c", "u", true})
+	status["sub-r2"] = [2]bool{true, true}
 	mu.Unlock()
-	ag, err := s.Kit.ActAs(ctx, "w1", "a")
+	var subscribed int
+	j := joining{workspace: "w1", agent: "a", session: "s", subscribe: func(context.Context) (appkit.Subscription, error) {
+		subscribed++
+		return appkit.Subscription{ID: "sub-r2", User: "w1/a", Created: true}, nil
+	}}
+	g, _, err := s.join(ctx, j, func(*Tx, State, Player) error { t.Fatal("seated again"); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, p, err := s.Join(ctx, ag, "s", func(*Tx, State, Player) error { t.Fatal("seated again"); return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.base().ID != game || p != (Player{}) {
-		t.Fatalf("rejoining returned game %s, player %+v", g.base().ID, p)
-	}
-	if resubscribed.Handle != "raven" || resubscribed.Session != "s" || resubscribed.Type != s.room(game) {
-		t.Fatalf("rejoined the room as %+v", resubscribed)
+	if g.base().ID != game || subscribed != 1 {
+		t.Fatalf("rejoining returned game %s, subscribed %d times", g.base().ID, subscribed)
 	}
 	if got := away(); !slices.Equal(got, []string{"finch"}) {
 		t.Fatalf("away after raven rejoined: %v", got)
-	}
-	// Joining again while in the room changes nothing.
-	resubscribed = appkit.Subscription{}
-	if _, _, err := s.Join(ctx, ag, "s", nil); err != nil || resubscribed.Type != "" {
-		t.Fatalf("joining again while in the room: %v, %+v", err, resubscribed)
 	}
 }

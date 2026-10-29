@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>{{.Subject}}</title>
+<style>
+body { margin: 0; padding: 0; width: 100% !important; -webkit-text-size-adjust: 100%; }
+img { border: 0; outline: none; text-decoration: none; }
+@media (max-width: 600px) {
+  .pad { padding: 28px 24px !important; }
+  .heading { font-size: 26px !important; }
+}
+@media (prefers-color-scheme: dark) {
+  .page { background: {{.CSS.D.Page}} !important; }
+  .card { background: {{.CSS.D.Card}} !important; border-color: {{.CSS.D.Border}} !important; }
+  .rule { border-color: {{.CSS.D.Rule}} !important; }
+  .heading, .brand { color: {{.CSS.D.Heading}} !important; }
+  .text { color: {{.CSS.D.Text}} !important; }
+  .muted { color: {{.CSS.D.Muted}} !important; }
+  .accent { color: {{.CSS.D.Accent}} !important; }
+  .button { background: {{.CSS.D.Button}} !important; }
+  .button a { color: {{.CSS.D.ButtonText}} !important; }
+  .logo-light { display: none !important; }
+  .logo-dark { display: block !important; max-height: none !important; overflow: visible !important; }
+}
+</style>
+</head>
+<body class="page" style="margin:0;padding:0;background:{{.CSS.L.Page}};">
+{{with .Preheader}}<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:{{$.CSS.L.Page}};">{{.}}&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;</div>{{end}}
+<table role="presentation" class="page" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;background:{{.CSS.L.Page}};">
+<tr><td align="center" style="padding:40px 16px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:560px;">
+<tr><td style="padding:0 4px 24px;">
+<a href="{{.HomeURL}}" style="text-decoration:none;">
+{{- if .Logo}}
+<img class="logo-light" src="{{.Logo.URL}}" width="{{.Logo.Width}}" height="{{.Logo.Height}}" alt="{{.Name}}" style="display:block;border:0;width:{{.Logo.Width}}px;height:{{.Logo.Height}}px;font-family:{{.CSS.HeadingFont}};font-size:22px;font-weight:700;line-height:{{.Logo.Height}}px;color:{{.CSS.L.Heading}};">
+{{- with .Logo.DarkURL}}
+<div class="logo-dark" style="display:none;max-height:0;overflow:hidden;mso-hide:all;"><img src="{{.}}" width="{{$.Logo.Width}}" height="{{$.Logo.Height}}" alt="{{$.Name}}" style="display:block;border:0;width:{{$.Logo.Width}}px;height:{{$.Logo.Height}}px;font-family:{{$.CSS.HeadingFont}};font-size:22px;font-weight:700;line-height:{{$.Logo.Height}}px;color:{{$.CSS.D.Heading}};"></div>
+{{- end}}
+{{- else}}
+<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+<td width="32" height="32" align="center" valign="middle" style="width:32px;height:32px;border-radius:9px;background:{{.CSS.Tile}};color:#ffffff;font-family:{{.CSS.HeadingFont}};font-size:18px;font-weight:800;line-height:32px;" aria-hidden="true">{{.Mark}}</td>
+<td class="brand" style="padding-left:10px;font-family:{{.CSS.HeadingFont}};font-size:20px;font-weight:800;line-height:32px;color:{{.CSS.L.Heading}};">{{.Name}}</td>
+</tr></table>
+{{- end}}
+</a>
+</td></tr>
+<tr><td class="card" style="background:{{.CSS.L.Card}};border:{{.BorderWidth}}px solid {{.CSS.L.Border}};border-radius:18px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+<tr><td class="pad" style="padding:40px 44px 36px;font-family:{{.CSS.BodyFont}};">
+{{- with .Kicker}}
+<p class="accent" style="margin:0 0 14px;font-family:{{$.CSS.KickerFont}};font-size:12px;font-weight:{{$.CSS.KickerWeight}};letter-spacing:0.12em;text-transform:uppercase;color:{{$.CSS.L.Accent}};">{{.}}</p>
+{{- end}}
+<h1 class="heading" style="margin:0 0 20px;font-family:{{.CSS.HeadingFont}};font-size:30px;font-weight:{{.CSS.HeadingWeight}};line-height:1.2;letter-spacing:-0.01em;color:{{.CSS.L.Heading}};">{{.Heading}}</h1>
+{{- with .Greeting}}
+<p class="text" style="margin:0 0 16px;font-size:16px;line-height:1.6;color:{{$.CSS.L.Text}};">{{.}}</p>
+{{- end}}
+{{- range .Body}}
+<p class="text" style="margin:0 0 16px;font-size:16px;line-height:1.6;color:{{$.CSS.L.Text}};">{{.}}</p>
+{{- end}}
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 24px;">
+<tr><td class="button" bgcolor="{{.CSS.L.Button}}" style="border-radius:999px;background:{{.CSS.L.Button}};">
+<a href="{{.Button.URL}}" target="_blank" style="display:inline-block;padding:14px 28px;border-radius:999px;font-family:{{.CSS.BodyFont}};font-size:16px;font-weight:700;line-height:20px;color:{{.CSS.L.ButtonText}};text-decoration:none;">{{.Button.Label}}</a>
+</td></tr>
+</table>
+<p class="muted" style="margin:0 0 24px;font-size:13px;line-height:1.6;color:{{.CSS.L.Muted}};">If the button doesn't work, paste this link into your browser:<br><a class="accent" href="{{.Button.URL}}" target="_blank" style="color:{{.CSS.L.Accent}};text-decoration:underline;word-break:break-all;">{{.Button.URL}}</a></p>
+{{- if .Notes}}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="rule" style="border-top:1px solid {{.CSS.L.Rule}};padding-top:20px;">
+{{- range .Notes}}
+<p class="muted" style="margin:0 0 10px;font-size:14px;line-height:1.6;color:{{$.CSS.L.Muted}};">{{.}}</p>
+{{- end}}
+</td></tr></table>
+{{- end}}
+</td></tr>
+</table>
+</td></tr>
+<tr><td class="muted" style="padding:24px 8px 0;font-family:{{.CSS.BodyFont}};font-size:13px;line-height:1.6;color:{{.CSS.L.Muted}};">
+{{- with .Reason}}{{.}}<br>{{end}}
+{{.Sender}}<br>
+Questions? Write to <a class="muted" href="mailto:{{.Support}}" style="color:{{.CSS.L.Muted}};text-decoration:underline;">{{.Support}}</a>.
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>

@@ -3,10 +3,13 @@
 // a number the tests move.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { act as engineAct, chipsInPlay, createTable, sit, startHand, type TableState, toAct as engineToAct } from "../engine/src/index.js";
-import { archiveHand } from "../src/archive.js";
-import { Casino, DAILY_BANKROLL, GameError, MIN_HANDS, REMOVED_SUBSCRIPTION_GRACE_MS, type Notifier } from "../src/casino.js";
+import { Anon, archiveHand } from "../src/archive.js";
+import { Casino, DAILY_BANKROLL, GameError, lastHandText, MIN_HANDS, REMOVED_SUBSCRIPTION_GRACE_MS, type LastHand, type Notifier } from "../src/casino.js";
 import type { Db } from "../src/db.js";
+import { Wakeshift, type WakeEvent } from "@wakeshift/sdk";
+import { defineHoldemEvents, holdemNotifier, turnRecipient, type HoldemEvents } from "../src/events.js";
 import { ADJECTIVES, ANIMALS, displayName, freshName, randomName, tableName } from "../src/names.js";
 import { handPage, landingPage, leaderboardPage, streetsOf, tableBody, tablePage, WAKESHIFT } from "../src/pages.js";
 import { describe as describeState, tableFrom } from "../src/tools.js";
@@ -20,6 +23,7 @@ interface Wake {
   player: string;
   guest: string;
   table: string;
+  subscription?: string | null;
   id: string;
   text: string;
   data: Record<string, unknown>;
@@ -30,6 +34,7 @@ function room(db: Db, start = Date.parse("2026-10-21T12:00:00Z")) {
   const wakes: Wake[] = [];
   const results: { topic: string; text: string; data: Record<string, unknown> }[] = [];
   const removed: Wake[] = [];
+  const handResults: Wake[] = [];
   const ended: { guest: string; subscription: string }[] = [];
   const notify: Notifier = {
     turn: async (to, e) => {
@@ -37,6 +42,9 @@ function room(db: Db, start = Date.parse("2026-10-21T12:00:00Z")) {
     },
     result: async (table, e) => {
       results.push({ topic: table, text: e.text, data: e.data });
+    },
+    handResult: async (to, e) => {
+      handResults.push({ ...to, ...e });
     },
     removed: async (to, e) => {
       removed.push({ ...to, ...e });
@@ -46,7 +54,7 @@ function room(db: Db, start = Date.parse("2026-10-21T12:00:00Z")) {
     },
   };
   const casino = new Casino({ db, notify, now: () => clock.t, handPauseMs: 0 });
-  return { casino, clock, wakes, results, removed, ended };
+  return { casino, clock, wakes, results, handResults, removed, ended };
 }
 
 async function player(casino: Casino, n: number, harness = "claude-code") {
@@ -249,6 +257,7 @@ test("out of time, the player's hand is folded (even when a check was free) and 
   assert.deepEqual([removed[0]!.player, removed[0]!.guest], [slow.id, `guest:${slow.id === a.id ? 1 : slow.id === b.id ? 2 : 3}`]);
   assert.match(removed[0]!.text, /You timed out at .* and were removed; your \$\d+ is back in your bankroll/);
   assert.equal(removed[0]!.data.type, "removed");
+  assert.equal(removed[0]!.subscription, `sub_${slow.id === a.id ? 1 : slow.id === b.id ? 2 : 3}`, "addressed to the subscription join made");
 
   // The notice comes once, in the next tool result, then it's gone.
   assert.match((await casino.takeNotice(slow.id))!, /You timed out/);
@@ -278,6 +287,7 @@ test("ending a removed player's subscription is tried again if it fails", async 
       wakes.push(to);
     },
     result: async () => {},
+    handResult: async () => {},
     removed: async () => {},
     endSubscription: async (_guest, subscription) => {
       if (failures-- > 0) throw new Error("core unreachable");
@@ -485,6 +495,7 @@ test("a turn's wake carries the player's own view, only to their own subscriptio
     result: async (table, event) => {
       published.push({ topic: table, data: event.data });
     },
+    handResult: async () => {},
     removed: async () => {},
     endSubscription: async () => {},
   };
@@ -499,11 +510,15 @@ test("a turn's wake carries the player's own view, only to their own subscriptio
     assert.equal(w.to.player, w.toAct, "a wake is for the player to act, and no other");
     assert.equal(w.to.guest, guestOf.get(w.toAct), "addressed to that player's own sign-in");
     assert.equal(w.to.table, table, "at their table");
-    const json = JSON.stringify(w.event);
-    for (const c of w.holes.get(w.toAct)!) assert.ok(json.includes(`"${c}"`) && w.event.text.includes(cardWord(c)), "it carries their own cards");
+    // The last hand's result (public: its board and the cards shown) is
+    // from another deal, so it's left out of the check.
+    const { last_hand: last, ...data } = w.event.data;
+    const json = JSON.stringify({ ...w.event, data });
+    const text = last ? w.event.text.replace(" " + lastHandText(last as LastHand), "") : w.event.text;
+    for (const c of w.holes.get(w.toAct)!) assert.ok(json.includes(`"${c}"`) && text.includes(cardWord(c)), "it carries their own cards");
     for (const [who, cards] of w.holes) {
       if (who === w.toAct) continue;
-      for (const c of cards) assert.ok(!json.includes(`"${c}"`) && !w.event.text.includes(cardWord(c)), "it never carries another player's cards");
+      for (const c of cards) assert.ok(!json.includes(`"${c}"`) && !text.includes(cardWord(c)), "it never carries another player's cards");
     }
     assert.ok(Buffer.byteLength(w.event.text) <= 1000, "the text fits an event");
   }
@@ -554,6 +569,95 @@ test("act takes the turn's ID and refuses a stale one; the next wake has what ha
   assert.ok(wakes.slice(mark).filter((w) => w.player === speaker.id).every((w) => !w.text.includes("Table talk since then")));
   // The current turn works.
   await casino.act(listener.id, { type: "fold" }, view.hand.turn);
+});
+
+test("each hand's result goes to the table's native seats only; a bridged player's next turn carries it as last_hand", async (t) => {
+  const db = await testDb(t);
+  const { casino, wakes, results, handResults } = room(db);
+  const bridged = await player(casino, 1);
+  // A native seat: a client that subscribes itself, so no subscription of ours.
+  const native = await casino.identify("c_native", "guest:native", { harness: "chatgpt" });
+  await casino.join(bridged.id, {});
+  await casino.join(native.id, {});
+  const ids = [bridged.id, native.id];
+  // With no pause between hands, play goes on into later hands.
+  await playOut(casino, ids, 20);
+  assert.ok(results.length >= 2, `the shared result, for spectators, still goes out for every hand (${results.length})`);
+  assert.equal(handResults.length, results.length, "a hand_result for every hand, to the native seat only");
+  for (const [i, res] of results.entries()) {
+    const r = handResults[i]!;
+    assert.deepEqual([r.player, r.guest, r.subscription], [native.id, "guest:native", null]);
+    assert.equal(r.id, `${res.data.hand}:end:${native.id}`, "its own emit ID");
+    assert.equal(r.data.type, "hand_result");
+    for (const k of ["table", "hand", "number", "pot", "board", "winners", "net", "shown"]) assert.deepEqual(r.data[k], res.data[k], k);
+    assert.match(r.text, new RegExp(`^Hand ${res.data.number} at table \\S+ is over: .* won \\$\\d+`));
+  }
+
+  // Every turn is addressed by whose seat it is.
+  for (const w of wakes) assert.equal(w.subscription, w.player === bridged.id ? "sub_1" : null);
+  // The bridged player's first turn in each later hand carries the last hand's result; no other turn does.
+  const mine = wakes.filter((w) => w.player === bridged.id);
+  const firsts = mine.filter((w, i) => i === 0 || mine[i - 1]!.data.hand !== w.data.hand);
+  const carrying = firsts.filter((w) => w.data.last_hand !== undefined);
+  assert.ok(carrying.length >= 1, "a turn in a later hand carried the last hand's result");
+  for (const next of carrying) {
+    const hand = Number(String(next.data.hand).split("-").at(-1));
+    const prev = results.find((x) => x.data.number === hand - 1)!.data;
+    assert.deepEqual(next.data.last_hand, { number: prev.number, winners: prev.winners, pot: prev.pot, board: prev.board, shown: prev.shown });
+    assert.ok(next.text.includes(`Last hand (${prev.number}): ${(prev.winners as string[]).join(" and ")} won $${prev.pot}`), next.text);
+    assert.ok(Buffer.byteLength(next.text) <= 1000);
+  }
+  assert.ok(firsts.filter((w) => w.data.hand !== `${results[0]!.data.table}-1`).every((w) => w.data.last_hand !== undefined), "every later hand's first turn");
+  assert.ok(mine.filter((w) => !firsts.includes(w)).every((w) => w.data.last_hand === undefined), "only the first turn in a hand");
+  assert.ok(wakes.filter((w) => w.player === native.id).every((w) => w.data.last_hand === undefined), "a native seat hears results on their own");
+});
+
+test("Hold'em's events address a turn by seat: the bridged player's subscription, a native seat's native subscriptions", async () => {
+  const sent: { event: string; args: unknown; data: unknown; opts: unknown }[] = [];
+  const fake = (event: string) => ({ emit: async (args: unknown, data: unknown, opts: unknown) => void sent.push({ event, args, data, opts }), end: async () => true }) as unknown as WakeEvent;
+  const events: HoldemEvents = { turn: fake("holdem.turn"), handResult: fake("holdem.hand_result") };
+  const notify = holdemNotifier(() => events);
+  const ev = { id: "e1", text: "x", data: { type: "turn" } };
+  await notify.turn({ player: "p1", guest: "g1", table: "t1", subscription: "es_1" }, ev);
+  await notify.turn({ player: "p2", guest: "g2", table: "t1", subscription: null }, ev);
+  await notify.removed({ player: "p1", guest: "g1", table: "t1", subscription: "es_1" }, ev);
+  await notify.removed({ player: "p2", guest: "g2", table: "t1", subscription: null }, ev);
+  await notify.handResult({ player: "p2", guest: "g2", table: "t1", subscription: null }, { ...ev, id: "h:end:p2" });
+  await notify.result("t1", { ...ev, id: "h:end" });
+  assert.deepEqual(
+    sent.map((s) => [s.event, s.args, s.opts]),
+    [
+      ["holdem.turn", { table: "t1" }, { to: { user: "g1", subscription: "es_1" }, id: "e1" }],
+      ["holdem.turn", { table: "t1" }, { to: { native: "g2" }, id: "e1" }],
+      ["holdem.turn", { table: "t1" }, { to: { user: "g1", subscription: "es_1" }, id: "e1" }],
+      ["holdem.turn", { table: "t1" }, { to: { native: "g2" }, id: "e1" }],
+      ["holdem.turn", { table: "t1" }, { to: { native: "g2" }, id: "h:end:p2" }],
+      ["holdem.hand_result", { table: "t1" }, { id: "h:end" }],
+    ],
+  );
+  assert.deepEqual(turnRecipient({ player: "p", guest: "g", table: "t", subscription: "" }), { native: "g" });
+});
+
+test("holdem.turn: \"Your table\", its hand_result kind and last_hand in the schema, and each kind's line", () => {
+  const fetchNever = (async () => {
+    throw new Error("no requests");
+  }) as typeof fetch;
+  const wake = new Wakeshift({ key: `wst_test_holdem_${Buffer.alloc(32, 7).toString("base64url")}`, core: "http://core.test", fetch: fetchNever });
+  // The SDK's internals: the event's definition, manifest and text line.
+  const turn = defineHoldemEvents(wake, {} as Casino).turn as unknown as {
+    definition(): { title?: string; description: string };
+    manifest: { payload: { properties: Record<string, { enum?: string[] }> } };
+    opts: { text: (p: unknown, a: unknown) => string };
+  };
+  const d = turn.definition();
+  assert.equal(d.title, "Your table");
+  assert.match(d.description, /\"turn\" is your move.*\"removed\".*a native seat.*\"hand_result\"/s);
+  assert.ok(d.description.length <= 500, `the description is ${d.description.length} characters: Wakeshift takes at most 500`);
+  assert.deepEqual(turn.manifest.payload.properties.type!.enum, ["turn", "removed", "hand_result"]);
+  for (const k of ["number", "pot", "board", "winners", "net", "shown", "last_hand"]) assert.ok(k in turn.manifest.payload.properties, k);
+  const line = turn.opts.text;
+  assert.equal(line({ type: "hand_result", table: "t1", number: 3, pot: 12, winners: ["Brave Otter"] }, { table: "t1" }), "Hand 3 at table t1 is over: Brave Otter won $12.");
+  assert.equal(line({ type: "removed", table: "t1", text: "You timed out." }, { table: "t1" }), "You timed out.");
 });
 
 test("a sign-in holds one seat at a table; pickTable names the table join would seat at", async (t) => {
@@ -687,6 +791,18 @@ test("random play with raises and all-ins: players bust, rejoin while they have 
   const finished = await db.query<{ n: string }>("SELECT count(*)::text AS n FROM hands WHERE ended_at IS NOT NULL");
   // All in so often, the money ends up with one or two players in a few hands.
   assert.ok(Number(finished.rows[0]!.n) >= 3);
+});
+
+// The same cases as gamekit's Anon.Scrub (apps/gamekit/testdata/scrub.json).
+test("names are scrubbed as gamekit scrubs them", () => {
+  const f = JSON.parse(readFileSync(new URL("../../../gamekit/testdata/scrub.json", import.meta.url), "utf8")) as {
+    cases: { name: string; players: { name: string; role: string }[]; text: string; want: string }[];
+  };
+  for (const c of f.cases) {
+    const a = new Anon();
+    c.players.forEach((p, i) => a.as({ id: `p${i}`, name: p.name, house: false, model: null }, p.role));
+    assert.equal(a.scrub(c.text), c.want, c.name);
+  }
 });
 
 test("an archived hand scrubs every name it may hold, a departed player's too, in any case and spelling", () => {

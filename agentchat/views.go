@@ -10,6 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/agentpicker"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
@@ -178,12 +179,12 @@ func describe(a Agent, owner Person, viewer string) agentView {
 
 // ── Connected or not ─────────────────────────────────────────────────────
 
-// statusTTL is how long an agent's connected-or-not is cached.
+// statusTTL is how long an agent's sessions' connected-or-not is cached.
 const statusTTL = 20 * time.Second
 
 type agentStatus struct {
-	on bool
-	at time.Time
+	sessions map[string]bool // session handle → connected
+	at       time.Time
 }
 
 var (
@@ -196,9 +197,22 @@ var (
 // for Mac for a Codex thread). An agent Wakeshift can't be asked about
 // counts as not connected.
 func (a *App) connectedAgents(ctx context.Context, agents []Agent) map[string]bool {
+	out := map[string]bool{}
+	for id, sessions := range a.agentSessions(ctx, agents) {
+		for _, on := range sessions {
+			out[id] = out[id] || on
+		}
+	}
+	return out
+}
+
+// agentSessions are, for each of the agents, its sessions in Wakeshift and
+// whether each is connected now (agentkit.Sessions), by agent ID: what the
+// members panel says of each member conversation.
+func (a *App) agentSessions(ctx context.Context, agents []Agent) map[string]map[string]bool {
 	// Each lookup writes only its own slot; the map is built once they're
 	// all done, so nothing writes to it concurrently.
-	on := make([]bool, len(agents))
+	found := make([]map[string]bool, len(agents))
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -208,17 +222,17 @@ func (a *App) connectedAgents(ctx context.Context, agents []Agent) map[string]bo
 		s, ok := statusCache[ag.ID]
 		statusMu.Unlock()
 		if ok && time.Since(s.at) < statusTTL {
-			on[i] = s.on
+			found[i] = s.sessions
 			continue
 		}
 		wg.Go(func() {
 			limit <- struct{}{}
 			defer func() { <-limit }()
-			connected := false
+			sessions := map[string]bool{}
 			if w, err := a.Kit.ActAs(ctx, ag.Workspace, ag.Agent); err == nil {
-				if sessions, err := w.Sessions(ctx); err == nil {
-					for _, s := range sessions {
-						connected = connected || s.Connected
+				if list, err := agentkit.Sessions(ctx, w); err == nil {
+					for _, s := range list {
+						sessions[s.Handle] = s.Connected
 					}
 				}
 			}
@@ -226,15 +240,15 @@ func (a *App) connectedAgents(ctx context.Context, agents []Agent) map[string]bo
 			if len(statusCache) > 10_000 {
 				clear(statusCache)
 			}
-			statusCache[ag.ID] = agentStatus{on: connected, at: time.Now()}
+			statusCache[ag.ID] = agentStatus{sessions: sessions, at: time.Now()}
 			statusMu.Unlock()
-			on[i] = connected
+			found[i] = sessions
 		})
 	}
 	wg.Wait()
-	out := make(map[string]bool, len(agents))
+	out := make(map[string]map[string]bool, len(agents))
 	for i, ag := range agents {
-		out[ag.ID] = on[i]
+		out[ag.ID] = found[i]
 	}
 	return out
 }

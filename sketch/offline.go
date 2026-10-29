@@ -8,8 +8,6 @@ import (
 	"io"
 	"slices"
 	"strings"
-
-	"github.com/wakeshift/apps/gamekit"
 )
 
 // The game's rules and renderer for tools outside it (cmd/sketchtool, for
@@ -44,7 +42,6 @@ func Words() []Word {
 // stores them: strokes, or shapes ({"sh": …}) for svg.
 func CheckDraw(args []byte, before []byte) ([]byte, error) {
 	var in drawIn
-	args = gamekit.NoteArgs(args, true) // the note's old name, reasoning, as the tool takes it
 	dec := json.NewDecoder(bytes.NewReader(args))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil {

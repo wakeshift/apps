@@ -8,8 +8,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // The signed-in app: the org rail, the sidebar (an org's channels, the
@@ -28,17 +26,6 @@ type shell struct {
 	// CurrentAgent is the agent whose DM is being looked at.
 	CurrentAgent string
 	Home         bool
-}
-
-// OnAgents counts the person's connected agents.
-func (s shell) OnAgents() int {
-	n := 0
-	for _, a := range s.Agents {
-		if a.Connected {
-			n++
-		}
-	}
-	return n
 }
 
 // Role is the person's role in the org being looked at, as a sentence's
@@ -275,18 +262,18 @@ func (a *App) chat(w http.ResponseWriter, r *http.Request, s shell, c *Channel) 
 		a.failed(w, r, err)
 		return
 	}
-	// Its messages, read through the site's reader (archive.go).
-	if events, err := a.history(ctx, *c, maxHistory); err != nil {
-		slog.Warn("agentchat: reading a channel's history", "err", err)
+	// Its messages, the past 30 days'.
+	if msgs, err := a.Store.RecentMessages(ctx, c.ID, maxHistory); err != nil {
+		slog.Warn("agentchat: reading a channel's messages", "err", err)
 		v.NoHistory = true
-	} else if v.Messages, v.Threads, err = a.messageViews(ctx, ros, events); err != nil {
+	} else if v.Messages, v.Threads, err = a.messageViews(ctx, ros, msgs); err != nil {
 		a.failed(w, r, err)
 		return
 	} else {
-		for _, e := range events {
-			v.Last = max(v.Last, e.Seq)
+		for _, m := range msgs {
+			v.Last = max(v.Last, m.Seq)
 		}
-		v.Full = len(events) == maxHistory
+		v.Full = len(msgs) == maxHistory
 		if id := r.URL.Query().Get("thread"); id != "" {
 			for _, m := range v.Messages {
 				if m.ID == id && m.Parent == "" {
@@ -384,68 +371,85 @@ func (a *App) messagedAgents(ctx context.Context, p Person) bool {
 	if known {
 		return true
 	}
-	dms, err := a.Store.DMs(ctx, p.ID) // at most one per agent (maxAgents)
-	if err != nil {
+	wrote, err := a.Store.PersonWrote(ctx, p.ID)
+	if err != nil || !wrote {
 		return false
 	}
-	for _, id := range dms {
-		c, err := a.Store.DMFor(ctx, p.ID, id)
-		if err != nil {
-			continue
-		}
-		if events, err := a.history(ctx, c, 20); err == nil {
-			for _, e := range events {
-				if e.From.Kind == "person" {
-					// Remembered: it stays done (bounded like the other
-					// caches here).
-					a.mu.Lock()
-					if a.messaged == nil || len(a.messaged) >= maxDMJoined {
-						a.messaged = map[string]bool{}
-					}
-					a.messaged[p.ID] = true
-					a.mu.Unlock()
-					return true
-				}
-			}
-		}
+	// Remembered: it stays done (bounded like the other caches here).
+	a.mu.Lock()
+	if a.messaged == nil || len(a.messaged) >= 100_000 {
+		a.messaged = map[string]bool{}
 	}
-	return false
+	a.messaged[p.ID] = true
+	a.mu.Unlock()
+	return true
 }
 
-// members are a channel's agents (its group's members that are connected
-// agents) and people (its org's members, or the people admitted to it).
+// channelMembers are a channel's member conversations: its channel_agents
+// rows, or in a DM, its agent's watching conversations (who hears it).
+func (a *App) channelMembers(ctx context.Context, c Channel) ([]Membership, error) {
+	if c.DMAgent == "" {
+		return a.Store.ChannelMemberships(ctx, c.ID)
+	}
+	ag, err := a.Store.AgentByID(ctx, c.DMAgent)
+	if err != nil || ag.Revoked {
+		return nil, notFoundOK(err)
+	}
+	sessions, err := a.Store.WatchingSessions(ctx, c.DMAgent)
+	if err != nil {
+		return nil, err
+	}
+	var out []Membership
+	for _, s := range sessions {
+		out = append(out, Membership{ChannelID: c.ID, AgentID: ag.ID, Session: s, Handle: ag.Handle, Wake: "all"})
+	}
+	return out, nil
+}
+
+// notFoundOK is err, unless it's ErrNotFound.
+func notFoundOK(err error) error {
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
+// members are a channel's agents (its member conversations' agents) and
+// people (its org's members, or the people admitted to it). An agent is
+// connected if one of its member conversations is (agentkit.Sessions); a
+// client that subscribes itself always is.
 func (a *App) members(ctx context.Context, me Person, c Channel) (membersView, roster, error) {
 	var v membersView
 	r := roster{me: me, agents: map[string]agentView{}, people: map[string]personView{}, mine: map[string]bool{me.Handle: true}}
-	g, err := a.Kit.Group(ctx, c.GroupType)
-	if err != nil && !appkit.IsCode(err, "unknown_group") {
+	ms, err := a.channelMembers(ctx, c)
+	if err != nil {
 		return v, r, err
 	}
-	if !slices.ContainsFunc(g.Members, a.isReader) {
-		a.forgetReader(c) // removed by someone: it joins again before the next read
+	var ids []string
+	for _, m := range ms {
+		ids = append(ids, m.AgentID)
 	}
-	var keys []string
-	for _, m := range g.Members {
-		keys = append(keys, m.Workspace+"/"+m.Agent)
-	}
-	agents, err := a.Store.LiveAgents(ctx, keys)
+	agents, err := a.Store.AgentsByIDs(ctx, ids)
 	if err != nil {
 		return v, r, err
 	}
 	var owners []string
+	var agentList []Agent
 	for _, ag := range agents {
 		owners = append(owners, ag.PersonID)
+		agentList = append(agentList, ag)
 	}
 	people, err := a.Store.PeopleByID(ctx, owners)
 	if err != nil {
 		return v, r, err
 	}
+	sessions := a.agentSessions(ctx, agentList)
 	here := map[string]int{}
 	seen := map[string]bool{}
-	for _, m := range g.Members {
-		ag, ok := agents[m.Workspace+"/"+m.Agent]
+	for _, m := range ms {
+		ag, ok := agents[m.AgentID]
 		if !ok {
-			continue // not an agent of Agent Chat's people (the site's reader)
+			continue
 		}
 		if l := sessionLabel(m.Session); l != "" {
 			ag.Label = l // the conversation in this channel's own name
@@ -460,8 +464,8 @@ func (a *App) members(ctx context.Context, me Person, c Channel) (membersView, r
 			continue // another conversation of an agent shown
 		}
 		seen[ag.ID] = true
-		for _, o := range g.Members {
-			if o.Workspace == m.Workspace && o.Agent == m.Agent && o.Connected != nil && *o.Connected {
+		for _, o := range ms {
+			if o.AgentID == m.AgentID && (o.Session == "" || sessions[ag.ID][o.Session]) {
 				av.Connected = true
 			}
 		}
@@ -533,16 +537,13 @@ func (a *App) state(w http.ResponseWriter, r *http.Request, p Person) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such channel"})
 			return
 		}
-		g, err := a.Kit.Group(ctx, c.GroupType)
-		if err == nil {
+		if ms, err := a.channelMembers(ctx, c); err == nil {
 			seen := map[string]bool{}
-			for _, m := range g.Members {
-				if m.Workspace == p.Workspace && p.Workspace != "" && !seen[m.Agent] {
-					for _, ag := range agents {
-						if ag.Agent == m.Agent {
-							seen[m.Agent] = true
-							mine++
-						}
+			for _, m := range ms {
+				for _, ag := range agents {
+					if ag.ID == m.AgentID && !seen[ag.ID] {
+						seen[ag.ID] = true
+						mine++
 					}
 				}
 			}

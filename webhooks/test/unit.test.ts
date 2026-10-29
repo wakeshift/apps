@@ -14,9 +14,21 @@ import { openDb, roundRobin, testDatabase } from "./testdb.js";
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Wakeshift, type Call } from "@wakeshift/sdk";
+import { Wakeshift } from "@wakeshift/sdk";
 import { Db } from "../src/db.js";
 import pg from "pg";
+
+// The tool call as the SDK sends it to Wakeshift (the SDK keeps its own type internal).
+interface Call {
+  client: string;
+  user?: string;
+  meta?: Record<string, unknown>;
+  session?: string;
+  user_agent?: string;
+  conversation?: string;
+  harness?: string;
+  tool?: string;
+}
 
 const secret = "test-secret-at-least-thirty-two-bytes-long";
 
@@ -907,22 +919,35 @@ interface Instance {
 async function instance(
   t: { after: (fn: () => Promise<void>) => void },
   dbUrl: string,
-  o: { now?: () => number; limits?: Record<string, number>; capacity?: { requests?: number; streams?: number }; calls?: Call[]; harness?: string } = {},
+  o: {
+    now?: () => number;
+    limits?: Record<string, number>;
+    capacity?: { requests?: number; streams?: number };
+    calls?: Call[];
+    harness?: string;
+    requests?: { path: string; body: any }[];
+  } = {},
 ): Promise<Instance> {
   const wake = new Wakeshift({ key: `wst_test_try-unit_${seed}`, core: "http://127.0.0.1:9" });
   internals(wake).emitEvent = async () => ({ matched: 1, duplicate: false });
-  // The event-subscription calls watch and unwatch make (webhook.received).
+  // What the wrapped tools ask Wakeshift: watch's subscribe and unwatch's
+  // unsubscribe (webhook.received), then the call's block.
   internals(wake).requestApp = (async (_method: string, path: string, body: any) => {
+    o.requests?.push({ path, body });
     if (path === "/event-subscriptions") {
       o.calls?.push(body.call as Call);
       return {
-        event_subscription: { id: "es_1", created: true },
+        event_subscription: { id: "es_1", user: body.call.user, created: true },
         session: "wsc_" + body.call.client + "-secret",
-        addition: {},
+        pending: "pa_1",
         agent: { harness: o.harness ?? null, via: o.harness ? "meta" : null, claimed: null },
       };
     }
     if (path === "/event-subscriptions/unsubscribe") return { ended: true };
+    if (path === "/calls/addition") {
+      if (body.native) return { text: body.native.map((n: any) => `Subscribe to ${n.name} with ${JSON.stringify(n.arguments)}.`).join("\n") };
+      return body.pending ? { text: "Wakeshift: this conversation is woken by your webhook's posts." } : {};
+    }
     return {};
   }) as WakeInternals["requestApp"];
   const db = new Db(dbUrl);
@@ -1088,6 +1113,62 @@ test("two instances: one MCP session, its requests alternating between them, sur
   // DELETE ends it everywhere.
   await transport.terminateSession();
   assert.equal((await post(code, sid)).status, 404);
+});
+
+const textOf = (r: unknown) => ((r as any).content as any[]).map((c) => c.text).join("\n\n");
+
+test("mcp: watch's result carries Wakeshift's block, from one addition for the call", async (t) => {
+  const requests: { path: string; body: any }[] = [];
+  const a = await instance(t, await testDatabase(t), { requests });
+  const made = await fetch(a.base + "/links", { method: "POST", redirect: "manual" });
+  const client = new Client({ name: "cursor", version: "1.7" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${a.base}/t/${made.headers.get("location")!.slice(3)}/mcp`)));
+  t.after(() => client.close());
+  const said = textOf(await client.callTool({ name: "watch", arguments: {} }));
+  assert.match(said, /^Watching your webhook\. /);
+  assert.match(said, /\n\nWakeshift: this conversation is woken by your webhook's posts\.$/);
+  assert.deepEqual(
+    requests.map((r) => r.path),
+    ["/event-subscriptions", "/calls/addition"],
+  );
+  const [sub, add] = requests.map((r) => r.body);
+  assert.equal(sub.name, "webhook.received");
+  assert.match(sub.arguments.hook, /^[0-9a-f]{20}$/);
+  assert.equal(sub.call.user, sub.arguments.hook, "the webhook is the user");
+  assert.equal(sub.call.tool, "watch");
+  assert.equal(sub.defer_addition, true);
+  assert.equal(add.pending, "pa_1");
+});
+
+test("mcp: a client that subscribes itself is told to, from the session's restored initialize, and nothing is subscribed for it", async (t) => {
+  const dbUrl = await testDatabase(t);
+  // By its capabilities (the MCP Events extension), and by its name (ChatGPT's).
+  const clients = [
+    { name: "events-client", capabilities: { extensions: { "io.modelcontextprotocol/events": {} } } },
+    { name: "openai-mcp", capabilities: {} },
+  ];
+  for (const { name, capabilities } of clients) {
+    const client = new Client({ name, version: "1" }, { capabilities: capabilities as any });
+    const requests: { path: string; body: any }[] = [];
+    const a = await instance(t, dbUrl, { requests });
+    const made = await fetch(a.base + "/links", { method: "POST", redirect: "manual" });
+    const path = made.headers.get("location")!;
+    // initialize is stored; the tool call is served by a server rebuilt
+    // from it, so only the restored client info can say it's native.
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${a.base}/t/${path.slice(3)}/mcp`)));
+    t.after(() => client.close());
+    const said = textOf(await client.callTool({ name: "watch", arguments: {} }));
+    assert.ok(!requests.some((r) => r.path === "/event-subscriptions"), `${name}: no conversation subscription`);
+    const add = requests.find((r) => r.path === "/calls/addition")?.body;
+    assert.ok(add, `${name}: the call's block was asked for`);
+    assert.equal(add.native.length, 1);
+    assert.equal(add.native[0].name, "webhook.received");
+    assert.match(add.native[0].arguments.hook, /^[0-9a-f]{20}$/);
+    assert.match(said, /reaches you with what was sent/);
+    assert.ok(said.includes(`Subscribe to webhook.received with {"hook":"${add.native[0].arguments.hook}"}.`), said);
+    const html = await (await fetch(a.base + path)).text();
+    assert.ok(!html.includes(`"client":"${name}"`), `${name}: no watcher on the page`);
+  }
 });
 
 test("session keys: never on the page, in the live view or in what's kept", async (t) => {

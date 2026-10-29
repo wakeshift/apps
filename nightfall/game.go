@@ -36,8 +36,6 @@ const (
 //	avenger      the town   voted out, takes the player it voted for with it (hunter)
 //	martyr       its own    wins only if it's voted out (tanner)
 //	townsperson  the town   none (villager)
-//
-// Games stored under the old names are read as these (legacy.go).
 const (
 	vampire     = "vampire"
 	thrall      = "thrall"

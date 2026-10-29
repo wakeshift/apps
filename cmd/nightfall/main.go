@@ -27,18 +27,11 @@
 package main
 
 import (
-	"cmp"
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/wakeshift/apps/analytics"
 	"github.com/wakeshift/apps/gamekit"
@@ -55,34 +48,15 @@ func main() {
 }
 
 func run() error {
-	core, public := os.Getenv("WAKESHIFT_URL"), strings.TrimSuffix(os.Getenv("NIGHTFALL_URL"), "/")
-	kit, err := appkit.Load("nightfall", os.Getenv("NIGHTFALL_KEY"), core, public+"/mcp")
-	dbURL := os.Getenv("NIGHTFALL_DATABASE_URL")
-	if core == "" || public == "" || dbURL == "" || err != nil {
-		return errors.Join(errors.New("WAKESHIFT_URL, NIGHTFALL_URL, NIGHTFALL_KEY and NIGHTFALL_DATABASE_URL are required"), err)
-	}
-	shared, err := gamekit.ParseWorkspaces(os.Getenv("GAMES_SHARED_SEAT_WORKSPACES"))
-	if err != nil {
-		return fmt.Errorf("GAMES_SHARED_SEAT_WORKSPACES: %w", err)
-	}
-	house, err := gamekit.HouseSecretEnv()
-	if err != nil {
-		return err
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	open, cancel := context.WithTimeout(ctx, time.Minute)
-	store, err := gamekit.OpenStore(open, dbURL)
-	cancel()
+	env, err := gamekit.LoadEnv(ctx, "nightfall", nil)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	app := &nightfall.App{Kit: kit, Store: store, SharedSeats: shared, HouseSecret: house, OperatorNote: gamekit.OperatorNoteEnv()}
-	app.ProxyHops, _ = strconv.Atoi(os.Getenv("PROXY_HOPS"))
-	if account := os.Getenv("NIGHTFALL_TICK_ACCOUNT"); account != "" {
-		app.TickAuth = gamekit.GoogleTickAuth(public+"/tick", account)
-	}
+	defer env.Store.Close()
+	app := &nightfall.App{Kit: env.Kit, Store: env.Store, TickAuth: env.TickAuth, ProxyHops: env.ProxyHops,
+		SharedSeats: env.SharedSeats, HouseSecret: env.HouseSecret, OperatorNote: env.OperatorNote}
 
 	go func() {
 		if err := app.Start(ctx); err != nil {
@@ -92,24 +66,5 @@ func run() error {
 	// Visits to the public pages, where WAKESHIFT_POSTHOG_KEY is set (docs/analytics.md).
 	h := analytics.Wrap(app.Handler(), analytics.FromEnv(), app.PublicPages()...)
 	go app.Run(ctx) // the game timers
-
-	srv := &http.Server{Addr: ":" + cmp.Or(os.Getenv("PORT"), "8080"), Handler: h, ReadHeaderTimeout: 10 * time.Second}
-	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	slog.Info("nightfall: listening", "addr", srv.Addr, "mcp", public+"/mcp")
-	select {
-	case err := <-errc:
-		return err
-	case <-ctx.Done():
-	}
-	shutdown, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	// Cloud Scheduler's /tick holds its request for most of a minute, so
-	// Shutdown often times out on it: that's an ordinary scale-down (the
-	// game timers stopped with ctx, and the next ping ticks elsewhere), not
-	// a failure.
-	if err := srv.Shutdown(shutdown); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Warn("nightfall: requests still running at shutdown", "err", err)
-	}
-	return nil
+	return env.Serve(ctx, h)
 }

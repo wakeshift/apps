@@ -13,22 +13,23 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/gamekit"
+	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 type sessionIn struct {
-	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool (e.g. claude-code#2), so this conversation is the one woken"`
+	appkit.WakeArgs
 }
 
 type sayIn struct {
-	Text    string `json:"text" jsonschema:"Public: said aloud to every other player in the game and to every spectator."`
-	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool"`
-	Note    string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
+	Text string `json:"text" jsonschema:"Public: said aloud to every other player in the game and to every spectator."`
+	appkit.WakeArgs
+	Note string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type voteIn struct {
-	Player  string `json:"player" jsonschema:"The handle of the player you suspect is the secret agent"`
-	Session string `json:"session,omitempty" jsonschema:"Your session's handle from the watch tool"`
-	Note    string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
+	Player string `json:"player" jsonschema:"The handle of the player you suspect is the secret agent"`
+	appkit.WakeArgs
+	Note string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type playerOut struct {
@@ -75,23 +76,13 @@ func (a *App) view(g *game, me *player) map[string]any {
 	return out
 }
 
-var errNotPlaying = errors.New("you're not in a game (pass the session you joined with, if you have one); call the `join` tool")
-
 func (a *App) addTools(srv *mcp.Server) {
-	a.srv.AddWatch(srv)
+	a.srv.AddWait(srv)
 
-	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "join", Description: "Join a game of Secret Agent as this conversation (pass session, from the `watch` tool). You're added to the next game with a free seat; " +
-		"it starts when three players have joined, and you're woken then."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
-			ag, err := a.srv.Agent(ctx, req)
-			if err != nil {
-				return nil, nil, err
-			}
-			session, err := a.srv.SeatSession(ctx, ag, req, in.Session)
-			if err != nil {
-				return nil, nil, err
-			}
-			gs, _, err := a.srv.Join(ctx, ag, session, func(tx *gamekit.Tx, gs gamekit.State, p gamekit.Player) error {
+	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "join", Description: "Join a game of Secret Agent as this conversation. You're added to the next game with a free seat; " +
+		"it starts when three players have joined, and you're woken then. The result says how this conversation is woken, and gives its session_key: pass it to the game's tools."},
+		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+			gs, key, err := a.srv.Join(ctx, call, func(tx *gamekit.Tx, gs gamekit.State, p gamekit.Player) error {
 				g := gs.(*game)
 				g.Players = append(g.Players, &player{Player: p})
 				if len(g.Players) == players {
@@ -103,22 +94,13 @@ func (a *App) addTools(srv *mcp.Server) {
 				return nil, nil, err
 			}
 			g := gs.(*game)
-			key := gamekit.PlayerKey(ag.Workspace, ag.ID, session)
-			return nil, a.srv.Joined(ctx, req, g.ID, key, a.view(g, g.player(key))), nil
+			return nil, a.srv.Joined(call, a.view(g, g.player(key))), nil
 		})
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "game", Description: "Your current game: the phase, the players, and your secret role (with the codeword, if you're a civilian). " +
 		"Keep your role to yourself."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
-			ag, err := a.srv.Agent(ctx, req)
-			if err != nil {
-				return nil, nil, err
-			}
-			session, err := a.srv.Session(ctx, ag, req, in.Session)
-			if err != nil {
-				return nil, nil, err
-			}
-			g, me, err := a.find(ctx, ag, session)
+		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+			g, me, err := a.find(ctx, call)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -127,20 +109,12 @@ func (a *App) addTools(srv *mcp.Server) {
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "say", Description: "Say something to the other players in your game (during discussion and voting). " +
 		"Never say the codeword itself."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in sayIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *appkit.ToolCall, in sayIn) (*mcp.CallToolResult, map[string]any, error) {
 			text := strings.TrimSpace(in.Text)
 			if text == "" || len(text) > sayMax {
 				return nil, nil, fmt.Errorf("text is required (at most %d characters)", sayMax)
 			}
-			ag, err := a.srv.Agent(ctx, req)
-			if err != nil {
-				return nil, nil, err
-			}
-			session, err := a.srv.Session(ctx, ag, req, in.Session)
-			if err != nil {
-				return nil, nil, err
-			}
-			g, me, err := a.find(ctx, ag, session)
+			g, me, err := a.find(ctx, call)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -152,7 +126,7 @@ func (a *App) addTools(srv *mcp.Server) {
 				// the secret agent's message would confirm its guess.
 				return nil, nil, errors.New("you can't say the codeword; hint at it instead")
 			}
-			if err := a.srv.Say(ctx, ag, g.ID, me.Player, text); err != nil {
+			if err := a.srv.Say(ctx, g.ID, me.Player, text); err != nil {
 				return nil, nil, err
 			}
 			a.srv.ThinkAfterSay(ctx, g.ID, me.Key(), "say", in.Note)
@@ -161,29 +135,10 @@ func (a *App) addTools(srv *mcp.Server) {
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "vote", Description: "Vote for the player you suspect is the secret agent (any time once the game has started). You can change your vote until " +
 		"everyone has voted; the game ends as soon as everyone has."},
-		func(ctx context.Context, req *mcp.CallToolRequest, in voteIn) (*mcp.CallToolResult, map[string]any, error) {
-			ag, err := a.srv.Agent(ctx, req)
-			if err != nil {
-				return nil, nil, err
-			}
-			session, err := a.srv.Session(ctx, ag, req, in.Session)
-			if err != nil {
-				return nil, nil, err
-			}
-			id, key, err := a.srv.Find(ctx, ag.Workspace, ag.ID, session)
-			if err != nil {
-				return nil, nil, err
-			}
-			if id == "" {
-				return nil, nil, errNotPlaying
-			}
-			away := a.srv.Away(ctx, id)
+		func(ctx context.Context, call *appkit.ToolCall, in voteIn) (*mcp.CallToolResult, map[string]any, error) {
 			var me *player
-			gs, err := a.srv.Update(ctx, id, away, func(tx *gamekit.Tx, gs gamekit.State) error {
-				g := gs.(*game)
-				if me = g.player(key); me == nil {
-					return errNotPlaying
-				}
+			g, err := gamekit.Move(ctx, a.srv, call, playerIn, func(tx *gamekit.Tx, g *game, p *player) error {
+				me = p
 				target := strings.TrimPrefix(strings.TrimSpace(in.Player), "@")
 				switch {
 				case g.Phase != discussion && g.Phase != voting:
@@ -197,12 +152,12 @@ func (a *App) addTools(srv *mcp.Server) {
 				if err := a.allVoted(tx, g); err != nil {
 					return err
 				}
-				return tx.Think(id, key, "vote", in.Note)
+				return tx.Think(g.ID, me.Key(), "vote", in.Note)
 			})
 			if err != nil {
 				return nil, nil, err
 			}
-			return nil, a.view(gs.(*game), me), nil
+			return nil, a.view(g, me), nil
 		})
 }
 

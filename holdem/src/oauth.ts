@@ -29,7 +29,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { harnessAgent, isCode, type Wakeshift } from "@wakeshift/sdk";
 import type { Db, Log } from "./db.js";
-import { clientAddress } from "./live.js";
+import { clientAddress } from "./analytics.js";
 import { allowedRedirect, BAD_REDIRECT } from "./redirects.js";
 
 /** Who an access token is for. */

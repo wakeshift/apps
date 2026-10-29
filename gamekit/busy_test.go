@@ -2,8 +2,12 @@ package gamekit
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -14,18 +18,22 @@ import (
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
-type noIn struct{}
+type noIn struct {
+	appkit.WakeArgs
+}
 
 // Under load a tool says the game is busy, rather than failing: when every
 // slot is taken, and when the database or Wakeshift is overloaded. Other
 // database errors don't reach the agent; the game's own errors do.
 func TestBusy(t *testing.T) {
 	ctx := context.Background()
-	s := &Server{Title: "Nightfall", Name: "nightfall", MaxCalls: 1}
+	s := &Server{Title: "Nightfall", Name: "nightfall", MaxCalls: 1, Kit: &appkit.App{ID: "nightfall"}}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t"}, nil)
+	s.events() // Attach needs an event
+	s.attached = s.Kit.Attach(srv, appkit.AttachOptions{})
 	release := make(chan struct{})
 	started := make(chan struct{})
-	AddTool(s, srv, &mcp.Tool{Name: "slow"}, func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, map[string]any, error) {
+	AddTool(s, srv, &mcp.Tool{Name: "slow"}, func(ctx context.Context, _ *appkit.ToolCall, _ noIn) (*mcp.CallToolResult, map[string]any, error) {
 		close(started)
 		<-release
 		return nil, map[string]any{"ok": true}, nil
@@ -40,7 +48,7 @@ func TestBusy(t *testing.T) {
 		"game":    errors.New("it's not night: the game is day"),
 	}
 	for name, err := range fail {
-		AddTool(s, srv, &mcp.Tool{Name: name}, func(context.Context, *mcp.CallToolRequest, noIn) (*mcp.CallToolResult, map[string]any, error) {
+		AddTool(s, srv, &mcp.Tool{Name: name}, func(context.Context, *appkit.ToolCall, noIn) (*mcp.CallToolResult, map[string]any, error) {
 			if name == "panic" {
 				panic("a bug")
 			}
@@ -93,5 +101,20 @@ func TestBusy(t *testing.T) {
 	close(release)
 	if got := <-done; got != "ok" {
 		t.Errorf("slow: %q", got)
+	}
+}
+
+// A core that doesn't answer in time is overloaded too: appkit's
+// unreachable error unwraps to the client's timeout.
+func TestOverloadedUnreachableCore(t *testing.T) {
+	stall := make(chan struct{})
+	core := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-stall }))
+	t.Cleanup(core.Close)
+	t.Cleanup(func() { close(stall) })
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	kit := &appkit.App{ID: "nightfall", Key: key, Core: core.URL, HTTP: &http.Client{Timeout: 50 * time.Millisecond}}
+	_, err := kit.ForgetUser(context.Background(), "ada")
+	if !appkit.IsCode(err, "unreachable") || !overloaded(err) {
+		t.Errorf("%v: overloaded %v, want an unreachable error that is", err, overloaded(err))
 	}
 }

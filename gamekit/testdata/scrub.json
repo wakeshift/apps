@@ -1,0 +1,406 @@
+{
+  "_about": "How an archived record scrubs players' names out of text a player wrote: gamekit's Anon.Scrub (Go) and Agent Hold'em's Anon.scrub (TypeScript) both test against these. Each player is given its role in order (the first role a name gets is kept); text, scrubbed, is want.",
+  "cases": [
+    {
+      "name": "a handle as it is",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "dashing-pelican",
+      "want": "drawer"
+    },
+    {
+      "name": "in any case, with spaces",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "Dashing Pelican 2",
+      "want": "guesser 1"
+    },
+    {
+      "name": "in capitals, in a sentence",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "DASHING-PELICAN-2 is cheating",
+      "want": "guesser 1 is cheating"
+    },
+    {
+      "name": "words joined by several spaces",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "ask dashing  pelican",
+      "want": "ask drawer"
+    },
+    {
+      "name": "words joined by underscores and mixed separators",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "dashing_pelican and Dashing_-Pelican",
+      "want": "drawer and drawer"
+    },
+    {
+      "name": "words joined by a tab",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "dashing\tpelican",
+      "want": "drawer"
+    },
+    {
+      "name": "words joined by a no-break space",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "Dashing Pelican",
+      "want": "drawer"
+    },
+    {
+      "name": "every time",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "otter otter",
+      "want": "guesser 2 guesser 2"
+    },
+    {
+      "name": "not inside a word",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "sea otters",
+      "want": "sea otters"
+    },
+    {
+      "name": "not at a word's end",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "rotter",
+      "want": "rotter"
+    },
+    {
+      "name": "not after a digit",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "2otter",
+      "want": "2otter"
+    },
+    {
+      "name": "not before an accented letter, but before a combining mark",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "otteŕ otteré",
+      "want": "guesser 2́ otteré"
+    },
+    {
+      "name": "before a superscript digit, which isn't a digit",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "otter²",
+      "want": "guesser 2²"
+    },
+    {
+      "name": "part of a handle stays",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "pelican",
+      "want": "pelican"
+    },
+    {
+      "name": "nothing to scrub",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "a fish",
+      "want": "a fish"
+    },
+    {
+      "name": "beside punctuation",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "otter-dashing-pelican",
+      "want": "guesser 2-drawer"
+    },
+    {
+      "name": "the longest handle first",
+      "players": [
+        {
+          "name": "dashing-pelican",
+          "role": "drawer"
+        },
+        {
+          "name": "dashing-pelican-2",
+          "role": "guesser 1"
+        },
+        {
+          "name": "otter",
+          "role": "guesser 2"
+        }
+      ],
+      "text": "dashing-pelican-2 dashing-pelican",
+      "want": "guesser 1 drawer"
+    },
+    {
+      "name": "a handle a role contains doesn't loop",
+      "players": [
+        {
+          "name": "guesser",
+          "role": "guesser 1"
+        }
+      ],
+      "text": "guesser",
+      "want": "guesser 1"
+    },
+    {
+      "name": "a match that isn't a whole word is tried again from its next character",
+      "players": [
+        {
+          "name": "echo-echo",
+          "role": "seat 1"
+        }
+      ],
+      "text": "xecho-echo-echo",
+      "want": "xecho-seat 1"
+    },
+    {
+      "name": "a name the first player has keeps its first role",
+      "players": [
+        {
+          "name": "Otter",
+          "role": "seat 1"
+        },
+        {
+          "name": "Otter",
+          "role": "seat 2"
+        }
+      ],
+      "text": "Otter",
+      "want": "seat 1"
+    },
+    {
+      "name": "a name of separators only matches nothing",
+      "players": [
+        {
+          "name": "--",
+          "role": "seat 1"
+        },
+        {
+          "name": " ",
+          "role": "seat 2"
+        }
+      ],
+      "text": "a, b - c",
+      "want": "a, b - c"
+    },
+    {
+      "name": "regular expression characters are literal",
+      "players": [
+        {
+          "name": "a.b",
+          "role": "seat 1"
+        }
+      ],
+      "text": "axb a.b",
+      "want": "axb seat 1"
+    },
+    {
+      "name": "longest in UTF-8 bytes first",
+      "players": [
+        {
+          "name": "éééé-x",
+          "role": "seat 1"
+        },
+        {
+          "name": "x-abcde",
+          "role": "seat 2"
+        }
+      ],
+      "text": "éééé-x-abcde",
+      "want": "seat 1-abcde"
+    }
+  ]
+}

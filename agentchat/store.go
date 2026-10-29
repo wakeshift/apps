@@ -176,11 +176,6 @@ func scanPerson(row pgx.Row) (Person, error) {
 	return p, notFound(err)
 }
 
-// Person is one person.
-func (s *Store) Person(ctx context.Context, id string) (Person, error) {
-	return scanPerson(s.Pool.QueryRow(ctx, `SELECT `+personCols+` FROM people WHERE id = $1`, id))
-}
-
 // CountRequests counts sign-in ledger entries of kind since: for the email
 // (its HMAC), if given, else for the address.
 func (s *Store) CountRequests(ctx context.Context, kind string, emailHash []byte, addr string, since time.Time) (int, error) {

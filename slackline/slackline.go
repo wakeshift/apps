@@ -667,9 +667,8 @@ func (a *App) EndPending(ctx context.Context) {
 	}
 }
 
-// endListener ends a listener's subscriptions: the one watch made (an
-// event subscription, or a topic one from before slack.message), and any a
-// client that subscribes itself made.
+// endListener ends a listener's subscriptions: the one watch made, and any
+// a client that subscribes itself made.
 func (a *App) endListener(ctx context.Context, e Ending) error {
 	user := wsUser(e.Team, e.User)
 	if e.Subscription != "" {
@@ -680,14 +679,10 @@ func (a *App) endListener(ctx context.Context, e Ending) error {
 	return a.endNative(ctx, user, e.Listener)
 }
 
-// endSubscription ends the subscription watch made for one of user's
-// listeners: a slack.message one, else a topic one from before it.
+// endSubscription ends the slack.message subscription watch made for one
+// of user's listeners.
 func (a *App) endSubscription(ctx context.Context, user, id string) error {
-	ended, err := a.messages().End(ctx, user, id)
-	if err != nil || ended {
-		return err
-	}
-	_, err = a.Kit.EndSubscription(ctx, id)
+	_, err := a.messages().End(ctx, user, id)
 	return err
 }
 

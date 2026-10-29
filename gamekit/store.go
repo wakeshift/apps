@@ -20,16 +20,17 @@ import (
 //   - A game is a row (games) with the game's own state as JSON. Every move
 //     is a transaction holding the game's row lock (Update).
 //   - Matchmaking (Join) reserves a seat under one advisory lock, so
-//     players spread over instances fill the same games; the room is then
-//     joined in Wakeshift outside any transaction, and the seat confirmed
-//     under the game's lock.
+//     players spread over instances fill the same games; the conversation
+//     is then subscribed to game.update outside any transaction, and the
+//     seat confirmed under the game's lock.
 //   - A phase's end is the row's deadline_at. Every instance's ticker
 //     claims due games with FOR UPDATE SKIP LOCKED and re-checks the
 //     deadline under the lock, so each step runs once.
-//   - The moderator's announcements are written to the room's log in the
-//     move's transaction and posted to Wakeshift after it commits, in order,
-//     by whichever instance gets there first (deliver), retried if posting
-//     fails: an announcement isn't lost to a crash or a deploy.
+//   - What the moderator and the players say is written to the room's log
+//     in the move's transaction and sent to the game's seated players after
+//     it commits, in order, by whichever instance gets there first
+//     (deliver, outbox.go), retried if sending fails: nothing said is lost
+//     to a crash or a deploy.
 
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
@@ -144,15 +145,14 @@ func (e *StoppedError) Error() string {
 }
 
 const (
-	reserveFor  = time.Minute         // a seat reservation is abandoned after this
-	keepEnded   = time.Hour           // a game is kept this long after it ends
-	stopLinger  = time.Minute         // a stopped game's room closes after this
-	closeRetry  = 30 * time.Second    // retrying closing a room
-	postLease   = 30 * time.Second    // posting a game's announcements
-	maxAttempts = 8                   // posting one announcement: the queries in ticker.go and migration 001 have it
-	logLimit    = 300                 // entries a game's log shows
-	recentFor   = 30 * 24 * time.Hour // what a player has had lately is forgotten after this without a game
-	matchLock   = 7339                // the advisory lock matchmaking holds
+	reserveFor = time.Minute         // a seat reservation is abandoned after this
+	keepEnded  = time.Hour           // a game is kept this long after it ends
+	stopLinger = time.Minute         // a stopped game's room closes after this
+	closeRetry = 30 * time.Second    // retrying closing a room
+	postLease  = 30 * time.Second    // sending a game's updates
+	logLimit   = 300                 // entries a game's log shows
+	recentFor  = 30 * 24 * time.Hour // what a player has had lately is forgotten after this without a game
+	matchLock  = 7339                // the advisory lock matchmaking holds
 )
 
 // Tx is a move's transaction.
@@ -164,6 +164,8 @@ type Tx struct {
 	// as the caller found before taking the lock: Wakeshift isn't called
 	// while a game is locked.
 	Away map[string]bool
+
+	said bool // a player said something (Say): sent once this commits
 }
 
 // Recent is what each of players has had lately of kind.
@@ -268,7 +270,7 @@ func (s *Server) Update(ctx context.Context, id string, away map[string]bool, fn
 	if err := fn(tx, g); err != nil {
 		return nil, err
 	}
-	announced := len(g.base().pending) > 0
+	announced := len(g.base().pending) > 0 || tx.said
 	if err := s.save(tx, g, r.ended != nil); err != nil {
 		return nil, err
 	}
@@ -388,7 +390,6 @@ func (s *Server) Log(ctx context.Context, id string) ([]Entry, error) {
 // reservation is a seat matchmaking has kept for a player.
 type reservation struct {
 	game, name string
-	roomReady  bool
 	current    bool   // the player's already seated in this game
 	handle     string // its handle there, if current
 }
@@ -426,10 +427,10 @@ func (s *Server) reserve(ctx context.Context, workspace, agent, session string) 
 		return r, err
 	}
 	var names []string
-	err = tx.QueryRow(ctx, `SELECT id, names, room_ready FROM games g WHERE open AND ended_at IS NULL
+	err = tx.QueryRow(ctx, `SELECT id, names FROM games g WHERE open AND ended_at IS NULL
 		AND (SELECT count(*) FROM seats s WHERE s.game_id = g.id AND (s.handle IS NOT NULL OR s.reserved_at > $1)) < g.max_seats
 		AND ($3 OR NOT EXISTS (SELECT 1 FROM seats s WHERE s.game_id = g.id AND s.workspace = $2 AND (s.handle IS NOT NULL OR s.reserved_at > $1)))
-		ORDER BY created_at LIMIT 1`, stale, workspace, s.SharedSeats[workspace]).Scan(&r.game, &names, &r.roomReady)
+		ORDER BY created_at LIMIT 1`, stale, workspace, s.SharedSeats[workspace]).Scan(&r.game, &names)
 	if errors.Is(err, pgx.ErrNoRows) {
 		r.game, err = s.newGame(tx)
 	}

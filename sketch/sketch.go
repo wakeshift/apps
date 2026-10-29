@@ -32,26 +32,28 @@ import (
 )
 
 // Manifest is what Sketch Stadium may do for an agent that signs in, when
-// it runs as the app id: its games are id's event types, app.<id>.game.*.
+// it runs as the app id. Other players and their agents wake yours, through
+// the game (OthersCanWake). It acts for its agents (sessions, waits) and
+// subscribes and posts nothing by event type: game.update and turn are
+// defined with the app's events.
 func Manifest(id string) appkit.Manifest {
-	games := gamePrefix(id) + "*"
 	return appkit.Manifest{
-		Description: "Sketch Stadium: agents take turns drawing a secret word while the others look at the drawing and guess it.",
+		Description:   "Sketch Stadium: agents take turns drawing a secret word while the others look at the drawing and guess it.",
+		OthersCanWake: true,
 		Agent: &appkit.AgentScope{
-			Wake:        []appkit.ScopeEvent{{Pattern: games, Description: "Messages in games it joins: new strokes, hints and guesses, from the moderator and the other players"}},
-			Post:        []appkit.ScopeEvent{{Pattern: games, Description: "Its guesses and what it says in games it plays"}},
-			Groups:      true,
+			Wake:        []appkit.ScopeEvent{},
+			Post:        []appkit.ScopeEvent{},
 			TTLDays:     30,
 			StartPrompt: "Join a game of Sketch Stadium",
 		},
+		// The views (game, canvas, preview), the wait tool, and moves that
+		// act only in the room the agent joined: not join or leave.
+		PreapproveTools: []string{"game", "canvas", "preview", "wait_for_messages", "say", "draw", "guess"},
 	}
 }
 
-// gamePrefix is the event types of id's games.
-func gamePrefix(id string) string { return "app." + id + ".game." }
-
 const instructions = "Sketch Stadium: agents take turns drawing a secret word while the others guess it, in rooms of up to 8 that play round after round. " +
-	"First call the `watch` tool to get a stream of what wakes you (watch it with a long-running monitor; in Codex you don't need to), then the `join` tool. " +
+	"First call the `join` tool: its result says how this conversation is woken by the game, and gives your session_key to pass to the game's tools. " +
 	"Each round one player draws, rotating through the room. When it's yours, call `game` for your word and start drawing it with the `draw` tool within 30 seconds, or the turn passes to the next drawer. " +
 	"The round lasts 60 seconds from your first drawing, with hints for the guessers 30 and 45 seconds in. Draw " +
 	"on a 100×100 canvas: in a small subset of SVG (filled shapes, paths, lines and groups in the palette's colors; the tool lists what's allowed), or a few strokes at a time. " +
@@ -72,7 +74,7 @@ type App struct {
 	// rounds, and before a waiting room plays again (default 8s); how often
 	// strokes are announced at most (default 5s). Wait is how long a room
 	// waits for enough players, new or after too many left, before it
-	// closes (default 30 minutes); Linger is how long a closed room's group
+	// closes (default 30 minutes); Linger is how long an ended game's room
 	// stays open (default 10 minutes).
 	Lobby, Round, Grace, Break, Coalesce, Wait, Linger time.Duration
 	Now                                                func() time.Time
@@ -103,7 +105,7 @@ func (a *App) server() *gamekit.Server {
 	a.once.Do(func() {
 		a.srv = &gamekit.Server{Kit: a.Kit, Name: "sketch", Title: "Sketch Stadium", Instructions: instructions, Manifest: Manifest(a.Kit.ID),
 			Landing: a.landing, Legal: legalPages, Static: staticFiles, Logo: "logo.svg", Now: a.Now, Spectate: a.spectate, OwnPages: true,
-			Store: a.Store, Prefix: gamePrefix(a.Kit.ID), MaxSeats: maxPlayers, LobbyPhase: waiting, TickAuth: a.TickAuth, ProxyHops: a.ProxyHops,
+			Store: a.Store, MaxSeats: maxPlayers, LobbyPhase: waiting, TickAuth: a.TickAuth, ProxyHops: a.ProxyHops,
 			SharedSeats: a.SharedSeats, HouseSecret: a.HouseSecret, OperatorNote: a.OperatorNote, PlayerName: a.playerName,
 			NewState: func() gamekit.State { return &game{} },
 			NewGame: func(g gamekit.State, now time.Time) {
@@ -202,28 +204,10 @@ func display(handle string) string {
 	return strings.Join(parts, " ")
 }
 
-// find is the calling conversation's game and player.
-func (a *App) find(ctx context.Context, ag *appkit.Agent, session string) (*game, *player, error) {
-	id, key, err := a.srv.Find(ctx, ag.Workspace, ag.ID, session)
-	if err != nil {
-		return nil, nil, err
-	}
-	if id == "" {
-		return nil, nil, errNotPlaying
-	}
-	// A call as the player: it's there (checkAway). Noted before the game
-	// is read, so a round that ends after this read counts it.
-	a.touchNow(ctx, id, key)
-	g, err := a.srv.Load(ctx, id)
-	if err != nil {
-		return nil, nil, err
-	}
-	gm := g.(*game)
-	me := gm.player(key)
-	if me == nil || me.Left {
-		return nil, nil, errNotPlaying
-	}
-	return gm, me, nil
+// playerIn is the player in g with key, if it's playing: not one that left.
+func playerIn(g *game, key string) (*player, bool) {
+	p := g.player(key)
+	return p, p != nil && !p.Left
 }
 
 func secondsLeft(now, t time.Time) int { return max(0, int(t.Sub(now).Seconds()+0.5)) }

@@ -12,7 +12,7 @@ import (
 )
 
 // What tools and pages share: making channels, invites, and taking people
-// out (the outbox then takes their agents out of the groups: jobs.go).
+// out (with their agents).
 
 const (
 	defaultInviteTTL  = 7 * 24 * time.Hour
@@ -22,8 +22,8 @@ const (
 )
 
 // createChannel makes a channel: in org (by slug, which the person must
-// manage), or outside orgs (its name gets a code). Its group is made in
-// Wakeshift; if that fails, the channel isn't kept.
+// manage), or outside orgs (its name gets a code). It's ready at once:
+// Wakeshift needs nothing for it.
 func (a *App) createChannel(ctx context.Context, person, orgSlug, name, topic string) (Channel, error) {
 	org := ""
 	if orgSlug != "" {
@@ -46,7 +46,7 @@ func (a *App) createChannel(ctx context.Context, person, orgSlug, name, topic st
 		if org == "" {
 			n = name + "-" + newCode(5)
 		}
-		c, err = a.Store.CreateChannel(ctx, person, org, n, topic, func(id string) string { return channelPrefix(a.Kit.ID) + id })
+		c, err = a.Store.CreateChannel(ctx, person, org, n, topic)
 		if !uniqueViolation(err) || org != "" {
 			break
 		}
@@ -59,24 +59,6 @@ func (a *App) createChannel(ctx context.Context, person, orgSlug, name, topic st
 	}
 	if err != nil {
 		return Channel{}, err
-	}
-	if _, _, err := a.Kit.CreateGroup(ctx, c.GroupType, c.Ref(), nil); err != nil {
-		if derr := a.Store.DropChannel(context.WithoutCancel(ctx), c.ID); derr != nil {
-			slog.Warn("agentchat: dropping a channel whose group wasn't made", "err", derr)
-		}
-		return Channel{}, friendly(err, c.Ref())
-	}
-	if err := a.Store.MarkReady(ctx, c.ID); err != nil {
-		// Not usable: its group goes now if it can (and Prune closes it
-		// otherwise, with the row, after an hour).
-		if cerr := a.Kit.CloseGroup(context.WithoutCancel(ctx), c.GroupType); cerr != nil {
-			slog.Warn("agentchat: closing a channel's group that never became ready", "err", cerr)
-		}
-		return Channel{}, err
-	}
-	// The site's reader joins now, so the channel's history starts with it.
-	if _, err := a.readChannel(ctx, c); err != nil {
-		slog.Warn("agentchat: the reader joining a new channel", "err", err)
 	}
 	return c, nil
 }
@@ -149,9 +131,6 @@ func (a *App) removeFromChannel(ctx context.Context, by string, c Channel, perso
 	err := a.Store.RemoveFromChannel(ctx, by, c, person, ban)
 	if errors.Is(err, ErrNotFound) {
 		return errors.New("they aren't a member you can remove (a channel's or org's owner can't be removed, and only an org's owner can remove its admins)")
-	}
-	if err == nil {
-		a.kickOutbox()
 	}
 	return err
 }
