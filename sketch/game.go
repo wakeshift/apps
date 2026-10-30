@@ -173,7 +173,7 @@ type drawCallAt struct {
 	Marks int       `json:"marks"`
 }
 
-// guess is a guess (a right one is shown without its text).
+// guess is a guess (a right one ends the round, and shows with it).
 type guess struct {
 	By    string    `json:"by"` // handle
 	Text  string    `json:"text,omitempty"`

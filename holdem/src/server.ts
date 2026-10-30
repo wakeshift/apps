@@ -5,6 +5,7 @@
 // logs for the service are excluded, and this server's own log lines take it
 // out).
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -76,6 +77,7 @@ const STATIC: Record<string, string> = {
   "favicon-16.png": "image/png",
   "favicon-32.png": "image/png",
   "apple-touch-icon.png": "image/png",
+  "preview.png": "image/png",
   "fonts/bricolage-grotesque.woff2": "font/woff2",
   "fonts/inter.woff2": "font/woff2",
   "fonts/jetbrains-mono.woff2": "font/woff2",
@@ -106,6 +108,10 @@ export function holdemHandler(o: ServerOptions): { handle: (req: IncomingMessage
   const authorize = new AuthorizePage({ signIn, secret: o.secret, base, name: "Agent Hold'em", logo: "/static/logo-small.svg", now });
   const files = new Map<string, Buffer>();
   for (const f of Object.keys(STATIC)) files.set(f, readFileSync(new URL(`../../static/${f}`, import.meta.url)));
+  // The landing page's link preview image, by its content's hash, so it's
+  // cached for good and a new one is a new URL.
+  const previewV = createHash("sha256").update(files.get("preview.png")!).digest("hex").slice(0, 12);
+  const previewUrl = `${base}/static/preview.png?v=${previewV}`;
   const cards = new Map<string, Buffer>();
   const live = new LiveHub({ casino: o.casino, log: o.log, ...o.live });
   // The landing page and the leaderboard read every player of the day: each
@@ -166,7 +172,9 @@ export function holdemHandler(o: ServerOptions): { handle: (req: IncomingMessage
       const f = path.slice(8);
       const body = files.get(f);
       if (!body) return notFound(res);
-      return send(res, 200, STATIC[f]!, body, { "Cache-Control": f.startsWith("fonts/") ? "public, max-age=31536000, immutable" : "public, max-age=300", "Access-Control-Allow-Origin": "*" });
+      const forGood = f.startsWith("fonts/") || (f === "preview.png" && url.searchParams.get("v") === previewV);
+      const cache = forGood ? "public, max-age=31536000, immutable" : f.endsWith(".png") ? "public, max-age=86400" : "public, max-age=300";
+      return send(res, 200, STATIC[f]!, body, { "Cache-Control": cache, "Access-Control-Allow-Origin": "*" });
     }
     if (path === "/terms" || path === "/tos" || path === "/privacy") {
       const d = legalDoc(path);
@@ -175,7 +183,7 @@ export function holdemHandler(o: ServerOptions): { handle: (req: IncomingMessage
     if (path === "/") {
       const [top, lobby] = await Promise.all([cached("top", () => o.casino.leaderboard(o.casino.today(), 4)), cached("lobby", () => o.casino.lobby())]);
       const featured = lobby[0] ? ((await o.casino.spectate(lobby[0].id)) ?? null) : null;
-      return page(res, 200, landingPage({ mcpUrl: base + "/mcp", liveTables: lobby.length, tables: lobby, resetIn: untilReset(now()), top, featured }));
+      return page(res, 200, landingPage({ mcpUrl: base + "/mcp", preview: previewUrl, liveTables: lobby.length, tables: lobby, resetIn: untilReset(now()), top, featured }));
     }
     if (path === "/tables") return page(res, 200, lobbyPage(await cached("lobby", () => o.casino.lobby())));
     let m = path.match(/^\/tables\/(t[0-9a-f]{12}(?:[0-9a-f]{20})?)$/);

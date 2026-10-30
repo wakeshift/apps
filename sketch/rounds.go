@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/wakeshift/apps/gamekit"
 )
 
@@ -219,7 +217,9 @@ func (a *App) checkAway(tx *gamekit.Tx, g *game) error {
 			continue
 		}
 		if p.Missed >= awayRounds {
-			if err := a.remove(tx, g, p); err != nil {
+			why := fmt.Sprintf("You were taken out of Sketch Stadium room %s: away for %s in a row (nothing drawn on your turn, no guess or tool call while drawings were up). "+
+				"The room plays on without you. Call the `join` tool to play again.", g.ID, plural(awayRounds, "round", "rounds"))
+			if err := a.remove(tx, g, p, why); err != nil {
 				return err
 			}
 			out = append(out, p.Handle)
@@ -274,30 +274,29 @@ func minTime(a, b time.Time) time.Time {
 
 // remove takes a player out of the room: its seat goes (it can join again),
 // its watch link stops working, and once this commits its seat's
-// subscription is ended, unless it's seated in another game (the
-// subscription read here, with its user: one a later rejoin makes isn't
-// touched). Leaving and being taken out are the same.
-func (a *App) remove(tx *gamekit.Tx, g *game, p *player) error {
+// subscription is ended, unless it's seated in another game (gamekit's
+// Tx.Remove). Leaving and being taken out are the same but for why: a
+// player taken out is told why, and how to play again, in a last update to
+// it alone before its subscription ends; one that left (why "") knows.
+func (a *App) remove(tx *gamekit.Tx, g *game, p *player, why string) error {
 	p.Left = true
-	var sub removal
-	err := tx.QueryRow(tx.Ctx, `DELETE FROM seats WHERE game_id = $1 AND player = $2 RETURNING subscription, subscriber`, g.ID, p.Key()).Scan(&sub.Subscription, &sub.User)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	subject := ""
+	if why != "" {
+		subject = "You left the room"
+	}
+	if _, err := tx.Remove(g.ID, p.Key(), subject, why); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(tx.Ctx, `DELETE FROM sketch_seen WHERE game_id = $1 AND player = $2`, g.ID, p.Key()); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(tx.Ctx, `DELETE FROM sketch_watch WHERE game_id = $1 AND player = $2`, g.ID, p.Key()); err != nil {
-		return err
-	}
-	if sub.Subscription == "" {
-		return nil // a native seat, or one whose subscription ended: nothing to end
-	}
-	return a.queue(tx, g.ID, "remove", sub)
+	_, err := tx.Exec(tx.Ctx, `DELETE FROM sketch_watch WHERE game_id = $1 AND player = $2`, g.ID, p.Key())
+	return err
 }
 
 // removal is a removed seat's subscription, to end once the removal
-// commits.
+// committed: what remove queued before gamekit's Tx.Remove did it. Rows
+// queued then are still sent (store.go).
 type removal struct {
 	Subscription string `json:"subscription"`
 	User         string `json:"user"`
@@ -573,7 +572,8 @@ func scoreLine(g *game) string {
 // for it and the drawer.
 func (a *App) rightGuess(tx *gamekit.Tx, g *game, p *player, text string, owner bool) error {
 	d := g.drawer()
-	// Its text is kept for the round's archive; nothing shows it.
+	// The round ends with it, in this change: its text first shows with
+	// the word.
 	g.Guesses = append(g.Guesses, guess{By: p.Handle, Text: text, Right: true, Owner: owner, At: tx.Now})
 	by := p.Handle
 	if owner {
@@ -605,7 +605,7 @@ func (a *App) closeRoom(tx *gamekit.Tx, g *game, why string) error {
 // without it: a round it was drawing is void, and with too few left the
 // room waits for players.
 func (a *App) leave(tx *gamekit.Tx, g *game, p *player) error {
-	if err := a.remove(tx, g, p); err != nil {
+	if err := a.remove(tx, g, p, ""); err != nil {
 		return err
 	}
 	g.changed()

@@ -20,6 +20,7 @@ function room(db: Db, start = Date.parse("2026-10-21T12:00:00Z")) {
   const notify: Notifier = {
     turn: async (to, e) => {
       wakes.push({ ...to, ...e });
+      return true;
     },
     result: async () => {},
     handResult: async () => {},
@@ -130,7 +131,7 @@ test("a move's message goes into the next wake as the player's words, the specta
   const stored = await db.query<{ flagged: boolean; original: string | null }>("SELECT flagged, original FROM action_notes WHERE text = $1", [HIDDEN]);
   assert.deepEqual(stored.rows, [{ flagged: true, original: "kys" }], "kept for moderation only");
   // The clock runs out on the next move: no message with it.
-  clock.t += 61_000;
+  clock.t += 31_000;
   await casino.tick();
   await playOut(casino, [a.id, b.id]);
   const h = (await casino.hand(view.hand!.id))!;
@@ -510,7 +511,7 @@ test("a live stream whose browser goes before its first snapshot gives its place
     spectate: async () => {
       reads++;
       await reading;
-      return { id: "tslow", stake: "$1/$2", pace: "60 seconds a move", clock: 60, private: false, day: "2026-10-21", seats: [], hand: null, talk: [] };
+      return { id: "tslow", stake: "$1/$2", pace: "30 seconds a move", clock: 30, private: false, day: "2026-10-21", seats: [], hand: null, talk: [] };
     },
   } as unknown as Casino;
   const hub = new LiveHub({ casino, log: () => {}, perAddress: 1, pollMs: 60_000 });
@@ -534,4 +535,64 @@ test("a live stream whose browser goes before its first snapshot gives its place
   release();
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(hub.size, 0, "a stream whose browser went is counted again, for good, once its read finished");
+});
+
+// ── Link previews ──────────────────────────────────────────────────────────
+
+const CRAWLERS = [
+  "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+  "Twitterbot/1.0",
+  "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)",
+  "LinkedInBot/1.0 (compatible; Mozilla/5.0; Apache-HttpClient +http://www.linkedin.com)",
+  "WhatsApp/2.23.20.0",
+  "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_1) AppleWebKit/601.2.4 (KHTML, like Gecko) Version/9.0.1 Safari/601.2.4 facebookexternalhit/1.1 Facebot Twitterbot/1.0",
+];
+
+test("the landing page's link preview: every tag, absolute at this app's URL, for every crawler, and its image served as a 1200×630 PNG cached for good", async (t) => {
+  const db = await testDb(t);
+  const { casino } = room(db);
+  const site = "https://holdem.example.test";
+  const server = holdemHttp({
+    wake: new Wakeshift({ key: "wst_test_holdem_" + "x".repeat(43), core: "http://127.0.0.1:9" }),
+    casino,
+    events: {} as HoldemEvents,
+    secret: "preview-test-secret-at-least-32-bytes-long",
+    publicUrl: site,
+    log: () => {},
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  let image = "";
+  for (const ua of CRAWLERS) {
+    const res = await fetch(base + "/", { headers: { "User-Agent": ua } });
+    assert.equal(res.status, 200, ua);
+    const html = await res.text();
+    const tags = new Map([...html.matchAll(/<meta (?:property|name)="([^"]+)" content="([^"]*)">/g)].map((m) => [m[1]!, m[2]!.replace(/&#39;/g, "'").replace(/&amp;/g, "&")]));
+    for (const k of ["og:type", "og:site_name", "og:title", "og:description", "og:url", "og:image", "og:image:type", "og:image:width", "og:image:height", "og:image:alt", "twitter:card", "twitter:title", "twitter:description", "twitter:image"]) {
+      assert.ok(tags.get(k), `no ${k}`);
+    }
+    assert.equal(tags.get("og:title"), "Your agent plays poker against everyone else's");
+    assert.equal(tags.get("og:site_name"), "Agent Hold'em");
+    assert.equal(tags.get("og:url"), site + "/");
+    assert.ok(html.includes(`<link rel="canonical" href="${site}/">`), "no canonical link");
+    assert.equal(tags.get("twitter:card"), "summary_large_image");
+    assert.deepEqual([tags.get("og:image:type"), tags.get("og:image:width"), tags.get("og:image:height")], ["image/png", "1200", "630"]);
+    assert.ok(tags.get("og:image")!.startsWith(site + "/static/preview.png?v="), `og:image ${tags.get("og:image")}`);
+    assert.equal(tags.get("twitter:image"), tags.get("og:image"));
+    image = tags.get("og:image")!;
+  }
+  const res = await fetch(base + image.slice(site.length));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "image/png");
+  assert.match(res.headers.get("cache-control")!, /max-age=31536000/);
+  const png = Buffer.from(await res.arrayBuffer());
+  assert.equal(png.subarray(1, 4).toString(), "PNG");
+  assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [1200, 630]);
+  const touch = await fetch(base + "/static/apple-touch-icon.png");
+  assert.equal(touch.headers.get("content-type"), "image/png");
 });

@@ -27,9 +27,9 @@ const days = (n: number) => (n === 1 ? "1 day" : `${n} days`);
 
 const termsFor = (l: DocLimits) => `# Webhooks Terms of Service
 
-*Last updated October 25, 2026*
+*Last updated October 30, 2026*
 
-These Webhooks Terms of Service ("Terms") are an agreement between Clawvisor Inc. ("we" or "us") and each person who uses Webhooks at try.wakeshift.ai ("you"). Webhooks is a tool that we make, and it runs on Wakeshift. The [Terms for Our Apps](${WAKESHIFT}/app-terms) form part of these Terms. If the two conflict, these Terms prevail for Webhooks.
+These Webhooks Terms of Service ("Terms") are an agreement between Clawvisor Inc. ("we" or "us") and each person who uses Webhooks at try.wakeshift.ai ("you"). Webhooks is a tool that we make, and it runs on Wakeshift. The [Terms for Our Apps](${WAKESHIFT}/app-terms) form part of these Terms. If the two conflict, these Terms prevail for Webhooks. If your agent needs the \`wakeshift\` program, our [Connector Terms](${WAKESHIFT}/connector-terms) govern your use of that program and form part of these Terms. You agree to them when you accept these Terms.
 
 ## 1. The Tool
 
@@ -75,9 +75,9 @@ See also the [Webhooks Privacy Policy](/privacy).
 
 const privacyFor = (l: DocLimits) => `# Webhooks Privacy Policy
 
-*Last updated October 26, 2026*
+*Last updated October 30, 2026*
 
-This Webhooks Privacy Policy ("Policy") describes the personal data that Webhooks at try.wakeshift.ai collects, where it goes and how long it is kept. Webhooks is a tool that Clawvisor Inc. ("we" or "us") makes, and it runs on Wakeshift. This Policy forms part of our [Privacy Policy](${WAKESHIFT}/privacy), which describes who we are, why we process personal data and on what legal bases, your rights, where data is stored and how we notify you of changes. You may contact us at support@wakeshift.ai.
+This Webhooks Privacy Policy ("Policy") describes the personal data that Webhooks at try.wakeshift.ai collects, where it goes and how long it is kept. Webhooks is a tool that Clawvisor Inc. ("we" or "us") makes, and it runs on Wakeshift. This Policy forms part of our [Privacy Policy](${WAKESHIFT}/privacy), which describes who we are, why we process personal data and on what legal bases, your rights, where data is stored and how we notify you of changes. If your agent needs the \`wakeshift\` program, our [Connector Terms](${WAKESHIFT}/connector-terms) govern that program, and [Section 4 of that Privacy Policy](${WAKESHIFT}/privacy#the-wakeshift-program) describes the data it processes. You may contact us at support@wakeshift.ai.
 
 ## 1. Data Collected
 

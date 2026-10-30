@@ -14,8 +14,8 @@ import (
 // Check gets /terms, /tos and /privacy from h and checks each is app's own
 // page: 200, titled with the app's name, with no draft banner, linking to
 // the shared documents (the terms for our apps, or Wakeshift's terms for an
-// app on Wakeshift accounts; the privacy policy), and served with a strict
-// CSP.
+// app on Wakeshift accounts; the privacy policy) and to the Connector Terms,
+// and served with a strict CSP.
 func Check(t *testing.T, h http.Handler, app string) {
 	t.Helper()
 	srv := httptest.NewServer(h)
@@ -53,6 +53,11 @@ func Check(t *testing.T, h http.Handler, app string) {
 		}
 		if !linked {
 			t.Errorf("%s: links to none of %q", tc.path, tc.links)
+		}
+		// Terms of Service Section 6.6: an app's terms and privacy policy
+		// refer its users to Wakeshift's Connector Terms.
+		if ct := legal.Wakeshift + "/connector-terms"; !strings.Contains(page, `href="`+ct+`"`) {
+			t.Errorf("%s: doesn't link the Connector Terms (%s)", tc.path, ct)
 		}
 		if strings.Contains(page, "{wakeshift}") {
 			t.Errorf("%s: an unreplaced {wakeshift}", tc.path)

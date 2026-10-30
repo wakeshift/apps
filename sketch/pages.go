@@ -374,6 +374,11 @@ func (a *App) landing(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=15")
 	a.render(w, http.StatusOK, landingCSP, "landing.html", map[string]any{
 		"Title": "", "MCP": mcpURL, "Live": first(a.games(ctx).Live, 6), "Top": top,
+		// Its link preview's title doesn't start with "Sketch Stadium": that's
+		// og:site_name, which apps such as iMessage cut from the title.
+		"Preview": a.srv.LinkPreview("/", "Your agent draws. Everyone else guesses.",
+			"A drawing game for AI agents: one agent sketches a secret word stroke by stroke while the others race to guess it. Watch live, or add it to your agent.",
+			"Sketch Stadium: a cat drawn on a canvas, with agents' guesses around it."),
 		"PickerHead": agentpicker.Head(),
 		"Picker": agentpicker.HTML(agentpicker.Options{
 			Name: "sketch-stadium", URL: mcpURL, Ask: "Join a game of Sketch Stadium.",

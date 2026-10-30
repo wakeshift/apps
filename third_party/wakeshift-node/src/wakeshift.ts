@@ -6,6 +6,7 @@ import { WakeEvent, attachEvents, type AttachOptions, type EventOptions, type Ev
 import type { Attached } from "./toolcall.js";
 import { parseKey, signAssertion, type AppKey, isTestKey } from "./key.js";
 import { retryRefused } from "./retry.js";
+import { takesTasks } from "./discover.js";
 
 /** Wakeshift's production core, the default for every key but an older wst_test_ one. Override with `core` or WAKESHIFT_CORE. */
 export const DEFAULT_CORE = "https://app.wakeshift.ai";
@@ -45,6 +46,12 @@ export interface WakeshiftOptions {
   onWarning?: (message: string) => void;
 }
 
+/** @internal How one request to Wakeshift differs: a longer timeout, and a signal that ends it early. */
+export interface RequestOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 /** Which app a key is, as Wakeshift says (wake.app()). */
 export interface AppInfo {
   id: string;
@@ -75,6 +82,8 @@ export interface Call {
   harness?: string;
   /** The name of the tool being called: a connector beacon in its result names it. */
   tool?: string;
+  /** The client takes MCP tasks (protocol 2026-07-28 with the tasks extension), and attach serves the wait tool for it (tasks.ts). */
+  tasks?: boolean;
 }
 
 /**
@@ -211,6 +220,7 @@ export function packCall(c: {
   harness?: string;
   conversation?: string;
   tool?: string;
+  tasks?: boolean;
 }): Call {
   const out: Call = { client: c.clientName ?? "" };
   if (c.user) out.user = c.user;
@@ -220,6 +230,7 @@ export function packCall(c: {
   if (c.harness?.trim()) out.harness = c.harness.trim();
   if (c.conversation?.trim()) out.conversation = c.conversation.trim();
   if (c.tool?.trim()) out.tool = c.tool.trim();
+  if (c.tasks) out.tasks = true;
   return out;
 }
 
@@ -238,6 +249,7 @@ export function toolCallOf(extra: ToolExtra | undefined, client: string, user: s
     harness: str(args, HARNESS_ARG),
     conversation: str(args, CONVERSATION_ARG),
     tool,
+    tasks: takesTasks(extra?._meta, extra),
   });
 }
 
@@ -499,10 +511,14 @@ export class Wakeshift {
     return { matched: out.matched, duplicate: !!out.duplicate, unmatched: recipientsOf(out.unmatched), ended: recipientsOf(out.ended) };
   }
 
-  /** @internal A call to the app API (the events machinery's), after the manifest with the defined events is published. */
-  async requestApp<T>(method: string, path: string, body?: unknown): Promise<T> {
+  /**
+   * @internal A call to the app API (the events machinery's), after the
+   * manifest with the defined events is published. opts: a longer timeout
+   * (a held tasks/get), and a signal that ends it early.
+   */
+  async requestApp<T>(method: string, path: string, body?: unknown, opts: RequestOptions = {}): Promise<T> {
     await this.ensureEvents();
-    return this.request<T>(method, path, body);
+    return this.request<T>(method, path, body, opts);
   }
 
   // ── Users' workspaces ──────────────────────────────────────────────────
@@ -530,21 +546,23 @@ export class Wakeshift {
     await this.request("POST", `/workspaces/${encodeURIComponent(workspace)}/agents/${encodeURIComponent(agent)}/token`);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, opts: RequestOptions = {}): Promise<T> {
     const headers: Record<string, string> = { Authorization: "Bearer " + this.assertion() };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     let resp: Response;
     let text: string;
+    const timeoutMs = Math.max(opts.timeoutMs ?? 0, this.timeoutMs);
+    const timeout = AbortSignal.timeout(timeoutMs);
     try {
       resp = await this.fetchFn(this.core + "/api/apps/v1" + path, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: opts.signal ? AbortSignal.any([timeout, opts.signal]) : timeout,
       });
       text = await resp.text();
     } catch (err) {
-      throw this.unreachable(err);
+      throw this.unreachable(err, timeoutMs);
     }
     let json: any;
     try {
@@ -574,11 +592,11 @@ export class Wakeshift {
 
   // A request that got no answer. Name the core it went to: a wrong or
   // missing WAKESHIFT_CORE is the usual cause.
-  private unreachable(err: unknown): WakeshiftError {
+  private unreachable(err: unknown, timeoutMs = this.timeoutMs): WakeshiftError {
     const e = err as { name?: string; message?: string; cause?: { code?: string; message?: string } } | undefined;
     const why =
       e?.name === "TimeoutError" || e?.name === "AbortError"
-        ? `no answer within ${this.timeoutMs / 1000}s`
+        ? `no answer within ${timeoutMs / 1000}s`
         : [e?.message, e?.cause?.code ?? e?.cause?.message].filter(Boolean).join(": ") || String(err);
     return new WakeshiftError(
       0,

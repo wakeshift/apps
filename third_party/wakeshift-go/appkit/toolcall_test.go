@@ -689,10 +689,12 @@ func TestEventsNative(t *testing.T) {
 	}
 }
 
-// A tool whose output embeds WakeOutput gets the block's text (not the
-// beacon line) in its structured output too; the block stays in the
-// content, with the beacon last.
-func TestEventsTypedOutput(t *testing.T) {
+// Every structured result of a wrapped tool gets the block's text (not the
+// beacon line) in its wakeshift field, whether or not its output embeds
+// WakeOutput; the block stays in the content, with the beacon last. tools/list
+// names the field in each wrapped tool's output schema (go-sdk's inferred
+// schemas refuse fields they don't name), and leaves other tools' alone.
+func TestEventsStructuredOutput(t *testing.T) {
 	w := newWrapped(t, appkit.AttachOptions{})
 	mcp.AddTool(w.srv, &mcp.Tool{Name: "join"}, appkit.Events(w.at, func(ctx context.Context, call *appkit.ToolCall, in tableIn) (*mcp.CallToolResult, view, error) {
 		_, err := w.shared.Subscribe(ctx, call, tableArgs{Table: in.Table})
@@ -702,18 +704,101 @@ func TestEventsTypedOutput(t *testing.T) {
 		_, err := w.shared.Subscribe(ctx, call, tableArgs{Table: in.Table})
 		return nil, plainView{Table: in.Table}, err
 	}))
-	res := w.callTool(t, "ada", "", "join", map[string]any{"table": "oak"}, nil)
-	if res.Structured["table"] != "oak" || res.Structured["wakeshift"] != "Wakeshift: this conversation is woken by Monitor." {
-		t.Fatalf("structured: %v", res.Structured)
+	mcp.AddTool(w.srv, &mcp.Tool{Name: "join_raw"}, appkit.Events(w.at, func(ctx context.Context, call *appkit.ToolCall, in tableIn) (*mcp.CallToolResult, any, error) {
+		_, err := w.shared.Subscribe(ctx, call, tableArgs{Table: in.Table})
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Seated."}}, StructuredContent: map[string]any{"table": in.Table}}, nil, err
+	}))
+	mcp.AddTool(w.srv, &mcp.Tool{Name: "unwrapped"}, func(context.Context, *mcp.CallToolRequest, struct {
+		Table string `json:"table"`
+	}) (*mcp.CallToolResult, plainView, error) {
+		return nil, plainView{Table: "oak"}, nil
+	})
+	// Wakeshift's argument names without WakeArgs: not a wrapped tool.
+	mcp.AddTool(w.srv, &mcp.Tool{Name: "lookalike"}, func(context.Context, *mcp.CallToolRequest, struct {
+		SessionKey     string `json:"session_key"`
+		Harness        string `json:"harness"`
+		ConversationID string `json:"conversation_id"`
+	}) (*mcp.CallToolResult, plainView, error) {
+		return nil, plainView{Table: "oak"}, nil
+	})
+	const woken = "Wakeshift: this conversation is woken by Monitor."
+	for _, name := range []string{"join", "join_plain", "join_raw"} {
+		res := w.callTool(t, "ada", "", name, map[string]any{"table": "oak"}, nil)
+		if res.IsError || res.Structured["table"] != "oak" || res.Structured["wakeshift"] != woken {
+			t.Fatalf("%s structured: %v %q", name, res.Structured, res.texts())
+		}
+		texts := res.texts()
+		if len(texts) != 3 || texts[1] != woken || texts[2] != testTrailer {
+			t.Fatalf("%s content: %q", name, texts)
+		}
 	}
-	texts := res.texts()
-	if len(texts) != 3 || texts[0] != `{"table":"oak"}` || texts[1] != "Wakeshift: this conversation is woken by Monitor." || texts[2] != testTrailer {
-		t.Fatalf("content: %q", texts)
+	for range 2 { // the server's own tools aren't changed by the first
+		schemas := w.outputSchemas(t)
+		for _, name := range []string{"join", "join_plain"} {
+			s := schemas[name]
+			props, _ := s["properties"].(map[string]any)
+			field, _ := props["wakeshift"].(map[string]any)
+			if field["type"] != "string" || slices.Contains(anyStrings(s["required"]), "wakeshift") {
+				t.Fatalf("%s output schema: %v", name, s)
+			}
+		}
+		if s := schemas["join_plain"]; s["additionalProperties"] == nil {
+			t.Fatalf("join_plain's schema refuses other fields: %v", s)
+		}
+		for _, name := range []string{"unwrapped", "lookalike"} {
+			if props, _ := schemas[name]["properties"].(map[string]any); props["wakeshift"] != nil || props["table"] == nil {
+				t.Fatalf("%s output schema: %v", name, schemas[name])
+			}
+		}
+		if _, has := schemas["join_raw"]; has {
+			t.Fatalf("join_raw has an output schema: %v", schemas["join_raw"])
+		}
 	}
-	res = w.callTool(t, "ada", "", "join_plain", map[string]any{"table": "elm"}, nil)
-	if _, has := res.Structured["wakeshift"]; has || res.Structured["table"] != "elm" || len(res.texts()) != 3 {
-		t.Fatalf("without WakeOutput: %v %q", res.Structured, res.texts())
+}
+
+// anyStrings is a JSON array's strings.
+func anyStrings(v any) []string {
+	var out []string
+	a, _ := v.([]any)
+	for _, x := range a {
+		if s, ok := x.(string); ok {
+			out = append(out, s)
+		}
 	}
+	return out
+}
+
+// outputSchemas lists the tools, returning each one's output schema by name.
+func (w *wrapped) outputSchemas(t *testing.T) map[string]map[string]any {
+	t.Helper()
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": map[string]any{}})
+	req, _ := http.NewRequest("POST", w.url, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer ada")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Result struct {
+			Tools []struct {
+				Name         string         `json:"name"`
+				OutputSchema map[string]any `json:"outputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	schemas := map[string]map[string]any{}
+	for _, tool := range out.Result.Tools {
+		if tool.OutputSchema != nil {
+			schemas[tool.Name] = tool.OutputSchema
+		}
+	}
+	return schemas
 }
 
 // A result that carries a beacon already (a tool's own, or middleware

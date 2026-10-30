@@ -13,7 +13,8 @@ package sketch
 // (apps/layouttest).
 //
 // SKETCH_LAYOUT_SHOTS=<dir> also saves a screenshot of every page at every
-// size.
+// size. Then the round ends with a right guess, and the public and the
+// guesser's watch pages are checked again, its "got it" chip and all.
 
 import (
 	"fmt"
@@ -222,6 +223,32 @@ func TestLayout(t *testing.T) {
 			}
 			if m.Items < 5 {
 				failures = append(failures, fmt.Sprintf("%s: only %d parts measured", name, m.Items))
+			}
+			for _, v := range m.Violations {
+				failures = append(failures, name+": "+v)
+			}
+		}
+	}
+	// Then the round's over: the right guess shows with its "got it" chip,
+	// in the feed and on the scoreboard, and the word under the picture.
+	f.set(f.clock().Add(5 * time.Second))
+	f.move(nil, func(tx *gamekit.Tx, g *game) error {
+		return f.a.rightGuess(tx, g, g.player(guesser.Key()), "The Lighthouse", true)
+	})
+	f.a.live.mu.Lock()
+	f.a.live.games = nil // the pages read the game again, not from their cache
+	f.a.live.mu.Unlock()
+	for _, pg := range []struct{ name, url string }{{"game-over", srv.URL + "/games/" + g.ID}, {"watch-guesser-over", watch(guesser)}} {
+		for _, vp := range viewports {
+			name := pg.name + "-" + vp.String()
+			shot := ""
+			if shots != "" && (vp.W == 1440 || vp.W == 390) {
+				shot = filepath.Join(shots, name+".png")
+			}
+			m, err := layouttest.Check(port, pg.url, vp, "!!document.querySelector('.feed li.right .got')", measure, shot)
+			if err != nil {
+				failures = append(failures, name+": "+err.Error())
+				continue
 			}
 			for _, v := range m.Violations {
 				failures = append(failures, name+": "+v)

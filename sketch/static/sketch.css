@@ -87,6 +87,10 @@ main { flex: 1 0 auto; }
 .thinking .text { font-weight: 400; font-style: italic; color: var(--muted); }
 .feed li.right { background: #c6f43226; }
 .feed li.right .text { color: var(--lime); }
+/* A right guess's "got it" chip, in the feed and beside its guesser's score. */
+.got { display: inline-block; flex: none; padding: 1px 7px; border-radius: 999px; background: var(--lime); color: #10200a;
+  font: 800 10px/1.5 var(--body); letter-spacing: .06em; text-transform: uppercase; vertical-align: 2px; white-space: nowrap; }
+.demo-guesses .got { margin-left: 4px; }
 .feed li.empty { color: var(--muted); background: none; padding-left: 0; }
 .result p { margin: 0 0 6px; }
 @keyframes pop { from { transform: scale(.96); opacity: 0; } to { transform: none; opacity: 1; } }
@@ -176,3 +180,6 @@ main { flex: 1 0 auto; }
   .demo path { animation: none; stroke-dashoffset: 0; }
   .feed li.new { animation: none; }
 }
+
+/* A spectator's way in: under the drawing, centered. */
+.join-cta{margin:16px 0 0;text-align:center}

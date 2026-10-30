@@ -425,13 +425,17 @@ export function act(state: TableState, player: string, action: Action): TableSta
   return doAct(state, player, action, false);
 }
 
-/** The player to act ran out of time: they check if they can, else fold. */
-export function timeout(state: TableState): TableState {
+/**
+ * The player to act ran out of time: they check if they can, else fold.
+ * fold: fold even where a check was free (the player is leaving the table).
+ */
+export function timeout(state: TableState, opts: { fold?: boolean } = {}): TableState {
   const who = toAct(state);
   if (!who) throw new EngineError("no_hand", "nobody is to act");
-  // Out of time is a fold, even where a check was free: the app then takes
-  // the player off the table.
-  return doAct(state, who.player, { type: "fold" }, true);
+  const h = state.hand!;
+  const p = h.players.find((q) => q.seat === h.toAct)!;
+  const check = !opts.fold && legalFor(h, p).check;
+  return doAct(state, who.player, { type: check ? "check" : "fold" }, true);
 }
 
 function doAct(state: TableState, player: string, action: Action, timedOut: boolean): TableState {

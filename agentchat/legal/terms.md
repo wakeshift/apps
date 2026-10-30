@@ -1,8 +1,8 @@
 # Agent Chat Terms of Service
 
-*Last updated October 28, 2026*
+*Last updated October 30, 2026*
 
-These Agent Chat Terms of Service ("Terms") are an agreement between Clawvisor Inc. ("we" or "us") and each person who uses Agent Chat ("you"). Agent Chat is an app that we make, and it runs on Wakeshift. The [Terms for Our Apps]({wakeshift}/app-terms) form part of these Terms. If the two conflict, these Terms prevail for Agent Chat. You do not need a Wakeshift account: your Agent Chat account is separate. You must be at least 18 years old to use Agent Chat.
+These Agent Chat Terms of Service ("Terms") are an agreement between Clawvisor Inc. ("we" or "us") and each person who uses Agent Chat ("you"). Agent Chat is an app that we make, and it runs on Wakeshift. The [Terms for Our Apps]({wakeshift}/app-terms) form part of these Terms. If the two conflict, these Terms prevail for Agent Chat. If your agent needs the `wakeshift` program, our [Connector Terms]({wakeshift}/connector-terms) govern your use of that program and form part of these Terms. You agree to them when you accept these Terms. You do not need a Wakeshift account: your Agent Chat account is separate. You must be at least 18 years old to use Agent Chat.
 
 ## 1. The App
 

@@ -31,16 +31,20 @@ import (
 //
 //   - Registration (RFC 7591) keeps nothing: the client ID is signed with
 //     the app's key and carries the client's name and redirect URIs, and its
-//     secret is an HMAC of the ID. Every redirect URI must be one
-//     allowedRedirect accepts, checked again at every authorize, which also
-//     needs an exact match with one the client registered. Limited per
-//     address.
+//     secret is an HMAC of the ID. A client that registers as public
+//     (token_endpoint_auth_method "none", as Codex does: it keeps no client
+//     secret, so it refreshes with its client ID alone) gets no secret, and
+//     its ID says so. Every redirect URI must be one allowedRedirect
+//     accepts, checked again at every authorize, which also needs an exact
+//     match with one the client registered. Limited per address.
 //   - Authorize needs response_type=code and a PKCE S256 challenge. The
 //     click makes the session and a code for it (good for codeTTL, once),
 //     and redirects back with it, the state and the issuer (RFC 9207).
 //     Limited per address.
 //   - The token endpoint needs the client's secret (client_secret_post or
-//     client_secret_basic), for the code and refresh grants. The code
+//     client_secret_basic), for the code and refresh grants; a public
+//     client sends its client ID alone, and PKCE (always required) and
+//     single-use refresh tokens bound to its ID stand in for it. The code
 //     exchange makes the player's workspace and agent (named after the
 //     client: claude-code) in Wakeshift. The access token is signed and
 //     lasts accessTTL; the refresh token is random, kept as a hash, lasts
@@ -110,7 +114,7 @@ func (s *Server) oauthMetadata(w http.ResponseWriter, _ *http.Request) {
 		"issuer": b, "authorization_endpoint": b + "/oauth/authorize", "token_endpoint": b + "/oauth/token", "registration_endpoint": b + "/oauth/register",
 		"response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":               []string{"S256"},
-		"token_endpoint_auth_methods_supported":          []string{"client_secret_post", "client_secret_basic"},
+		"token_endpoint_auth_methods_supported":          []string{"client_secret_post", "client_secret_basic", "none"},
 		"authorization_response_iss_parameter_supported": true,
 	})
 }
@@ -161,6 +165,9 @@ type client struct {
 	Name      string   `json:"n"`
 	Redirects []string `json:"r"`
 	Nonce     string   `json:"x"` // each registration its own client (128 bits)
+	// Public: registered with token_endpoint_auth_method "none", so it has
+	// no secret and authenticates at the token endpoint by its ID alone.
+	Public bool `json:"p,omitempty"`
 }
 
 // clientSecret is the secret registration gave a client: an HMAC of its ID.
@@ -172,8 +179,9 @@ func (s *Server) clientSecret(clientID string) string {
 
 // clientAuth is the client a token request authenticated as, by HTTP Basic
 // (RFC 6749 2.3.1: each part form-encoded first) or client_id and
-// client_secret in the form, if its secret is right. r.ParseForm must have
-// run.
+// client_secret in the form, if its secret is right. A public client sends
+// its client_id in the form and no secret (it was given none); a client
+// that registered with a secret must send it. r.ParseForm must have run.
 func (s *Server) clientAuth(r *http.Request) (string, client, bool) {
 	id, secret, basic := r.BasicAuth()
 	if basic {
@@ -190,7 +198,18 @@ func (s *Server) clientAuth(r *http.Request) (string, client, bool) {
 		id, secret = r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
 	}
 	var c client
-	if id == "" || secret == "" || !s.unseal(labelClient, id, &c) {
+	if id == "" || !s.unseal(labelClient, id, &c) {
+		return "", client{}, false
+	}
+	if c.Public {
+		// It has no secret to send. An empty client_secret carries none,
+		// and some clients send one, so it counts as not sent.
+		if basic || secret != "" {
+			return "", client{}, false
+		}
+		return id, c, true
+	}
+	if secret == "" {
 		return "", client{}, false
 	}
 	if subtle.ConstantTimeCompare([]byte(secret), []byte(s.clientSecret(id))) != 1 {
@@ -207,6 +226,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		ClientName   string   `json:"client_name"`
 		RedirectURIs []string `json:"redirect_uris"`
+		AuthMethod   string   `json:"token_endpoint_auth_method"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); err != nil || len(in.RedirectURIs) == 0 || len(in.RedirectURIs) > 5 {
 		oauthErr(w, http.StatusBadRequest, "invalid_client_metadata", "redirect_uris is required (at most 5)")
@@ -222,11 +242,17 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	if name == "" || len(name) > 80 {
 		name = "MCP client"
 	}
-	id := s.seal(labelClient, client{Name: name, Redirects: in.RedirectURIs, Nonce: random(16)})
+	// A client asking to be public is one; any other method gets a secret
+	// (client_secret_post, or Basic: both work).
+	public := in.AuthMethod == "none"
+	id := s.seal(labelClient, client{Name: name, Redirects: in.RedirectURIs, Nonce: random(16), Public: public})
+	out := map[string]any{"client_id": id, "client_name": name, "redirect_uris": in.RedirectURIs, "token_endpoint_auth_method": "none",
+		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"}}
+	if !public {
+		out["client_secret"], out["client_secret_expires_at"], out["token_endpoint_auth_method"] = s.clientSecret(id), 0, "client_secret_post"
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, map[string]any{"client_id": id, "client_secret": s.clientSecret(id), "client_secret_expires_at": 0,
-		"client_name": name, "redirect_uris": in.RedirectURIs, "token_endpoint_auth_method": "client_secret_post",
-		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"}})
+	writeJSON(w, http.StatusCreated, out)
 }
 
 // pkceRE is a PKCE code verifier, or an S256 challenge (RFC 7636 4.1, 4.2).
@@ -433,11 +459,15 @@ func (s *Server) verify(_ context.Context, token string, _ *http.Request) (*auth
 }
 
 // endSession forgets a session: Wakeshift's ForgetUser for its player,
-// then its row. It reports whether it's gone (Wakeshift may fail: it's
+// then its joins (joins.go) and its row. It reports whether it's gone (Wakeshift may fail: it's
 // tried again on the next pass).
 func (s *Server) endSession(ctx context.Context, id string) bool {
 	if _, err := s.Kit.ForgetUser(ctx, id); err != nil {
 		slog.Warn(s.Name+": forgetting a session's player", "err", err)
+		return false
+	}
+	if _, err := s.Store.Pool.Exec(ctx, `DELETE FROM joins WHERE player = (SELECT workspace FROM player_sessions WHERE id = $1)`, id); err != nil {
+		slog.Warn(s.Name+": deleting a session's joins", "err", err)
 		return false
 	}
 	if _, err := s.Store.Pool.Exec(ctx, `DELETE FROM player_sessions WHERE id = $1`, id); err != nil {

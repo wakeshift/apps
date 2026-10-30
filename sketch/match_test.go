@@ -93,26 +93,55 @@ func TestWords(t *testing.T) {
 		}
 	}
 	// Plenty of words, mostly medium and hard.
-	if len(words) < 500 || tiers[easy] < 60 || tiers[medium] < 150 || tiers[hard] < 200 || tiers[easy] > tiers[medium] || tiers[medium] > tiers[hard] {
+	if len(words) < 1200 || tiers[easy] < 60 || tiers[medium] < 500 || tiers[hard] < 750 || tiers[easy] > tiers[medium] || tiers[medium] > tiers[hard] {
 		t.Errorf("%d words: %v", len(words), tiers)
 	}
 	if len(tiers) != 3 {
 		t.Errorf("tiers %v", tiers)
 	}
-	// No guess matches two words: neither a word nor a synonym is another
-	// word's.
-	for _, a := range words {
-		for _, b := range words {
-			if a.Word == b.Word {
-				continue
+	// No guess matches two words: neither a word nor a synonym, nor their
+	// plurals, is another word's. A guess only matches phrases that start
+	// with its letter, so it's checked against those words.
+	byLetter := map[byte][]word{}
+	for _, w := range words {
+		seen := map[byte]bool{}
+		for _, s := range append([]string{w.Word}, w.Synonyms...) {
+			if c := tokens(s)[0][0]; !seen[c] {
+				seen[c] = true
+				byLetter[c] = append(byLetter[c], w)
 			}
-			for _, s := range append([]string{b.Word}, b.Synonyms...) {
-				if matches(s, a) {
-					t.Errorf("%q (for %q) matches %q", s, b.Word, a.Word)
+		}
+	}
+	for _, b := range words {
+		for _, s := range append([]string{b.Word}, b.Synonyms...) {
+			guesses := []string{s}
+			if !irregularPlurals[s] {
+				guesses = append(guesses, s+"s")
+				for _, end := range []string{"s", "x", "ch", "sh", "o"} {
+					if strings.HasSuffix(s, end) {
+						guesses = append(guesses, s+"es")
+						break
+					}
+				}
+			}
+			for _, a := range byLetter[tokens(s)[0][0]] {
+				if a.Word == b.Word {
+					continue
+				}
+				for _, g := range guesses {
+					if matches(g, a) {
+						t.Errorf("%q (for %q) matches %q", g, b.Word, a.Word)
+					}
 				}
 			}
 		}
 	}
+}
+
+// irregularPlurals are synonyms that are already plurals, so TestWords
+// doesn't pluralize them again ("mices").
+var irregularPlurals = map[string]bool{
+	"mice": true, "teeth": true, "feet": true, "geese": true, "leaves": true, "cacti": true, "octopi": true,
 }
 
 func TestValidGuess(t *testing.T) {

@@ -14,7 +14,7 @@
 
 import { z } from "zod";
 import type { Recipient, WakeEvent, Wakeshift } from "@wakeshift/sdk";
-import { type Casino, type Notifier, type TableView, type TurnTarget, resultText, turnText } from "./casino.js";
+import { type Casino, type Notifier, type TableView, type TurnTarget, SIT_OUT_RULE, resultText, turnText } from "./casino.js";
 
 const table = z.string().min(1).max(40).describe("The table's ID (from join, or a table's link)");
 
@@ -26,9 +26,10 @@ const shown = z.array(z.object({ player: z.string(), cards: z.array(z.string()),
 //                deadline, your own view of the table (view), a note on
 //                table talk and, for a bridged player, the last hand's
 //                result (last_hand) if it ended since they last heard.
-//   removed      the last one at a table: your clock ran out, your hand was
-//                folded and you were taken off it (cash_out back in your
-//                bankroll, text).
+//   removed      the last one at a table: the clock took you off it (reason
+//                "timeouts": sat out for timing out repeatedly; "unreachable":
+//                your turn's wake couldn't be delivered), your hand folded
+//                (cash_out back in your bankroll, text).
 //   hand_result  a native seat's: how a hand at your table ended (hand,
 //                number, pot, board, winners, net, shown), as
 //                holdem.hand_result has it.
@@ -71,6 +72,7 @@ export const turnPayload = z.object({
     talk: z.array(z.looseObject({ name: z.string(), text: z.string() })),
   }).optional() as unknown as z.ZodOptional<z.ZodType<TableView>>,
   talk_note: z.string().optional(),
+  reason: z.enum(["timeouts", "unreachable"]).optional(),
   cash_out: z.number().optional(),
   bankroll: z.number().optional(),
   text: z.string().optional(),
@@ -99,7 +101,7 @@ export function defineHoldemEvents(wake: Wakeshift, casino: Casino): HoldemEvent
     // At most 500 characters (Wakeshift's limit).
     description:
       "Your Agent Hold'em table. A \"turn\" is your move: your cards, the board, every stack, what happened since your last turn (and the last hand's result, if you haven't heard), your choices and the turn's ID. " +
-      "Act before the deadline, or your hand is folded and you're taken off the table: one last \"removed\" event says so. " +
+      `Act by the deadline (no time bank): out of time, you check if you can, else fold; time out ${SIT_OUT_RULE}, and you're sat out, as a last \"removed\" event says. ` +
       "At a native seat (a client that subscribes itself), a \"hand_result\" says how each hand ended.",
     args: z.object({ table }),
     payload: turnPayload,
@@ -131,8 +133,12 @@ export function turnRecipient(to: TurnTarget): Recipient {
 /** The casino's notifier: its wakes and results as Hold'em's events (events() is read when each is sent). */
 export function holdemNotifier(events: () => HoldemEvents): Notifier {
   return {
+    // Delivered: Wakeshift took it for a live subscription of theirs (a
+    // retry's duplicate reports what the first emit matched). Not: the
+    // subscription has ended, or a native seat has none.
     turn: async (to, event) => {
-      await events().turn.emit({ table: to.table }, event.data, { to: turnRecipient(to), id: event.id });
+      const r = await events().turn.emit({ table: to.table }, event.data, { to: turnRecipient(to), id: event.id });
+      return r.matched > 0;
     },
     // The shared event, for anyone watching the table (spectators).
     result: async (table, event) => {
@@ -142,7 +148,7 @@ export function holdemNotifier(events: () => HoldemEvents): Notifier {
     handResult: async (to, event) => {
       await events().turn.emit({ table: to.table }, event.data, { to: { native: to.guest }, id: event.id });
     },
-    // The last personal event at that table: the player timed out and was removed.
+    // The last personal event at that table: the clock took the player off it.
     removed: async (to, event) => {
       await events().turn.emit({ table: to.table }, event.data, { to: turnRecipient(to), id: event.id });
     },

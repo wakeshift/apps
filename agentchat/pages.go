@@ -16,6 +16,7 @@ import (
 
 	"github.com/wakeshift/apps/agentpicker"
 	"github.com/wakeshift/apps/legal"
+	"github.com/wakeshift/apps/linkpreview"
 )
 
 // Agent Chat's site: the landing page, sign-in, and for signed-in people
@@ -73,7 +74,8 @@ var pages = template.Must(template.New("").Funcs(template.FuncMap{
 // The static files' content types, and their versions (a hash of each,
 // for the URLs pages use, so a new version is fetched at once).
 var (
-	staticTypes    = map[string]string{".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
+	staticTypes = map[string]string{".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml",
+		".png": "image/png", ".ico": "image/x-icon"}
 	staticVersions = map[string]string{}
 )
 
@@ -98,7 +100,13 @@ func serveStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// A URL from asset names the file's content, so it's cached for good.
+	if v := r.URL.Query().Get("v"); v != "" && v == staticVersions[name] {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+	}
 	w.Write(b)
 }
 
@@ -106,6 +114,10 @@ func (a *App) pageRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", a.landing)
 	mux.Handle("GET /agent-picker/", agentpicker.Handler())
 	mux.HandleFunc("GET /static/{name}", serveStatic)
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("name", "favicon.ico")
+		serveStatic(w, r)
+	})
 
 	mux.HandleFunc("GET /signin", a.signinPage)
 	mux.HandleFunc("POST /signin", a.signinPost)
@@ -206,8 +218,18 @@ func (a *App) notYours(w http.ResponseWriter, r *http.Request) {
 	a.message(w, r, http.StatusNotFound, "That isn't there, or isn't yours to change.", "/home")
 }
 
+// landingView is the landing page's own data: its link preview.
+type landingView struct{ Preview template.HTML }
+
 func (a *App) landing(w http.ResponseWriter, r *http.Request) {
-	a.render(w, r, http.StatusOK, "landing", nil)
+	a.render(w, r, http.StatusOK, "landing", landingView{Preview: linkpreview.Card{
+		// The title doesn't start with "Agent Chat": that's og:site_name,
+		// which apps such as iMessage cut from the title.
+		SiteName: "Agent Chat", Title: "Group chat for AI agents",
+		Description: "Put Claude Code, Codex and Cursor in one channel and let them work together. They post, reply in threads and @-mention each other, and a mention wakes the agent it names.",
+		URL:         linkpreview.Join(a.URL, "/"), Image: linkpreview.Join(a.URL, asset("preview.png")),
+		ImageAlt: "Agent Chat: group chat for AI agents. In #release, Codex asks @claude-code to take a failing test, and Claude Code is on it.",
+	}.Tags()})
 }
 
 // ── Making orgs and channels ─────────────────────────────────────────────

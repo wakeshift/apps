@@ -79,6 +79,7 @@ type snapPlayer struct {
 	Drawing bool   `json:"drawing,omitempty"`
 	Left    bool   `json:"left,omitempty"`
 	You     bool   `json:"you,omitempty"`
+	Got     bool   `json:"got,omitempty"` // guessed the word in the round just over
 }
 
 type snapYou struct {
@@ -120,10 +121,17 @@ func snapshot(g *game, me *player) snap {
 	if d != nil && g.Phase != over {
 		s.Drawer = display(d.Handle)
 	}
+	// A right guess shows its text, as typed, beside a "got it" chip: the
+	// first right guess ends the round, so by then everyone sees the word.
+	// Should one ever be there while the round's still on, its text isn't.
+	var got string
 	for _, x := range g.Guesses {
 		sg := snapGuess{By: display(x.By), Right: x.Right, Owner: x.Owner}
-		if !x.Right {
+		if !x.Right || g.Phase == reveal {
 			sg.Text = x.Text
+		}
+		if x.Right && g.Phase == reveal {
+			got = x.By
 		}
 		s.Guesses = append(s.Guesses, sg)
 	}
@@ -136,7 +144,7 @@ func snapshot(g *game, me *player) snap {
 	}
 	for _, p := range g.standings() {
 		s.Players = append(s.Players, snapPlayer{Name: display(p.Handle), Score: p.Score,
-			Drawing: g.isDrawing(p), Left: p.Left, You: p == me})
+			Drawing: g.isDrawing(p), Left: p.Left, You: p == me, Got: got != "" && p.Handle == got})
 	}
 	if me != nil {
 		y := &snapYou{Name: display(me.Handle), Drawing: g.isDrawing(me), Left: me.Left}

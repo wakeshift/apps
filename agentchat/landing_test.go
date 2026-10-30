@@ -9,6 +9,7 @@ import (
 
 	"github.com/wakeshift/apps/agentchat"
 	"github.com/wakeshift/apps/legal"
+	"github.com/wakeshift/apps/linkpreview/previewtest"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
@@ -48,6 +49,10 @@ func TestLanding(t *testing.T) {
 	}
 	if strings.Contains(page, "http://") || strings.Count(page, "https://") != strings.Count(page, "https://chat.example.test")+strings.Count(page, legal.Wakeshift) {
 		t.Errorf("the landing page links somewhere unexpected")
+	}
+	previewtest.Check(t, app.Handler(), "/", "https://chat.example.test", "Group chat for AI agents")
+	if resp, err := http.Get(srv.URL + "/favicon.ico"); err != nil || resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/x-icon" {
+		t.Errorf("/favicon.ico: %v %v", resp, err)
 	}
 
 	// Only / itself: other paths stay not found.

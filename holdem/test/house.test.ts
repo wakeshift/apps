@@ -4,7 +4,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Casino, DAILY_BANKROLL, HAND_PAUSE_MS, HOUSE_HAND_PAUSE_MS, HOUSE_PER_TABLE, MIN_HANDS, SEATS, type Notifier } from "../src/casino.js";
+import {
+  Casino,
+  DAILY_BANKROLL,
+  HAND_PAUSE_MS,
+  HOUSE_HAND_PAUSE_MS,
+  HOUSE_PER_TABLE,
+  MIN_HANDS,
+  MOVE_CLOCK_SECONDS,
+  SEATS,
+  SIT_OUT_IN_A_ROW,
+  type Notifier,
+} from "../src/casino.js";
 import type { Db } from "../src/db.js";
 import { bearerOf, HOUSE_CLAIM_MAX_S, signHouseClaim, verifyHouseClaim } from "../src/house.js";
 import { displayName } from "../src/names.js";
@@ -14,7 +25,7 @@ import { testDb } from "./testdb.js";
 /** A casino on db with a fake clock; real: the real pauses between hands, else a short one. */
 function room(db: Db, real = false, start = Date.parse("2026-10-21T12:00:00Z")) {
   const clock = { t: start };
-  const notify: Notifier = { turn: async () => {}, result: async () => {}, handResult: async () => {}, removed: async () => {}, endSubscription: async () => {} };
+  const notify: Notifier = { turn: async () => true, result: async () => {}, handResult: async () => {}, removed: async () => {}, endSubscription: async () => {} };
   const casino = new Casino({ db, notify, now: () => clock.t, ...(real ? {} : { handPauseMs: 1000 }) });
   return { casino, clock };
 }
@@ -205,16 +216,16 @@ test("with a real agent seated among house agents, every next hand is dealt one 
   assert.equal(await untilDealt((await row()).state.hand!.number), HOUSE_HAND_PAUSE_MS / 1000);
 });
 
-test("a seated agent that stopped answering holds up one hand by its clock, not every hand", async (t) => {
+test("a seated agent that stopped answering holds up the table for at most two clocks, then is sat out", async (t) => {
   const { casino, clock } = room(await testDb(t), true);
   const [gone, here, h] = [await real(casino, 1), await real(casino, 2), await house(casino, 1)];
   const { table } = await casino.join(gone.id, {});
   await casino.join(here.id, {});
   await casino.join(h.id, {});
   const row = async () => (await casino.db.query<{ state: { hand: { number: number; street: string } | null } }>("SELECT state FROM tables WHERE id = $1", [table])).rows[0]!.state;
-  const started = clock.t;
   // Everyone but the absent agent answers at once; it's woken and never acts.
-  for (let s = 0; s < 400 && (await row()).hand?.number === 1 && (await row()).hand?.street !== "complete"; s++) {
+  let waited = 0;
+  for (let s = 0; s < 800 && (await casino.tableOf(gone.id)); s++) {
     let acted = false;
     for (const id of [here.id, h.id]) {
       const st = await casino.state(id);
@@ -224,15 +235,23 @@ test("a seated agent that stopped answering holds up one hand by its clock, not 
       }
     }
     if (!acted) {
+      if ((await casino.state(gone.id)).table?.hand?.yourTurn) waited += 1000;
       clock.t += 1000;
       await casino.tick();
     }
   }
-  assert.equal((await row()).hand?.street, "complete");
-  assert.ok(clock.t - started <= 61_000, "its clock ran out once");
-  assert.equal((await casino.state(gone.id)).table, null, "it was taken off the table");
+  assert.equal((await casino.state(gone.id)).table, null, "it was sat out");
+  assert.ok(waited <= SIT_OUT_IN_A_ROW * (MOVE_CLOCK_SECONDS + 1) * 1000, `the table waited on it ${waited / 1000}s`);
+  // The hand under way finishes; the next, without it, comes after the short pause.
+  const number = (await row()).hand?.number;
+  for (let s = 0; s < 400 && (await row()).hand?.street !== "complete" && (await row()).hand?.number === number; s++) {
+    for (const id of [here.id, h.id]) {
+      const st = await casino.state(id);
+      if (st.table?.hand?.yourTurn) await casino.act(id, { type: st.table.legal!.choices.includes("check") ? "check" : "call" }, st.table.hand.turn!);
+    }
+  }
   const ended = clock.t;
-  while ((await row()).hand?.number === 1) {
+  while ((await row()).hand?.number === number) {
     clock.t += 1000;
     await casino.tick();
   }

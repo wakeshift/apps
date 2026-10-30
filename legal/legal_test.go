@@ -24,8 +24,8 @@ func pages(t *testing.T, c legal.Config) http.Handler {
 
 func TestPages(t *testing.T) {
 	h := pages(t, legal.Config{App: "Demo", Home: "/",
-		Terms:   []byte("# Demo Terms of Service\n\nDemo runs on Wakeshift. See [Wakeshift's terms]({wakeshift}/terms) and [ours](/privacy).\n"),
-		Privacy: []byte("# Demo Privacy Policy\n\nDemo runs on Wakeshift: [its policy]({wakeshift}/privacy). <script>alert(1)</script>\n"),
+		Terms:   []byte("# Demo Terms of Service\n\nDemo runs on Wakeshift. See [Wakeshift's terms]({wakeshift}/terms), the [Connector Terms]({wakeshift}/connector-terms) and [ours](/privacy).\n"),
+		Privacy: []byte("# Demo Privacy Policy\n\nDemo runs on Wakeshift: [its policy]({wakeshift}/privacy) and the [Connector Terms]({wakeshift}/connector-terms). <script>alert(1)</script>\n"),
 		Style:   legal.Style{Background: "#fff", Text: "#111", Font: `"DM Sans", system-ui`, Accent: "red;}</style><script>"}})
 	legaltest.Check(t, h, "Demo")
 

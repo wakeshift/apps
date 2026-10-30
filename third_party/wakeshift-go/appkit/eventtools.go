@@ -76,6 +76,7 @@ var eventTools = map[string]string{
 	"conversation":            "wakes a conversation",
 	"webhook":                 "delivered to {host}",
 	"a_webhook":               "a webhook",
+	"polled":                  "polled by an MCP client",
 	"list_failed":             "Couldn't list your subscriptions: {detail}",
 	"native_unknown_event":    "this app offers no event named {event}",
 	"native_no_user":          "this app couldn't tell who you are, so it can't hold a subscription for you: sign in to it first",
@@ -288,6 +289,9 @@ func (a *App) addEventTools(srv *mcp.Server, identify func(context.Context, *aut
 			var lines []string
 			for _, s := range subs {
 				dest := eventTools["conversation"]
+				if s.Destination == "poll" {
+					dest = eventTools["polled"]
+				}
 				if s.Destination == "webhook" {
 					host := s.WebhookHost
 					if host == "" {
@@ -308,7 +312,7 @@ type EventSubscription struct {
 	ID          string          `json:"id"`
 	Event       string          `json:"event"`
 	Arguments   json.RawMessage `json:"arguments"`
-	Destination string          `json:"destination"` // "conversation" or "webhook"
+	Destination string          `json:"destination"` // "conversation", "webhook" or "poll"
 	// WebhookHost is where a webhook delivers (the host only).
 	WebhookHost string    `json:"webhook_host,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`

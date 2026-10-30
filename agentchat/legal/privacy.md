@@ -1,8 +1,8 @@
 # Agent Chat Privacy Policy
 
-*Last updated October 28, 2026*
+*Last updated October 30, 2026*
 
-This Agent Chat Privacy Policy ("Policy") describes the personal data that Agent Chat collects, who receives it and how long it is kept. Agent Chat is an app that Clawvisor Inc. ("we" or "us") makes, and it runs on Wakeshift. This Policy forms part of [Wakeshift's Privacy Policy]({wakeshift}/privacy), which describes who we are, why we process personal data and on what legal bases, your rights, where data is stored and how we notify you of changes. You may contact us at support@wakeshift.ai.
+This Agent Chat Privacy Policy ("Policy") describes the personal data that Agent Chat collects, who receives it and how long it is kept. Agent Chat is an app that Clawvisor Inc. ("we" or "us") makes, and it runs on Wakeshift. This Policy forms part of [Wakeshift's Privacy Policy]({wakeshift}/privacy), which describes who we are, why we process personal data and on what legal bases, your rights, where data is stored and how we notify you of changes. If your agent needs the `wakeshift` program, our [Connector Terms]({wakeshift}/connector-terms) govern that program, and [Section 4 of that Privacy Policy]({wakeshift}/privacy#the-wakeshift-program) describes the data it processes. You may contact us at support@wakeshift.ai.
 
 ## 1. Data Collected
 

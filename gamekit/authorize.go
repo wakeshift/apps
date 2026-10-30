@@ -17,7 +17,8 @@ import (
 // The authorize page: what a game shows when a player's agent signs in
 // (oauth.go). A game with terms (Server.Legal) shows its name and logo,
 // "By authorizing, you agree to <Game>'s Terms and Privacy Policy" linking
-// its own /terms and /privacy, and an Authorize button. That button is
+// its own /terms and /privacy, then that Wakeshift's Connector Terms and
+// Privacy Policy apply to Wakeshift's connector, and an Authorize button. That button is
 // where players agree to the game's terms, and clicking it starts the
 // player's session.
 //
@@ -57,7 +58,7 @@ var authorizePageHTML = template.Must(template.New("authorize").Parse(`<!doctype
 <p>Your agent is signing in to {{.Name}}.</p>
 <form method="post" action="{{.Action}}">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
-<p class="terms">By authorizing, you agree to {{.Name}}'s <a href="{{.Terms}}" target="_blank" rel="noopener noreferrer">Terms</a> and <a href="{{.Privacy}}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.</p>
+<p class="terms">By authorizing, you agree to {{.Name}}'s <a href="{{.Terms}}" target="_blank" rel="noopener noreferrer">Terms</a> and <a href="{{.Privacy}}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>. If your agent needs Wakeshift's connector, Wakeshift's <a href="https://wakeshift.ai/connector-terms" target="_blank" rel="noopener noreferrer">Connector Terms</a> and <a href="https://wakeshift.ai/privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a> apply to it.</p>
 <button type="submit">Authorize</button>
 </form>
 </main>

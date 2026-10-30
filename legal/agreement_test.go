@@ -18,7 +18,7 @@ import (
 // a template in its layout, and nowhere else.
 const (
 	slacklineLayout = "../slackline/templates/layout.html"
-	slacklineAgree  = `{{define "agree"}}By continuing, you agree to Slackline's <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.{{end}}`
+	slacklineAgree  = `{{define "agree"}}By continuing, you agree to Slackline's <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>. If your agent needs Wakeshift's connector, Wakeshift's <a href="https://wakeshift.ai/connector-terms">Connector Terms</a> and <a href="https://wakeshift.ai/privacy">Privacy Policy</a> apply to it.{{end}}`
 )
 
 // agentchatAgree are Agent Chat's two agreement lines: it has accounts of
@@ -28,8 +28,8 @@ const (
 const agentchatAgreeFile = "../agentchat/templates/agree.html"
 
 var agentchatAgree = []string{
-	`{{define "agree-signin"}}By signing in, you agree to Agent Chat's <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.{{end}}`,
-	`{{define "agree-connect"}}By authorizing, you agree to Agent Chat's <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.{{end}}`,
+	`{{define "agree-signin"}}By signing in, you agree to Agent Chat's <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>. If your agent needs Wakeshift's connector, Wakeshift's <a href="https://wakeshift.ai/connector-terms">Connector Terms</a> and <a href="https://wakeshift.ai/privacy">Privacy Policy</a> apply to it.{{end}}`,
+	`{{define "agree-connect"}}By authorizing, you agree to Agent Chat's <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>. If your agent needs Wakeshift's connector, Wakeshift's <a href="https://wakeshift.ai/connector-terms">Connector Terms</a> and <a href="https://wakeshift.ai/privacy">Privacy Policy</a> apply to it.{{end}}`,
 }
 
 // Where people agree to our apps' terms: the games' authorize page
@@ -106,19 +106,21 @@ func TestAgreementLines(t *testing.T) {
 	}
 }
 
-// Outside the apps, Wakeshift itself has two agreement lines, each written
-// once: the console's sign-in page (consoleAgree, linking the site's /terms
-// and /privacy), and the line an agent shows when it offers to install or
-// update the wakeshift program or a connector (connectorAgree, the
-// Connector Terms Section 3.1, in internal/harnesses). Nothing else in the
-// console or the server says either. The published apps have neither, so
-// there the test is skipped.
+// Outside the apps, Wakeshift itself has one agreement line, written once:
+// the console's sign-in page (consoleAgree, linking the site's /terms and
+// /privacy). The wakeshift program has none: no agent relays a notice
+// before it installs, and nothing says "By installing, you agree". Its
+// installers print instead that the Connector Terms and the Privacy Policy
+// apply (connectorLine, Connector Terms Section 3.1), written once in
+// internal/harnesses. The published apps have neither, so there the test is
+// skipped.
 const (
 	consoleLogin    = "../../web/src/pages/Login.tsx"
 	consoleAgree    = "By signing in, you agree to Wakeshift's"
 	connectorFile   = "../../internal/harnesses/harnesses.go"
-	connectorAgree  = `"By installing, you agree to Wakeshift's Connector Terms (https://wakeshift.ai/connector-terms) and Privacy Policy (https://wakeshift.ai/privacy)."`
-	connectorPhrase = "By installing, you agree"
+	connectorLine   = `"Wakeshift's Connector Terms (https://wakeshift.ai/connector-terms) and Privacy Policy (https://wakeshift.ai/privacy) apply to this connector."`
+	connectorPhrase = "apply to this connector"
+	installAgree    = "By installing, you agree"
 )
 
 func TestWakeshiftAgreementLines(t *testing.T) {
@@ -143,8 +145,8 @@ func TestWakeshiftAgreementLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := bytes.Count(h, []byte(connectorAgree)); n != 1 {
-		t.Errorf("%s defines the connector agreement line %d times, want once: %s", connectorFile, n, connectorAgree)
+	if n := bytes.Count(h, []byte(connectorLine)); n != 1 {
+		t.Errorf("%s defines the installers' terms line %d times, want once: %s", connectorFile, n, connectorLine)
 	}
 	walk := func(root, phrase, home string) {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -167,7 +169,11 @@ func TestWakeshiftAgreementLines(t *testing.T) {
 				return err
 			}
 			if bytes.Contains(b, []byte(phrase)) {
-				t.Errorf("%s says %q: it belongs only in %s", path, phrase, home)
+				if home == "" {
+					t.Errorf("%s says %q: nothing should", path, phrase)
+				} else {
+					t.Errorf("%s says %q: it belongs only in %s", path, phrase, home)
+				}
 			}
 			return nil
 		})
@@ -177,4 +183,6 @@ func TestWakeshiftAgreementLines(t *testing.T) {
 	}
 	walk("../../web/src", consoleAgree, consoleLogin)
 	walk("../../internal", connectorPhrase, connectorFile)
+	walk("../../internal", installAgree, "")
+	walk("../../web/src", installAgree, "")
 }

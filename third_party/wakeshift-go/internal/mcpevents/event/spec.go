@@ -8,10 +8,24 @@ import (
 // Every SEP-3415 constant Wakeshift uses, in one place: the draft is still
 // moving (error codes and the capability key have changed before).
 //
-// Revision is the draft these follow: SEP-3415 as revised on 2026-10-16
-// (modelcontextprotocol/modelcontextprotocol#3415), plus HeaderMismatch from
-// the 2026-07-28 schema (SEP-2243).
-const Revision = "SEP-3415 (2026-10-16)"
+// Revision is the draft these follow: SEP-3415 as revised on 2026-10-27
+// (modelcontextprotocol/modelcontextprotocol#3415, b08e4f9), plus
+// HeaderMismatch from the 2026-07-28 schema (SEP-2243).
+//
+// Where today's clients and the draft differ, Wakeshift follows the
+// clients (docs/mcp-events-interop.md): webhook-id equals the body's
+// eventId (ChatGPT, the Vercel AI SDK, TanStack AI and OpenClaw refuse a
+// delivery where they differ), which still meets what the 2026-10-23
+// revision asks of webhook-id, since Wakeshift's eventId is the delivery's
+// own ID: server-generated, unique per subscription, the same on every
+// retry, header-safe. An Mcp-Name header is checked when present, never
+// required: most clients don't send it on events/* requests.
+const Revision = "SEP-3415 (2026-10-27)"
+
+// Delivery is the delivery modes Wakeshift offers for every event type
+// (events/list's delivery): a webhook, or polls (events/poll). Push
+// (events/stream) isn't offered.
+var Delivery = []string{"webhook", "poll"}
 
 // Capability keys: the draft's extension, and the top-level key the
 // earlier sketch had, which ChatGPT still reads. A server advertises both;

@@ -18,7 +18,7 @@
 // they are now.
 
 import type { ServerResponse } from "node:http";
-import { DAILY_BANKROLL, type Casino, type SpectatorView } from "./casino.js";
+import { DAILY_BANKROLL, SAT_OUT_FOR_TIMEOUTS, type Casino, type SatOut, type SpectatorView } from "./casino.js";
 import type { Log } from "./db.js";
 import { card, tableBody, thinkingList, type Mine } from "./pages.js";
 
@@ -383,16 +383,23 @@ export class LiveHub {
 /** A watch page's last word when its link stops working. */
 export const WATCH_GONE = "This watch link has stopped working: it was replaced by a new one, or it's more than 30 days old. Ask your agent for a new one.";
 
-/** What a watch page says while its player is off the table: a heading, and what's in their bankroll today. */
-export function watchAway(e: { name: string; balance: number }): { title: string; detail: string } {
+/** Why the clock took a player off their table, as their watch page says it. */
+const SAT_OUT_LINES: Record<SatOut, string> = {
+  timeouts: `It was ${SAT_OUT_FOR_TIMEOUTS}.`,
+  unreachable: "Its last turn couldn't be delivered to it, so it was taken off the table when its time ran out; that doesn't count against it, and it can join again.",
+};
+
+/** What a watch page says while its player is off the table: a heading, why the clock took it off (if it did), and what's in its bankroll today. */
+export function watchAway(e: { name: string; balance: number; satOut?: SatOut | null }): { title: string; detail: string } {
+  const why = e.satOut ? `${SAT_OUT_LINES[e.satOut]} ` : "";
   return {
     title: `${e.name} isn't at a table right now`,
-    detail: e.balance <= 0 ? `It's out of chips for today. Everyone starts again with $${DAILY_BANKROLL} at 00:00 UTC.` : `$${e.balance} of today's money is in its bankroll.`,
+    detail: why + (e.balance <= 0 ? `It's out of chips for today. Everyone starts again with $${DAILY_BANKROLL} at 00:00 UTC.` : `$${e.balance} of today's money is in its bankroll.`),
   };
 }
 
 /** The same in one line, for the stream's "away" event. */
-export const watchAwayMessage = (e: { name: string; balance: number }) => {
+export const watchAwayMessage = (e: { name: string; balance: number; satOut?: SatOut | null }) => {
   const a = watchAway(e);
   return `${a.title}. ${a.detail}`;
 };

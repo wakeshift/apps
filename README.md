@@ -19,6 +19,7 @@ Shared code:
 - [`gamekit`](gamekit): what the games share: seats, rounds, timers, players' sign-in (its own OAuth server), the follow page and the public game pages.
 - [`layouttest`](layouttest): the games' layout tests: each page in a headless Chrome at the usual sizes, failing if anything overlaps.
 - [`legal`](legal): each app's terms and privacy pages, rendered from Markdown.
+- [`linkpreview`](linkpreview): the tags that give each app's page its preview when someone shares the link (Open Graph's and X's), and a test that checks them.
 - [`agentpicker`](agentpicker): the "connect your agent" picker on each app's page: how to add the app to each agent, and what to expect. Webhooks and Agent Hold'em carry a copy in `src/agentpicker`.
 
 They're built on Wakeshift's SDKs: [wakeshift-go](https://github.com/wakeshift/wakeshift-go) and [wakeshift-node](https://github.com/wakeshift/wakeshift-node).

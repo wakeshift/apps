@@ -48,6 +48,9 @@ export const layout = (title: string, body: string, nonce: string, script = "", 
 <title>${esc(title)}</title>
 <meta name="theme-color" content="#F5F1E8">
 <link rel="icon" href="/static/wakeshift.svg" type="image/svg+xml">
+<link rel="icon" href="/static/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/static/icon-192.png" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png" sizes="180x180">
 <link rel="stylesheet" href="/static/try.css">${head}
 </head>
 <body>
@@ -73,10 +76,50 @@ const limitsLine = (l: PageLimits) =>
   `${l.perHour} posts an hour and ${l.perDay} a day per webhook, bodies up to 64 KB. A link expires after ${l.idleDays} days without use.`;
 
 // Getting a link has no sign-in, so no authorize page: this line, next to
-// the button, is where people agree to Webhooks' terms.
-const AGREE = `By getting a link, you agree to Webhooks' <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.`;
+// the button, is where people agree to Webhooks' terms. It also says that
+// Wakeshift's Connector Terms and Privacy Policy apply to its connector.
+const AGREE = `By getting a link, you agree to Webhooks' <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>. ` +
+  `If your agent needs Wakeshift's connector, Wakeshift's <a href="https://wakeshift.ai/connector-terms">Connector Terms</a> and <a href="https://wakeshift.ai/privacy">Privacy Policy</a> apply to it.`;
 
-export function homePage(nonce: string, l: PageLimits): string {
+/** A link preview: the page's canonical URL and its image's, both absolute. */
+export interface Preview {
+  url: string;
+  image: string;
+}
+
+const HOME_PREVIEW_TITLE = "A webhook that wakes your agent";
+const HOME_DESCRIPTION =
+  "Get a link, add it to your agent and ask it to watch. Anything posted to your webhook URL, from curl, GitHub, Stripe or your own app, wakes the agent with what was sent.";
+
+/**
+ * The home page's link preview tags (apps/linkpreview has the Go apps'
+ * copy). The title doesn't start with "Wakeshift": that's og:site_name,
+ * which apps such as iMessage cut from the title.
+ */
+export function previewTags(p: Preview): string {
+  const alt = "Wakeshift webhooks: a webhook that wakes your agent. A POST to your webhook URL wakes Claude Code.";
+  return [
+    `<link rel="canonical" href="${esc(p.url)}">`,
+    `<meta name="description" content="${esc(HOME_DESCRIPTION)}">`,
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:site_name" content="Wakeshift">`,
+    `<meta property="og:title" content="${esc(HOME_PREVIEW_TITLE)}">`,
+    `<meta property="og:description" content="${esc(HOME_DESCRIPTION)}">`,
+    `<meta property="og:url" content="${esc(p.url)}">`,
+    `<meta property="og:image" content="${esc(p.image)}">`,
+    `<meta property="og:image:type" content="image/png">`,
+    `<meta property="og:image:width" content="1200">`,
+    `<meta property="og:image:height" content="630">`,
+    `<meta property="og:image:alt" content="${esc(alt)}">`,
+    `<meta name="twitter:card" content="summary_large_image">`,
+    `<meta name="twitter:title" content="${esc(HOME_PREVIEW_TITLE)}">`,
+    `<meta name="twitter:description" content="${esc(HOME_DESCRIPTION)}">`,
+    `<meta name="twitter:image" content="${esc(p.image)}">`,
+    `<meta name="twitter:image:alt" content="${esc(alt)}">`,
+  ].join("\n");
+}
+
+export function homePage(nonce: string, l: PageLimits, preview?: Preview): string {
   return layout(
     "A webhook that wakes your agent · Wakeshift",
     `<section class="hero">
@@ -93,6 +136,8 @@ export function homePage(nonce: string, l: PageLimits): string {
   <li><span class="n">iii.</span><div><b>Your agent wakes</b><p>It reads what was posted as information from outside, rather than as your instructions, and gets to work. This page shows each post as it arrives.</p></div></li>
 </ol>`,
     nonce,
+    "",
+    preview ? "\n" + previewTags(preview) : "",
   );
 }
 

@@ -62,12 +62,16 @@ func TestWrappedBlockGolden(t *testing.T) {
 	var f struct {
 		Addition addition `json:"addition"`
 		Cases    []struct {
-			Name       string          `json:"name"`
-			Addition   *addition       `json:"addition"`
-			WakeOutput bool            `json:"wake_output"`
-			Result     json.RawMessage `json:"result"`
-			Want       json.RawMessage `json:"want"`
+			Name     string          `json:"name"`
+			Addition *addition       `json:"addition"`
+			Result   json.RawMessage `json:"result"`
+			Want     json.RawMessage `json:"want"`
 		} `json:"cases"`
+		OutputSchemas []struct {
+			Name   string         `json:"name"`
+			Schema map[string]any `json:"schema"`
+			Want   map[string]any `json:"want"`
+		} `json:"output_schemas"`
 	}
 	readSharedFixture(t, "wrapped-block.json", &f)
 	for _, c := range f.Cases {
@@ -86,7 +90,7 @@ func TestWrappedBlockGolden(t *testing.T) {
 		// What addBlock does with /calls/addition's answer.
 		text := add.Text
 		mergeBlock(&res, text, add.Trailer, add.Meta)
-		if text != "" && c.WakeOutput {
+		if text != "" && res.StructuredContent != nil {
 			setWakeshift(&res, text)
 		}
 		var want any
@@ -94,6 +98,18 @@ func TestWrappedBlockGolden(t *testing.T) {
 		if got := plainJSON(t, &res); !reflect.DeepEqual(got, want) {
 			gb, _ := json.Marshal(got)
 			t.Errorf("%s:\n got %s\nwant %s", c.Name, gb, c.Want)
+		}
+	}
+	for _, c := range f.OutputSchemas {
+		before, _ := json.Marshal(c.Schema)
+		got, _ := withWakeshiftField(c.Schema)
+		if !reflect.DeepEqual(got, c.Want) {
+			gb, _ := json.Marshal(got)
+			wb, _ := json.Marshal(c.Want)
+			t.Errorf("%s:\n got %s\nwant %s", c.Name, gb, wb)
+		}
+		if after, _ := json.Marshal(c.Schema); string(after) != string(before) {
+			t.Errorf("%s: the schema itself changed", c.Name)
 		}
 	}
 }

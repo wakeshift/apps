@@ -127,6 +127,19 @@ func (f *fixture) lastSaid() string {
 	return entries[len(entries)-1]
 }
 
+// farewellRow is a removed player's last entry (gamekit's Tx.Remove): what
+// it says, who it goes to, and the subscription it ends once sent.
+type farewellRow struct{ Subject, Text, To, Ends string }
+
+// farewell is the removed player handle's last entry (zero if none).
+func (f *fixture) farewell(handle string) farewellRow {
+	f.t.Helper()
+	var r farewellRow
+	f.a.Store.Pool.QueryRow(bg, `SELECT subject, text, recipients::text, farewell::text FROM room_log WHERE game_id = $1 AND farewell IS NOT NULL AND $2 = ANY(mentions)`,
+		f.id, handle).Scan(&r.Subject, &r.Text, &r.To, &r.Ends)
+	return r
+}
+
 // touch has a player call a tool now (as game, canvas or say do).
 func (f *fixture) touch(key string) {
 	f.t.Helper()
@@ -173,7 +186,7 @@ func TestRound(t *testing.T) {
 	drawer := g.drawer()
 	var guessers []*player
 	for _, p := range g.Players {
-		if p != drawer {
+		if p.Key() != drawer.Key() {
 			guessers = append(guessers, p)
 		}
 	}
@@ -255,7 +268,7 @@ func TestRound(t *testing.T) {
 	if !strings.Contains(f.lastSaid(), "guessed by its owner") || !strings.Contains(f.lastSaid(), fmt.Sprintf("%q", word)) {
 		t.Fatalf("round over: %q", f.lastSaid())
 	}
-	if s := snapshot(g, nil); s.Word != word || len(s.Guesses) != 2 || !s.Guesses[0].Right || !s.Guesses[0].Owner || s.Guesses[0].Text != "" || s.Guesses[1].Text != "zzzz" {
+	if s := snapshot(g, nil); s.Word != word || len(s.Guesses) != 2 || !s.Guesses[0].Right || !s.Guesses[0].Owner || s.Guesses[0].Text != "The "+strings.TrimSuffix(word, "s")+"s" || s.Guesses[1].Text != "zzzz" {
 		t.Fatalf("revealed: %+v", s)
 	}
 
@@ -368,13 +381,13 @@ func TestAwayPlayersAreRemoved(t *testing.T) {
 	if _, _, err := f.a.watcher(bg, secret); err != errNoWatch {
 		t.Fatalf("the removed player's watch link: %v", err)
 	}
-	// Its seat's subscription is ended once the removal commits: the
-	// removal carries it, and its user, as the seat had them.
-	var removes int
-	f.a.Store.Pool.QueryRow(bg, `SELECT count(*) FROM sketch_outbox WHERE game_id = $1 AND kind = 'remove' AND data->>'subscription' = 'sub-' || $2
-		AND data->>'user' = $3`, f.id, away.Handle, away.Workspace+"/"+away.Agent).Scan(&removes)
-	if removes != 1 {
-		t.Fatalf("%d seat ends queued", removes)
+	// It's told why, to it alone, and its seat's subscription (with its
+	// user, as the seat had them) is ended once that's sent.
+	fw := f.farewell(away.Handle)
+	if !strings.Contains(fw.Text, "away for 2 rounds in a row") || !strings.Contains(fw.Text, "Call the `join` tool to play again") ||
+		fw.To != `{"m": [{"user": "`+away.Workspace+"/"+away.Agent+`", "subscription": "sub-`+away.Handle+`"}]}` ||
+		fw.Ends != `{"user": "`+away.Workspace+"/"+away.Agent+`", "subscription": "sub-`+away.Handle+`"}` {
+		t.Fatalf("the removed player's farewell: %+v", fw)
 	}
 	if g.Drawer == away.Key() {
 		t.Fatal("the removed player draws")
@@ -382,8 +395,10 @@ func TestAwayPlayersAreRemoved(t *testing.T) {
 }
 
 // The word reaches the drawer and nobody else: not the guessers' view,
-// not the public page or a guesser's watch page, not the moderator's
-// messages, until the round's over.
+// not the public page or a guesser's watch page (its HTML or its live
+// updates, wrong guesses and all), not the moderator's messages, until the
+// round's over. The right guess that ends it shows, with a "got it" chip,
+// in the same change that reveals the word.
 func TestWordStaysSecret(t *testing.T) {
 	f := newFixture(t, 3)
 	g := f.step(nil)
@@ -394,30 +409,116 @@ func TestWordStaysSecret(t *testing.T) {
 		g = f.step(nil)
 	}
 	drawer := g.drawer()
+	var guessers []*player
 	for _, p := range g.Players {
-		v, _ := json.Marshal(f.a.view(bg, g, p))
-		has := strings.Contains(strings.ToLower(string(v)), `"`+word+`"`)
-		if has != (p == drawer) {
-			t.Errorf("%s's view (drawer %v) has the word: %v: %s", p.Handle, p == drawer, has, v)
+		if p.Key() != drawer.Key() {
+			guessers = append(guessers, p)
 		}
-		s, _ := json.Marshal(snapshot(g, p))
-		if strings.Contains(string(s), `"`+word+`"`) != (p == drawer) {
+	}
+	g = f.move(nil, func(tx *gamekit.Tx, g *game) error {
+		_, err := f.a.guess(tx, g, g.player(guessers[0].Key()), "zzzz", false)
+		return err
+	})
+	if g.Phase != drawing || len(g.Guesses) != 1 {
+		t.Fatalf("after a wrong guess: %s %+v", g.Phase, g.Guesses)
+	}
+	drawer = g.drawer()
+	has := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(word) + `\b`)
+	for _, p := range g.Players {
+		v := jsonText(t, f.a.view(bg, g, p))
+		if has.MatchString(v) != (p == drawer) {
+			t.Errorf("%s's view (drawer %v): %s", p.Handle, p == drawer, v)
+		}
+		if s := jsonText(t, snapshot(g, p)); has.MatchString(s) != (p == drawer) {
 			t.Errorf("%s's watch page: %s", p.Handle, s)
 		}
 	}
-	if s, _ := json.Marshal(snapshot(g, nil)); strings.Contains(strings.ToLower(string(s)), word) {
+	if s := jsonText(t, snapshot(g, nil)); has.MatchString(s) {
 		t.Errorf("the public page has the word: %s", s)
 	}
-	has := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(word) + `\b`)
 	if said := f.said(); has.MatchString(said) {
 		t.Errorf("the moderator said the word:\n%s", said)
 	}
 	// The page's text, not its markup: "apple" is a word, and the page links
 	// its apple-touch-icon.
 	text := regexp.MustCompile(`<[^>]*>`).ReplaceAllString(httpGet(t, f.a, "/games/"+f.id), " ")
-	if page := text; has.MatchString(page) || !strings.Contains(page, "Round 1 ·") {
+	if page := text; has.MatchString(page) || !strings.Contains(page, "Round 1 ·") || !strings.Contains(page, "zzzz") || strings.Contains(page, "got it") {
 		t.Errorf("the public page's HTML has the word:\n%s", page)
 	}
+	u, err := f.a.watchURL(bg, g, g.player(guessers[1].Key()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch := "/watch/" + u[strings.LastIndex(u, "/")+1:]
+	if page := regexp.MustCompile(`<[^>]*>`).ReplaceAllString(httpGet(t, f.a, watch), " "); has.MatchString(page) || !strings.Contains(page, "zzzz") {
+		t.Errorf("a guesser's watch page has the word:\n%s", page)
+	}
+
+	// The right guess, typed by its owner: the round's over, and the guess
+	// shows as typed, with its chip, beside its guesser's name.
+	f.set(f.clock().Add(3 * time.Second))
+	typed := "The " + strings.ToUpper(word)
+	g = f.move(nil, func(tx *gamekit.Tx, g *game) error {
+		right, err := f.a.guess(tx, g, g.player(guessers[1].Key()), typed, true)
+		if !right || err != nil {
+			t.Fatalf("right guess: %v %v", right, err)
+		}
+		return nil
+	})
+	winner := display(guessers[1].Handle)
+	for _, me := range []*player{nil, g.player(guessers[0].Key()), g.drawer()} {
+		s := snapshot(g, me)
+		if s.Phase != reveal || s.Word != word || len(s.Guesses) != 2 || !s.Guesses[0].Right || s.Guesses[0].Text != typed ||
+			s.Guesses[0].By != winner || s.Guesses[1].Right || s.Guesses[1].Text != "zzzz" {
+			t.Errorf("revealed, for %v: %+v", me, s)
+		}
+		for _, p := range s.Players {
+			if p.Got != (p.Name == winner) {
+				t.Errorf("scoreboard, for %v: %+v", me, s.Players)
+			}
+		}
+	}
+	f.a.live.mu.Lock()
+	f.a.live.games = nil // the pages read the game again, not from their cache
+	f.a.live.mu.Unlock()
+	for _, path := range []string{"/games/" + f.id, watch} {
+		page := httpGet(t, f.a, path)
+		if !regexp.MustCompile(`(?s)<li class="right"><span class="by">`+regexp.QuoteMeta(winner)+` <em>guessed by its owner</em></span><span class="text">`+
+			regexp.QuoteMeta(typed)+` <span class="got">got it</span></span></li>`).MatchString(page) ||
+			!strings.Contains(page, `<span class="name">`+winner+`</span><span class="got">got it</span>`) || strings.Count(page, `class="got"`) != 2 {
+			t.Errorf("%s after the round: no right guess with its chip:\n%s", path, page)
+		}
+	}
+}
+
+// jsonText is v's string values as JSON has them, one a line: what a
+// page or view shows, without its field names ("window" is a word too).
+func jsonText(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var x any
+	json.Unmarshal(b, &x)
+	var out []string
+	var walk func(any)
+	walk = func(x any) {
+		switch x := x.(type) {
+		case string:
+			out = append(out, x)
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		case map[string]any:
+			for _, e := range x {
+				walk(e)
+			}
+		}
+	}
+	walk(x)
+	return strings.Join(out, "\n")
 }
 
 // httpGet is a page of the app's.

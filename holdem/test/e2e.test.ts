@@ -369,10 +369,15 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
   const hand =(await db.query<{ id: string }>("SELECT id FROM hands WHERE ended_at IS NOT NULL LIMIT 1")).rows[0]!.id;
   const hp = await (await fetch(`${base}/hands/${hand}`)).text();
   assert.match(hp, /Verify in my browser/);
-  // Out of time: the hand is folded, and the player is taken off the table,
-  // hears so in a last wake and in its next tool result; the other stays.
-  await db.query("UPDATE tables SET next_hand_at = now() - interval '1 second' WHERE id = $1 AND next_hand_at IS NOT NULL", [agentTable]);
-  await casino.tick();
+  // Out of time: the clock checks or folds for the player, who stays and is
+  // told; their wake went out through the real core, so it counts. The
+  // second in a row sits them out: taken off the table, they hear so in a
+  // last wake and in their next tool result; the other stays.
+  const nextHand = async () => {
+    await db.query("UPDATE tables SET next_hand_at = now() - interval '1 second' WHERE id = $1 AND next_hand_at IS NOT NULL", [agentTable]);
+    await casino.tick();
+  };
+  await nextHand();
   let late: (typeof agents)[number] | undefined;
   for (let i = 0; i < 50 && !late; i++) {
     for (const a of agents) if (/It's your move/.test(textOf(await call(a, "state")))) late = a;
@@ -380,19 +385,48 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
   }
   assert.ok(late, "someone is to act at the agents' table");
   const stayer = agents.find((a) => a !== late)!;
+  const lateRecord = async () =>
+    (await db.query<{ in_a_row: number; woken_turn: string | null }>("SELECT k.in_a_row, k.woken_turn FROM clock_records k JOIN players p ON p.id = k.player WHERE p.name = $1", [late!.name])).rows[0];
+  assert.ok((await lateRecord())?.woken_turn, "the core took their turn's wake for their subscription");
+  await db.query("UPDATE tables SET deadline = now() - interval '1 second' WHERE id = $1", [agentTable]);
+  await casino.tick();
+  assert.equal((await lateRecord())?.in_a_row, 1, "a timeout held against them");
+  assert.match(textOf(await call(late, "state")), /^You ran out of time at Table \w+, so you (checked|folded)\. Time out twice in a row, or three times in ten hands, and you're sat out/);
+  assert.equal((await db.query("SELECT 1 FROM seats s JOIN players p ON p.id = s.player WHERE p.name = $1", [late.name])).rowCount, 1, "still seated after one");
+  // On to their next turn: the other player moves in time, hands start at once.
   const lateCount = late.woken.length;
+  let due = false;
+  for (let i = 0; i < 40 && !due; i++) {
+    const ls = textOf(await call(late, "state"));
+    if (/It's your move/.test(ls)) {
+      due = true;
+      break;
+    }
+    const ss = textOf(await call(stayer, "state"));
+    if (/It's your move/.test(ss)) {
+      const res = await call(stayer, "act", { action: /Choices: [^.]*\bcheck\b/.test(ss) ? "check" : "call", turn: ss.match(/Act with turn "([^"]+)"/)![1]!, message: "In time." });
+      assert.ok(!res.isError, textOf(res));
+    } else await nextHand();
+  }
+  assert.ok(due, "their next turn came");
+  // Its wake has gone out (the record names this turn) before the clock runs out on it.
+  const lateTurn = textOf(await call(late, "state")).match(/Act with turn "([^"]+)"/)![1]!;
+  for (let i = 0; i < 50 && (await lateRecord())?.woken_turn !== lateTurn; i++) await new Promise((r) => setTimeout(r, 100));
+  assert.equal((await lateRecord())?.woken_turn, lateTurn);
   await db.query("UPDATE tables SET deadline = now() - interval '1 second' WHERE id = $1", [agentTable]);
   await casino.tick();
   const removedBy = Date.now() + 15_000;
-  while (Date.now() < removedBy && !late.woken.slice(lateCount).some((w) => /You timed out at/.test(w))) await new Promise((r) => setTimeout(r, 200));
-  assert.ok(late.woken.slice(lateCount).some((w) => /You timed out at Table \w+ and were removed/.test(w)), "the last wake says they were removed: " + late.woken.slice(lateCount).join(" | "));
+  while (Date.now() < removedBy && !late.woken.slice(lateCount).some((w) => /You were sat out at/.test(w))) await new Promise((r) => setTimeout(r, 200));
+  assert.ok(late.woken.slice(lateCount).some((w) => /You were sat out at Table \w+ for timing out repeatedly/.test(w)), "the last wake says they were sat out: " + late.woken.slice(lateCount).join(" | "));
   const lateState = textOf(await call(late, "state"));
-  assert.match(lateState, /^You timed out at Table \w+ and were removed; your \$\d+ is back in your bankroll/);
-  assert.doesNotMatch(textOf(await call(late, "state")), /You timed out/, "the notice comes once");
+  assert.match(lateState, /^You were sat out at Table \w+ for timing out repeatedly \(twice in a row, or three times in ten hands\); rejoin to play again: call join\. Your \$\d+ is back in your bankroll/);
+  assert.doesNotMatch(textOf(await call(late, "state")), /You were sat out/, "the notice comes once");
   assert.equal((await db.query("SELECT 1 FROM seats s JOIN players p ON p.id = s.player WHERE p.name = $1", [late.name])).rowCount, 0, "their seat is gone");
   assert.equal((await db.query("SELECT 1 FROM subscription_ends")).rowCount, 1, "their turn subscription ends after the grace period");
-  const lateLog = (await db.query<{ log: { type: string; action?: string; timeout?: boolean }[] }>("SELECT log FROM hands WHERE table_id = $1 ORDER BY number DESC LIMIT 1", [agentTable])).rows[0]!.log;
+  const lateLog = (await db.query<{ log: { type: string; action?: string; timeout?: boolean }[] }>("SELECT log FROM hands WHERE table_id = $1 AND log IS NOT NULL ORDER BY number DESC LIMIT 1", [agentTable])).rows[0]!.log;
   assert.ok(lateLog.some((e) => e.type === "action" && e.action === "fold" && e.timeout), "their hand was folded");
+  // Their watch link says why.
+  assert.match(await (await fetch(late.watch)).text(), /sat out for timing out repeatedly; rejoin to play again/);
   assert.doesNotMatch(textOf(await call(stayer, "state")), /not at a table/, "the other player stays");
   // Leaving pays the stack back.
   assert.match(textOf(await call(stayer, "leave")), /You left Table \w+ with \$\d+|You'll leave when this hand ends/);

@@ -1,4 +1,5 @@
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -91,6 +92,10 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
   const received = webhookEvent(wake);
   const links = new Links(o.secret);
   const base = o.publicUrl.replace(/\/+$/, "");
+  // The home page's link preview: its image by its content's hash, so it's
+  // cached for good and a new one is a new URL.
+  const previewV = createHash("sha256").update(IMAGES["preview.png"]!.body).digest("hex").slice(0, 12);
+  const preview = { url: base + "/", image: `${base}/static/preview.png?v=${previewV}` };
   const now = o.now ?? Date.now;
   const log = o.log ?? defaultLog;
   const limits: Limits = { perHour: 60, perDay: 500, globalPerHour: 20_000, ...o.limits };
@@ -191,7 +196,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
         // as the conversation, so it's never shown, stored or logged here.
         const who = conversationLabel(sub.session);
         const harness = sub.recognized.harness ?? undefined;
-        await state.sessionWatched(session.id, who);
+        if (session.id) await state.sessionWatched(session.id, who);
         await state.watched(l.hook, { conversation: who, client: client(), harness, since: new Date(now()).toISOString() });
         await state.record(l.hook, { kind: "watch", conversation: who, client: client(), harness });
         const c = await state.checked(l.hook);
@@ -213,7 +218,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
         const who = passed ? conversationLabel(passed) : session.watchedAs;
         if (ended && who && !call.native) {
           await state.unwatched(l.hook, who);
-          if (who === session.watchedAs) await state.sessionWatched(session.id, undefined);
+          if (session.id && who === session.watchedAs) await state.sessionWatched(session.id, undefined);
           await state.record(l.hook, { kind: "unwatch", conversation: who, client: client() });
         }
         return ended ? "Stopped watching your webhook." : "This conversation wasn't watching your webhook.";
@@ -255,7 +260,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
   }
 
   // Serves one request of a session on a fresh server and stateless transport.
-  async function serveMcp(req: IncomingMessage, res: ServerResponse, l: Link, s: McpSession | { id: string; init: InitializeRequest }, body: unknown) {
+  async function serveMcp(req: IncomingMessage, res: ServerResponse, l: Link, s: McpSession | { id: string; init: InitializeRequest | undefined }, body: unknown) {
     const stored = "hook" in s ? s : undefined;
     const server = mcpServerFor(l, {
       id: s.id,
@@ -274,7 +279,8 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
       transport.close().catch(() => {});
       server.close().catch(() => {});
     });
-    res.setHeader("mcp-session-id", s.id);
+    // A protocol 2026-07-28 request has no session (s.id is "").
+    if (s.id) res.setHeader("mcp-session-id", s.id);
     await server.connect(transport);
     await transport.handleRequest(req, res, body);
   }
@@ -311,6 +317,11 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     if (req.method !== "POST") return jsonRpcError(res, 400, "No session: initialize first");
     const body = await readJson(req, res);
     if (body === null) return;
+    // Protocol 2026-07-28 has no initialize and no sessions: each request
+    // names its version, client and capabilities itself (OpenClaw speaks
+    // only that; the SDK's attach answers server/discover). Served as it
+    // comes, with nothing kept.
+    if (stateless(req, body)) return serveMcp(req, res, l, { id: "", init: undefined }, body);
     if (!isInitializeRequest(body)) {
       // Notifications (and responses) before initialize: Antigravity sends
       // notifications/roots/list_changed with no session while initialize
@@ -622,7 +633,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     let match: RegExpMatchArray | null;
     if (p === "/health") return text(res, 200, "ok\n");
     if (analytics && (await analytics.handle(req, res))) return;
-    if (p === "/" && (m === "GET" || m === "HEAD")) return page(res, 200, (n) => homePage(n, pageLimits));
+    if (p === "/" && (m === "GET" || m === "HEAD")) return page(res, 200, (n) => homePage(n, pageLimits, preview));
     if (p === "/links" && m === "POST") return createLink(req, res);
     const doc = Object.hasOwn(legalDocs, p) ? legalDocs[p] : undefined;
     if (doc && (m === "GET" || m === "HEAD")) return page(res, 200, (n) => legalPage(n, doc));
@@ -632,7 +643,14 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     }
     if (p === "/static/try.css") return asset(res, "text/css; charset=utf-8", css);
     if (Object.hasOwn(pickerAssets, p) && (m === "GET" || m === "HEAD")) return asset(res, pickerAssets[p].type, pickerAssets[p].body);
-    if (p === "/static/wakeshift.svg" || p === "/favicon.ico") return asset(res, "image/svg+xml", logoSvg);
+    if (p === "/static/wakeshift.svg") return asset(res, "image/svg+xml", logoSvg);
+    const imageName = p === "/favicon.ico" ? "favicon.ico" : p.startsWith("/static/") ? p.slice(8) : "";
+    if (imageName && Object.hasOwn(IMAGES, imageName) && (m === "GET" || m === "HEAD")) {
+      const image = IMAGES[imageName]!;
+      const forGood = p === "/static/preview.png" && u.searchParams.get("v") === previewV;
+      res.writeHead(200, { "Content-Type": image.type, "Cache-Control": forGood ? "public, max-age=31536000, immutable" : "public, max-age=86400", "X-Content-Type-Options": "nosniff" });
+      return res.end(m === "HEAD" ? undefined : image.body);
+    }
     if ((match = p.match(/^\/in\/([A-Za-z0-9_-]+)\/?$/))) return webhook(req, res, match[1]);
     if ((match = p.match(/^\/t\/([A-Za-z0-9_-]+)\/mcp\/?$/))) {
       const l = await linkFrom(res, match[1], "api");
@@ -856,6 +874,16 @@ const messages = (body: unknown): RpcMessage[] =>
   (Array.isArray(body) ? body : [body]).filter((m): m is RpcMessage => typeof m === "object" && m !== null);
 const isRequest = (m: RpcMessage) => typeof m.method === "string" && "id" in m;
 
+/**
+ * Whether a POST is protocol 2026-07-28: its MCP-Protocol-Version header
+ * says so, or every request in it names that version in its _meta.
+ */
+function stateless(req: IncomingMessage, body: unknown): boolean {
+  if (header(req, "mcp-protocol-version") === "2026-07-28") return true;
+  const reqs = messages(body).filter(isRequest) as { params?: { _meta?: Record<string, unknown> } }[];
+  return reqs.length > 0 && reqs.every((m) => m.params?._meta?.["io.modelcontextprotocol/protocolVersion"] === "2026-07-28");
+}
+
 /** Whether a POST's body holds a JSON-RPC request (not only notifications or responses). */
 function hasRequest(body: unknown): boolean {
   const ms = messages(body);
@@ -890,6 +918,19 @@ function text(res: ServerResponse, status: number, body: string) {
   res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
   res.end(body);
 }
+
+/** The images in static/: the link preview's and the icons. */
+const IMAGES: Record<string, { type: string; body: Buffer }> = Object.fromEntries(
+  (
+    [
+      ["preview.png", "image/png"],
+      ["apple-touch-icon.png", "image/png"],
+      ["icon-192.png", "image/png"],
+      ["favicon-32.png", "image/png"],
+      ["favicon.ico", "image/x-icon"],
+    ] as const
+  ).map(([name, type]) => [name, { type, body: readFileSync(new URL(`../../static/${name}`, import.meta.url)) }]),
+);
 
 function asset(res: ServerResponse, type: string, body: string) {
   res.writeHead(200, { "Content-Type": type, "Cache-Control": "public, max-age=3600" });

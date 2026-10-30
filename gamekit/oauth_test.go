@@ -13,11 +13,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/auth"
 
 	"github.com/wakeshift/apps/internal/pgtest"
 	"github.com/wakeshift/apps/legal"
@@ -122,13 +125,20 @@ func newSignInApp(t *testing.T, withLegal bool) *signInApp {
 type registration struct {
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
+	AuthMethod   string `json:"token_endpoint_auth_method"`
 }
 
 // register registers a client, returning the response's status and the
 // registration (or the OAuth error).
 func (a *signInApp) register(name string, redirects ...string) (int, registration, string) {
 	a.t.Helper()
-	b, _ := json.Marshal(map[string]any{"client_name": name, "redirect_uris": redirects})
+	return a.registerWith(map[string]any{"client_name": name, "redirect_uris": redirects})
+}
+
+// registerWith registers a client with the given metadata.
+func (a *signInApp) registerWith(meta map[string]any) (int, registration, string) {
+	a.t.Helper()
+	b, _ := json.Marshal(meta)
 	resp, err := http.Post(a.srv.URL+"/oauth/register", "application/json", bytes.NewReader(b))
 	if err != nil {
 		a.t.Fatal(err)
@@ -392,6 +402,13 @@ func TestExpireSessions(t *testing.T) {
 	if _, err := a.s.Store.Pool.Exec(ctx, `UPDATE player_sessions SET active_at = $2 WHERE id = $1`, idleTI.UserID, now.Add(-SessionIdle-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	// Each has joined a game (joins.go): the idle one's joins go with it.
+	for _, ti := range []*auth.TokenInfo{idleTI, liveTI} {
+		if _, err := a.s.Store.Pool.Exec(ctx, `INSERT INTO joins (at, player, agent, name, returned, seated) VALUES (now(), $1, 'claude-code', 'raven', false, 1)`,
+			ti.Extra["workspace"]); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := a.s.Store.Pool.Exec(ctx, `UPDATE player_sessions SET created_at = $1 WHERE refresh_hash IS NULL`, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -411,6 +428,16 @@ func TestExpireSessions(t *testing.T) {
 	}
 	if len(ids) != 1 || ids[0] != liveTI.UserID {
 		t.Fatalf("left: %v, want only %s", ids, liveTI.UserID)
+	}
+	var joinsLeft []string
+	jrows, _ := a.s.Store.Pool.Query(ctx, `SELECT player FROM joins`)
+	for jrows.Next() {
+		var p string
+		jrows.Scan(&p)
+		joinsLeft = append(joinsLeft, p)
+	}
+	if len(joinsLeft) != 1 || joinsLeft[0] != liveTI.Extra["workspace"] {
+		t.Fatalf("joins left: %v, want only the live session's", joinsLeft)
 	}
 	if status, tok := a.token(refreshForm(regIdle, idle.RefreshToken)); status != 400 || tok.Error != "invalid_grant" {
 		t.Errorf("a forgotten session's refresh: %d %s", status, tok.Error)
@@ -533,5 +560,91 @@ func TestOAuthMetadata(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&m)
 	if m["issuer"] != a.srv.URL || m["registration_endpoint"] != a.srv.URL+"/oauth/register" || m["authorization_response_iss_parameter_supported"] != true {
 		t.Errorf("metadata: %v", m)
+	}
+	if methods, _ := m["token_endpoint_auth_methods_supported"].([]any); !slices.Contains(methods, any("none")) {
+		t.Errorf("public clients aren't advertised: %v", methods)
+	}
+}
+
+// A client that registers as public (token_endpoint_auth_method "none")
+// gets no secret, and signs in and refreshes with its client ID alone.
+// Codex registers this way and keeps no client secret: its refresh sends
+// only the client ID, which a confidential registration refused
+// (invalid_client), so its tool calls failed an hour after sign-in, the
+// game took its player out as away and the user had to sign in again.
+func TestPublicClient(t *testing.T) {
+	a := newSignInApp(t, true)
+	const redirect = "http://127.0.0.1:1455/callback"
+	code, reg, _ := a.registerWith(map[string]any{"client_name": "Codex", "redirect_uris": []string{redirect}, "token_endpoint_auth_method": "none"})
+	if code != http.StatusCreated || reg.ClientID == "" || reg.ClientSecret != "" || reg.AuthMethod != "none" {
+		t.Fatalf("register: %d %+v", code, reg)
+	}
+	back := a.authorize(reg.ClientID, redirect)
+	form := codeForm(reg, redirect, back.Query().Get("code"), testVerifier)
+	form.Del("client_secret")
+	status, tok := a.token(form)
+	if status != 200 || tok.RefreshToken == "" {
+		t.Fatalf("code exchange: %d %+v", status, tok)
+	}
+	ti, err := a.s.verify(context.Background(), tok.AccessToken, nil)
+	if err != nil || ti.Extra["agent"] != "codex" {
+		t.Fatalf("access token: %+v %v", ti, err)
+	}
+
+	// PKCE still binds the code.
+	back = a.authorize(reg.ClientID, redirect)
+	form = codeForm(reg, redirect, back.Query().Get("code"), "v-"+strings.Repeat("c", 44))
+	form.Del("client_secret")
+	if status, t2 := a.token(form); status != 400 || t2.Error != "invalid_grant" {
+		t.Errorf("a wrong verifier: %d %s", status, t2.Error)
+	}
+
+	// The refresh Codex sends: the client ID, no secret.
+	refresh := url.Values{"grant_type": {"refresh_token"}, "client_id": {reg.ClientID}, "refresh_token": {tok.RefreshToken}}
+	status, tok2 := a.token(refresh)
+	if status != 200 || tok2.RefreshToken == "" || tok2.RefreshToken == tok.RefreshToken {
+		t.Fatalf("refresh: %d %+v", status, tok2)
+	}
+	if ti2, err := a.s.verify(context.Background(), tok2.AccessToken, nil); err != nil || ti2.UserID != ti.UserID {
+		t.Fatalf("refreshed: %+v %v", ti2, err)
+	}
+	// Single use: the replaced one stops working.
+	if status, t2 := a.token(refresh); status != 400 || t2.Error != "invalid_grant" {
+		t.Errorf("a replaced refresh token: %d %s", status, t2.Error)
+	}
+
+	// A public client has no secret to send: one sent, or Basic, is refused.
+	withSecret := url.Values{"grant_type": {"refresh_token"}, "client_id": {reg.ClientID}, "client_secret": {"x"}, "refresh_token": {tok2.RefreshToken}}
+	if status, t2 := a.token(withSecret); status != 401 || t2.Error != "invalid_client" {
+		t.Errorf("a public client with a secret: %d %s", status, t2.Error)
+	}
+	req, _ := http.NewRequest("POST", a.srv.URL+"/oauth/token", strings.NewReader(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok2.RefreshToken}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(url.QueryEscape(reg.ClientID), "")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("a public client by Basic: %d", resp.StatusCode)
+	}
+
+	// Another client can't use its refresh token, public or not.
+	_, other, _ := a.registerWith(map[string]any{"client_name": "Codex", "redirect_uris": []string{redirect}, "token_endpoint_auth_method": "none"})
+	if status, t2 := a.token(url.Values{"grant_type": {"refresh_token"}, "client_id": {other.ClientID}, "refresh_token": {tok2.RefreshToken}}); status != 400 || t2.Error != "invalid_grant" {
+		t.Errorf("another public client's refresh token: %d %s", status, t2.Error)
+	}
+
+	// A client registered with a secret still needs it.
+	conf, ctok := a.signIn("Claude Code")
+	if conf.ClientSecret == "" || conf.AuthMethod != "client_secret_post" {
+		t.Fatalf("a confidential registration: %+v", conf)
+	}
+	if status, t2 := a.token(url.Values{"grant_type": {"refresh_token"}, "client_id": {conf.ClientID}, "refresh_token": {ctok.RefreshToken}}); status != 401 || t2.Error != "invalid_client" {
+		t.Errorf("a confidential client without its secret: %d %s", status, t2.Error)
+	}
+	if status, t2 := a.token(refreshForm(conf, ctok.RefreshToken)); status != 200 {
+		t.Errorf("a confidential client with its secret: %d %s", status, t2.Error)
 	}
 }

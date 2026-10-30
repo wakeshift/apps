@@ -3,9 +3,12 @@ package gamekit
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"html/template"
 	"io/fs"
 	"net/http"
 	"strings"
+
+	"github.com/wakeshift/apps/linkpreview"
 )
 
 // Cache lifetimes for the game's static files: a URL from StaticURL names
@@ -45,11 +48,35 @@ func (s *Server) hashStatic() {
 	})
 }
 
+// LinkPreview is the tags for a game page's link preview (apps/linkpreview):
+// the page at path, with the game's preview image, static/preview.png. A
+// game without one gets no tags, rather than an image that isn't there.
+func (s *Server) LinkPreview(path, title, description, alt string) template.HTML {
+	s.hashStatic()
+	if _, ok := s.staticHash["preview.png"]; !ok {
+		return ""
+	}
+	base := s.PublicURL()
+	return linkpreview.Card{
+		SiteName: s.Title, Title: title, Description: description,
+		URL: linkpreview.Join(base, path), Image: linkpreview.Join(base, s.StaticURL("preview.png")), ImageAlt: alt,
+	}.Tags()
+}
+
 func (s *Server) staticRoutes(mux *http.ServeMux) {
 	if s.Static == nil {
 		return
 	}
 	s.hashStatic()
+	// The favicon, for apps that ask for it at the root.
+	if _, ok := s.staticHash["favicon.ico"]; ok {
+		mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", staticCache)
+			w.Header().Set("Content-Type", "image/x-icon")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			http.ServeFileFS(w, r, s.Static, "favicon.ico")
+		})
+	}
 	files := http.StripPrefix("/static/", http.FileServerFS(s.Static))
 	mux.HandleFunc("GET /static/", func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/static/")

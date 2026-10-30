@@ -643,6 +643,63 @@ test("pages escape what they're given", () => {
   assert.ok(!html.includes("<img src=x"));
 });
 
+// ── Link previews ──────────────────────────────────────────────────────────
+
+const CRAWLERS = [
+  "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+  "Twitterbot/1.0",
+  "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)",
+  "LinkedInBot/1.0 (compatible; Mozilla/5.0; Apache-HttpClient +http://www.linkedin.com)",
+  "WhatsApp/2.23.20.0",
+  "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_1) AppleWebKit/601.2.4 (KHTML, like Gecko) Version/9.0.1 Safari/601.2.4 facebookexternalhit/1.1 Facebot Twitterbot/1.0",
+];
+
+test("the home page's link preview: every tag, absolute at this app's URL, for every crawler, and its image and icons served as PNGs", async (t) => {
+  const site = "https://try.example.test";
+  const wake = new Wakeshift({ key: `wst_test_try-unit_${Buffer.alloc(32, 7).toString("base64url")}`, core: "http://127.0.0.1:9" });
+  const app = tryServer({ wake, db: openDb(t, await testDatabase(t)), secret, publicUrl: site, log: () => {} });
+  await new Promise<void>((r) => app.listen(0, "127.0.0.1", () => r()));
+  t.after(() => app.stop());
+  const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
+  let image = "";
+  for (const ua of CRAWLERS) {
+    const res = await fetch(base + "/", { headers: { "User-Agent": ua } });
+    assert.equal(res.status, 200, ua);
+    const html = await res.text();
+    const tags = new Map([...html.matchAll(/<meta (?:property|name)="([^"]+)" content="([^"]*)">/g)].map((m) => [m[1]!, m[2]!.replace(/&#39;/g, "'").replace(/&amp;/g, "&")]));
+    for (const k of ["og:type", "og:site_name", "og:title", "og:description", "og:url", "og:image", "og:image:type", "og:image:width", "og:image:height", "og:image:alt", "twitter:card", "twitter:title", "twitter:description", "twitter:image"]) {
+      assert.ok(tags.get(k), `no ${k}`);
+    }
+    assert.equal(tags.get("og:title"), "A webhook that wakes your agent");
+    assert.equal(tags.get("og:url"), site + "/");
+    assert.ok(html.includes(`<link rel="canonical" href="${site}/">`), "no canonical link");
+    assert.ok(html.includes(`<link rel="apple-touch-icon" href="/static/apple-touch-icon.png" sizes="180x180">`), "no touch icon");
+    assert.equal(tags.get("twitter:card"), "summary_large_image");
+    assert.deepEqual([tags.get("og:image:type"), tags.get("og:image:width"), tags.get("og:image:height")], ["image/png", "1200", "630"]);
+    assert.ok(tags.get("og:image")!.startsWith(site + "/static/preview.png?v="), `og:image ${tags.get("og:image")}`);
+    assert.equal(tags.get("twitter:image"), tags.get("og:image"));
+    image = tags.get("og:image")!;
+  }
+  const res = await fetch(base + image.slice(site.length));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "image/png");
+  assert.match(res.headers.get("cache-control")!, /max-age=31536000/);
+  const png = Buffer.from(await res.arrayBuffer());
+  assert.equal(png.subarray(1, 4).toString(), "PNG");
+  assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [1200, 630]);
+  for (const [p, type] of [["/static/apple-touch-icon.png", "image/png"], ["/static/icon-192.png", "image/png"], ["/static/favicon-32.png", "image/png"], ["/favicon.ico", "image/x-icon"]]) {
+    const r = await fetch(base + p!);
+    assert.equal(r.status, 200, p);
+    assert.equal(r.headers.get("content-type"), type, p);
+    await r.arrayBuffer();
+  }
+  for (const p of ["/static/nope.png", "/static/toString", "/static/__proto__"]) assert.equal((await fetch(base + p)).status, 404, p);
+  // Only the home page has a preview: a link's own page is someone's.
+  const other = await (await fetch(base + "/terms")).text();
+  assert.ok(!other.includes("og:image"), "/terms has a link preview");
+});
+
 // ── MCP, without a core: what harnesses do around initialize ──────────────
 
 const seed = Buffer.alloc(32, 7).toString("base64url");
@@ -700,6 +757,40 @@ test("mcp: a notification before initialize is accepted, and initialize works af
   t.after(() => client.close());
   const tools = (await client.listTools()).tools.map((x) => x.name).sort();
   assert.deepEqual(tools, ["list_subscriptions", "recent_posts", "subscribe_events", "unsubscribe_events", "unwatch", "watch", "webhook_info"]);
+});
+
+// OpenClaw speaks only protocol 2026-07-28: no initialize, no session, each
+// request naming its version, client and capabilities.
+test("mcp: a protocol 2026-07-28 client is served without a session", async (t) => {
+  const { url } = await mcpFixture(t);
+  const meta = (caps: unknown = {}) => ({
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": { name: "openclaw", version: "2026.10.10-beta.5" },
+    "io.modelcontextprotocol/clientCapabilities": caps,
+  });
+  const call = async (id: number, method: string, params: Record<string, unknown> = {}, caps?: unknown) => {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "mcp-protocol-version": "2026-07-28", "mcp-method": method },
+      body: JSON.stringify({ jsonrpc: "2.0", id, method, params: { ...params, _meta: meta(caps) } }),
+    });
+    assert.equal(r.status, 200, `${method}: ${r.status}`);
+    assert.equal(r.headers.get("mcp-session-id"), null, `${method}: no session`);
+    const text = await r.text();
+    const line = text.split("\n").find((l) => l.startsWith("data: "));
+    return JSON.parse(line ? line.slice(6) : text);
+  };
+  const d = (await call(1, "server/discover")).result;
+  assert.equal(d.resultType, "complete");
+  assert.ok(d.supportedVersions.includes("2026-07-28"));
+  assert.deepEqual(d.capabilities.events, { listChanged: false });
+  assert.deepEqual(d.capabilities.extensions["io.modelcontextprotocol/events"], { listChanged: false });
+  const list = (await call(2, "events/list")).result;
+  assert.equal(list.resultType, "complete");
+  assert.deepEqual(list.events.map((e: any) => [e.name, e.delivery]), [["webhook.received", ["webhook", "poll"]]]);
+  const tools = (await call(3, "tools/list", {}, { extensions: { "io.modelcontextprotocol/events": {} } })).result;
+  assert.equal(tools.resultType, "complete");
+  assert.deepEqual(tools.tools.map((x: any) => x.name).sort(), ["list_subscriptions", "recent_posts", "unsubscribe_events", "unwatch", "watch", "webhook_info"]);
 });
 
 test("mcp: the GET stream's headers and first bytes go out at once", async (t) => {

@@ -53,7 +53,7 @@ attached := wake.Attach(srv, appkit.AttachOptions{
 mux.Handle("/mcp", requireAuth(attached.Wrap(mcpHandler)))
 ```
 
-Every client can now subscribe: ChatGPT with MCP Events, every other agent with the `subscribe_events` tool that `Attach` adds, and anyone can see and stop theirs with `list_subscriptions` and `unsubscribe_events`. (`AttachOptions.Tools` names fewer of the three, if your own tools cover them.) When something happens, emit it:
+Every client can now subscribe: ChatGPT with MCP Events, every other agent with the `subscribe_events` tool that `Attach` adds, and anyone can see and stop theirs with `list_subscriptions` and `unsubscribe_events`. (`AttachOptions.Tools` names fewer of the three, if your own tools cover them.) In front of a stateless handler, `Wrap` also serves `wakeshift_wait` to clients that take MCP tasks (a recent Claude Code in the terminal): Wakeshift tells those conversations to call it, and it wakes them when your events arrive, with nothing to install; other clients don't see it. When something happens, emit it:
 
 ```go
 msg.Emit(ctx, channelArgs{Channel: "eng"}, message{From: "ada", Text: "shipped it"})

@@ -2,6 +2,7 @@ package appkit
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -44,6 +45,9 @@ type wireCall struct {
 	// it, and Wakeshift's hooks act on the beacon only from that tool's
 	// result.
 	Tool string `json:"tool,omitempty"`
+	// Tasks: the client takes MCP tasks (protocol 2026-07-28 with the tasks
+	// extension), and Wrap serves the wait tool for it (tasks.go).
+	Tasks bool `json:"tasks,omitempty"`
 }
 
 // callFrom packs a tool call: user (the app's ID for the person, or "") and
@@ -58,9 +62,12 @@ func callFrom(req *mcp.CallToolRequest, user, session string) wireCall {
 		c.Meta = req.Params.GetMeta()
 		c.Tool = req.Params.Name
 	}
+	var header http.Header
 	if req.Extra != nil && req.Extra.Header != nil {
-		c.UserAgent = req.Extra.Header.Get("User-Agent")
+		header = req.Extra.Header
+		c.UserAgent = header.Get("User-Agent")
 	}
+	c.Tasks = takesTasks(c.Meta, header)
 	return c
 }
 

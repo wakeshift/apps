@@ -16,7 +16,7 @@ func TestSubscriptionLimitIsResourceExhausted(t *testing.T) {
 		if code != want || msg != err.Message {
 			t.Errorf("%s: %d %q, want %d", dialect, code, msg, want)
 		}
-		if d, _ := data.(map[string]string); d["kind"] != "subscriptions" {
+		if d, _ := data.(map[string]string); d["limit"] != "subscriptions" {
 			t.Errorf("%s: data %v", dialect, data)
 		}
 	}

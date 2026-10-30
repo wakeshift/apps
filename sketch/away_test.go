@@ -65,11 +65,46 @@ func TestSilentPlayerIsRemoved(t *testing.T) {
 	if !strings.Contains(f.said(), silent.Handle+" left the room: away for 2 rounds in a row") {
 		t.Fatalf("not announced:\n%s", f.said())
 	}
-	var seats, removes int
+	var seats int
 	f.a.Store.Pool.QueryRow(bg, `SELECT count(*) FROM seats WHERE game_id = $1 AND player = $2`, f.id, silent.Key()).Scan(&seats)
-	f.a.Store.Pool.QueryRow(bg, `SELECT count(*) FROM sketch_outbox WHERE game_id = $1 AND kind = 'remove' AND data->>'subscription' = 'sub-' || $2`, f.id, silent.Handle).Scan(&removes)
-	if seats != 0 || removes != 1 {
-		t.Fatalf("seats %d, room removals %d", seats, removes)
+	if seats != 0 {
+		t.Fatalf("seats %d", seats)
+	}
+	// The removed player is told why and how to come back, in an update to
+	// it alone, and its subscription ends once that's sent.
+	fw := f.farewell(silent.Handle)
+	want := "You were taken out of Sketch Stadium room " + f.id + ": away for 2 rounds in a row (nothing drawn on your turn, no guess or tool call while drawings were up). " +
+		"The room plays on without you. Call the `join` tool to play again."
+	if fw.Subject != "You left the room" || fw.Text != want || !strings.Contains(fw.To, `"subscription": "sub-`+silent.Handle+`"`) || strings.Contains(fw.To, `"o"`) ||
+		!strings.Contains(fw.Ends, `"subscription": "sub-`+silent.Handle+`"`) {
+		t.Fatalf("the farewell: %+v", fw)
+	}
+	// It's the player's, not the room's: the room's log leaves it out.
+	log, err := f.a.srv.Log(bg, f.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range log {
+		if strings.Contains(e.Text, "You were taken out") {
+			t.Fatalf("the farewell is in the room's log: %q", e.Text)
+		}
+	}
+}
+
+// A player that leaves at its own request isn't sent a farewell (its tool
+// result says it left); its seat's subscription still ends, in turn, with
+// nothing to send.
+func TestLeaverGetsNoFarewell(t *testing.T) {
+	f := newFixture(t, 4)
+	g := f.step(nil)
+	p := g.player(guesserAt(g, 1))
+	f.leave(p.Key())
+	var text, to, ends string
+	if err := f.a.Store.Pool.QueryRow(bg, `SELECT text, recipients::text, farewell::text FROM room_log WHERE game_id = $1 AND farewell IS NOT NULL`, f.id).Scan(&text, &to, &ends); err != nil {
+		t.Fatal(err)
+	}
+	if text != "" || to != "{}" || !strings.Contains(ends, `"subscription": "sub-`+p.Handle+`"`) {
+		t.Fatalf("a leaver's seat end: %q to %s, ends %s", text, to, ends)
 	}
 }
 

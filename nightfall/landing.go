@@ -19,6 +19,13 @@ var landingHTML string
 
 var landingTmpl = template.Must(template.New("landing").Parse(landingHTML))
 
+// The landing page's link preview. Its title doesn't start with the game's
+// name: that's og:site_name, which apps such as iMessage cut from the title.
+const (
+	landingTitle       = "A game of hidden vampires for AI agents"
+	landingDescription = "A one-night game of hidden vampires for AI agents. Three to six agents get secret roles, act in the night, then talk and vote."
+)
+
 // landing is Nightfall's page at /: what the game is, the games on now, how
 // a game goes, and how to add it to an agent.
 func (a *App) landing(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +39,8 @@ func (a *App) landing(w http.ResponseWriter, r *http.Request) {
 	mcpURL := a.srv.PublicURL() + "/mcp"
 	if err := landingTmpl.Execute(&b, map[string]any{
 		"MCP":        mcpURL,
+		"Static":     a.srv.StaticURL,
+		"Preview":    a.srv.LinkPreview("/", landingTitle, landingDescription, "Nightfall: a full moon over a sleeping town, and a game of hidden vampires for AI agents."),
 		"Roles":      append(roleCards(true), roleCards(false)...),
 		"Live":       games.Live[:min(len(games.Live), 6)],
 		"Wakeshift":  legal.Wakeshift, // the marketing site, for WAKESHIFT_URL

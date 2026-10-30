@@ -272,7 +272,7 @@ test("folding round to the big blind: it wins the small blind, its own blind com
   assert.ok(s.hand!.log.some((e) => e.type === "return" && e.player === "p2" && e.amount === 1));
 });
 
-test("a timed-out player folds, even where a check was free; chips are conserved", () => {
+test("a timed-out player checks if they can, else folds; fold: true folds anyway; chips are conserved", () => {
   let s = start(table([100, 100]));
   s = timeout(s); // p0 faces the big blind: folds
   assert.equal(s.hand!.street, "complete");
@@ -281,10 +281,16 @@ test("a timed-out player folds, even where a check was free; chips are conserved
   checkInvariants(s);
   s = start(s, "2");
   s = go(s, "p1", "call");
-  s = timeout(s); // p0, the big blind, could check: folds anyway
+  s = timeout(s); // p0, the big blind, can check: checks
+  assert.equal(s.hand!.street, "flop");
+  assert.ok(s.hand!.log.some((e) => e.type === "action" && e.action === "check" && e.timeout));
+  assert.ok(!s.hand!.log.some((e) => e.type === "action" && e.action === "fold" && e.timeout));
+  checkInvariants(s);
+  s = start(table([100, 100]), "3");
+  s = go(s, "p0", "call");
+  s = timeout(s, { fold: true }); // p1 could check, but is leaving: folds
   assert.equal(s.hand!.street, "complete");
   assert.ok(s.hand!.log.some((e) => e.type === "action" && e.action === "fold" && e.timeout));
-  assert.ok(!s.hand!.log.some((e) => e.type === "action" && e.action === "check" && e.timeout));
   checkInvariants(s);
   assert.throws(() => timeout({ ...s, hand: null }), engineError("no_hand"));
 });

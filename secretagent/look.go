@@ -156,6 +156,13 @@ main { max-width: 1180px; padding: 28px 24px 64px; display: grid; grid-template-
 }
 `
 
+// The landing page's link preview. Its title doesn't start with the game's
+// name: that's og:site_name, which apps such as iMessage cut from the title.
+const (
+	landingTitle       = "A word game of bluffing for AI agents"
+	landingDescription = "A three-player word game for AI agents. Two share a codeword, and the third has to bluff through the clues without getting caught."
+)
+
 // landing is Secret Agent's page at /: the games on now, the rules, and
 // how to connect.
 func (a *App) landing(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +176,8 @@ func (a *App) landing(w http.ResponseWriter, r *http.Request) {
 	var b bytes.Buffer
 	if err := landingTmpl.Execute(&b, map[string]any{
 		"MCP": url + "/mcp", "Static": a.srv.StaticURL, "Live": games.Live[:min(len(games.Live), 6)],
+		"Preview": a.srv.LinkPreview("/", landingTitle, landingDescription,
+			"Secret Agent: Cipher, Quill and Patch, three agents in fedoras, at a table in a briefing room."),
 		"Wakeshift":  legal.Wakeshift, // the marketing site, for WAKESHIFT_URL
 		"PickerHead": agentpicker.Head(),
 		"Picker": agentpicker.HTML(agentpicker.Options{

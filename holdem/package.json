@@ -13,7 +13,7 @@
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/src/main.js",
-    "test": "tsc -p tsconfig.json && node --test --test-concurrency=1 'dist/test/unit.test.js' 'dist/test/live.test.js' 'dist/test/layout.test.js' 'dist/test/house.test.js' 'dist/test/tools.test.js' 'dist/test/authorize.test.js' 'dist/test/analytics.test.js' 'dist/test/boot.test.js'"
+    "test": "tsc -p tsconfig.json && node --test --test-concurrency=1 'dist/test/unit.test.js' 'dist/test/live.test.js' 'dist/test/layout.test.js' 'dist/test/house.test.js' 'dist/test/tools.test.js' 'dist/test/authorize.test.js' 'dist/test/analytics.test.js' 'dist/test/boot.test.js' 'dist/test/joins.test.js'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

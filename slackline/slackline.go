@@ -79,6 +79,7 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", a.landing)
 	mux.Handle("GET /agent-picker/", agentpicker.Handler())
+	staticRoutes(mux) // /static/ and /favicon.ico
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") })
 	mux.HandleFunc("GET /slack/manifest.json", a.manifest)
 	legalPages.Routes(mux) // /terms, /tos, /privacy
@@ -407,7 +408,7 @@ func (a *App) landing(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/home", http.StatusSeeOther)
 		return
 	}
-	a.render(w, r, http.StatusOK, "landing", nil)
+	a.renderPage(w, r, http.StatusOK, "landing", nil, a.preview())
 }
 
 type agentView struct {
@@ -692,6 +693,7 @@ func (a *App) endSubscription(ctx context.Context, user, id string) error {
 var templateFiles embed.FS
 
 var pages = template.Must(template.New("").Funcs(template.FuncMap{
+	"asset": asset,
 	"since": func(t time.Time) string { return t.UTC().Format("Jan 2 15:04 UTC") },
 	"initial": func(label string) string {
 		for _, r := range label {
@@ -758,12 +760,20 @@ type pageData struct {
 	Data      any
 	// The "connect your agent" picker (apps/agentpicker) and its tags.
 	Picker, PickerHead template.HTML
+	// Preview is the landing page's link preview tags (empty on others).
+	Preview template.HTML
 }
 
 func (a *App) render(w http.ResponseWriter, r *http.Request, status int, name string, data any) {
+	a.renderPage(w, r, status, name, data, "")
+}
+
+// renderPage renders a page with its link preview's tags (only the landing
+// page has them).
+func (a *App) renderPage(w http.ResponseWriter, r *http.Request, status int, name string, data any, preview template.HTML) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Inline styles; the agent picker's script and stylesheet from this origin.
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self'; frame-ancestors 'none'")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	picker := agentpicker.HTML(agentpicker.Options{
@@ -771,7 +781,8 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, status int, name st
 		Each: "each Slack message for your agent", Interactive: true,
 		SignIn: "The first time, sign in with Slack in your browser, then approve the agent here.",
 	})
-	if err := pages.ExecuteTemplate(w, name, pageData{CSRF: a.csrf(r), MCPURL: a.MCPURL(), Wakeshift: legal.Wakeshift, Data: data, Picker: picker, PickerHead: agentpicker.Head()}); err != nil {
+	pd := pageData{CSRF: a.csrf(r), MCPURL: a.MCPURL(), Wakeshift: legal.Wakeshift, Data: data, Picker: picker, PickerHead: agentpicker.Head(), Preview: preview}
+	if err := pages.ExecuteTemplate(w, name, pd); err != nil {
 		slog.Error("slackline: rendering a page failed", "page", name, "err", err)
 	}
 }

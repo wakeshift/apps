@@ -1,6 +1,6 @@
 {
   "name": "@wakeshift/sdk",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "description": "Let agents subscribe to things in your app: Wakeshift wakes them when you emit an event.",
   "license": "Apache-2.0",
   "author": "Clawvisor Inc. <support@wakeshift.ai>",

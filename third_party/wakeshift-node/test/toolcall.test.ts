@@ -9,11 +9,13 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { McpError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { CallEnded, Wakeshift, WakeshiftError, isCode, type Attached, type Subscription, type ToolCall } from "../src/index.js";
-import { CONVERSATION_META, mergeBlock, namesConversation, type CallAddition } from "../src/toolcall.js";
+import { CONVERSATION_META, mergeBlock, namesConversation, withWakeshiftField, type CallAddition } from "../src/toolcall.js";
 
 const seed = Buffer.alloc(32, 9).toString("base64url");
 const KEY = `wst_test_cards_${seed}`;
@@ -159,7 +161,16 @@ async function wrapped(
     });
     return (await resp.json()) as Rpc;
   };
-  return { core, wake, ev, call, warnings };
+  // tools lists the tools, as a client on protocol 2025-11-25 gets them.
+  const tools = async (): Promise<any[]> => {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: "Bearer ada" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    return ((await resp.json()) as { result: { tools: any[] } }).result.tools;
+  };
+  return { core, wake, ev, call, tools, url, warnings };
 }
 
 const texts = (r: Rpc) => (r.result?.content ?? []).map((c: any) => c.text ?? "");
@@ -563,33 +574,59 @@ test("native callers aren't subscribed: the block names the events to subscribe 
   assert.deepEqual(w.core.bodies("/event-subscriptions/end"), [{ user: "ada", id: "n1" }]);
 });
 
-test("typed output: attached.output's wakeshift carries the block's text; without it, a warning once per tool", async (t) => {
+test("structured output: any wrapped tool's structuredContent carries the block in wakeshift, and tools/list's output schema names it", async (t) => {
+  const join = (name: string, ev: Events, attached: Attached) =>
+    attached.events(name, async ({ table }: any, call: ToolCall) => {
+      await call.subscribe(ev.news, { table });
+      return { content: [{ type: "text" as const, text: JSON.stringify({ table }) }], structuredContent: { table } };
+    });
+  const w = await wrapped(t, (server, attached, ev) => {
+    server.registerTool("join", { inputSchema: attached.inputs({ table: z.string() }), outputSchema: attached.output({ table: z.string() }) }, join("join", ev, attached));
+    server.registerTool("join_plain", { inputSchema: attached.inputs({ table: z.string() }), outputSchema: { table: z.string() } }, join("join_plain", ev, attached));
+    server.registerTool("unwrapped", { outputSchema: { table: z.string() } }, async () => ({ content: [], structuredContent: { table: "oak" } }));
+  });
+  for (const name of ["join", "join_plain"]) {
+    const res = await w.call("ada", name, { table: "oak" });
+    assert.deepEqual(res.result?.structuredContent, { table: "oak", wakeshift: WOKEN }, name);
+    assert.deepEqual(texts(res), ['{"table":"oak"}', WOKEN, TRAILER], name);
+  }
+  const listed = Object.fromEntries((await w.tools()).map((tool) => [tool.name, tool]));
+  for (const name of ["join", "join_plain"]) {
+    assert.equal(listed[name].outputSchema.properties.wakeshift.type, "string", name);
+    assert.ok(!(listed[name].outputSchema.required ?? []).includes("wakeshift"), name);
+  }
+  // A tool that isn't wrapped keeps its own schema.
+  assert.equal(listed.unwrapped.outputSchema.properties.wakeshift, undefined);
+  assert.deepEqual(w.warnings, []);
+
+  // The MCP SDK's own client checks structuredContent against the listed
+  // schema (which refuses fields it doesn't name), and takes the block.
+  const client = new Client({ name: "claude-code", version: "2.1.314" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(w.url), { requestInit: { headers: { Authorization: "Bearer ada" } } }));
+  t.after(() => client.close());
+  await client.listTools();
+  const res = await client.callTool({ name: "join_plain", arguments: { table: "elm" } });
+  assert.deepEqual(res.structuredContent, { table: "elm", wakeshift: WOKEN });
+});
+
+test("structured output: a strict output schema that refuses wakeshift gets the result without it, and a warning once", async (t) => {
   const w = await wrapped(t, (server, attached, ev) => {
     server.registerTool(
       "join",
-      { inputSchema: attached.inputs({ table: z.string() }), outputSchema: attached.output({ table: z.string() }) },
+      { inputSchema: attached.inputs({ table: z.string() }), outputSchema: z.strictObject({ table: z.string() }) },
       attached.events("join", async ({ table }, call) => {
-        await call.subscribe(ev.news, { table });
-        return { content: [{ type: "text", text: JSON.stringify({ table }) }], structuredContent: { table } };
-      }),
-    );
-    server.registerTool(
-      "join_plain",
-      { inputSchema: attached.inputs({ table: z.string() }), outputSchema: { table: z.string() } },
-      attached.events("join_plain", async ({ table }, call) => {
         await call.subscribe(ev.news, { table });
         return { content: [{ type: "text", text: JSON.stringify({ table }) }], structuredContent: { table } };
       }),
     );
   });
   const res = await w.call("ada", "join", { table: "oak" });
-  assert.deepEqual(res.result?.structuredContent, { table: "oak", wakeshift: WOKEN });
+  assert.equal(res.result?.isError, undefined, JSON.stringify(res));
+  assert.deepEqual(res.result?.structuredContent, { table: "oak" });
   assert.deepEqual(texts(res), ['{"table":"oak"}', WOKEN, TRAILER]);
-  const plain = await w.call("ada", "join_plain", { table: "elm" });
-  assert.deepEqual(plain.result?.structuredContent, { table: "elm" });
-  assert.equal(texts(plain).length, 3);
-  await w.call("ada", "join_plain", { table: "elm" });
-  assert.equal(w.warnings.filter((m) => m.includes("without attached.output")).length, 1);
+  assert.deepEqual(w.core.bodies("/event-subscriptions/unsubscribe"), [], "the subscription stays");
+  await w.call("ada", "join", { table: "oak" });
+  assert.equal(w.warnings.filter((m) => m.includes("refuses a wakeshift field")).length, 1);
 });
 
 test("session_key is the one name for the session argument: session, its old name, isn't taken as it", async (t) => {
@@ -646,9 +683,15 @@ test("the MCP SDK's internals the wrapper reads are where it reads them", () => 
 test("shared fixture: the block, as every SDK adds it (wrapped-block.json)", () => {
   const f = JSON.parse(readFileSync(new URL("../../test/wrapped-block.json", import.meta.url), "utf8")) as {
     addition: CallAddition;
-    cases: { name: string; addition?: CallAddition; wake_output?: boolean; result: string | CallToolResult; want: CallToolResult }[];
+    cases: { name: string; addition?: CallAddition; result: string | CallToolResult; want: CallToolResult }[];
+    output_schemas: { name: string; schema: unknown; want: unknown }[];
   };
-  for (const c of f.cases) assert.deepEqual(mergeBlock(c.result, c.addition ?? f.addition, !!c.wake_output), c.want, c.name);
+  for (const c of f.cases) assert.deepEqual(mergeBlock(c.result, c.addition ?? f.addition), c.want, c.name);
+  for (const c of f.output_schemas) {
+    const before = JSON.stringify(c.schema);
+    assert.deepEqual(withWakeshiftField(c.schema), c.want, c.name);
+    assert.equal(JSON.stringify(c.schema), before, c.name);
+  }
 });
 
 test("shared fixture: the _meta keys that name a conversation (conversation-meta.json)", () => {

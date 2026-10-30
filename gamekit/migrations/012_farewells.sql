@@ -1,0 +1,11 @@
+-- A removed player's farewell (Tx.Remove): a room_log entry addressed to
+-- that player alone (its recipients fixed as it's written), saying why it
+-- was taken out and how to play again. farewell is the removed seat's
+-- subscription, {"user", "subscription"}, ended once the entry is sent, so
+-- the player hears why before Wakeshift tells it the subscription ended
+-- ({} for a seat with nothing to end). The room's log (Log) leaves these
+-- entries out: they're the player's, not the room's.
+--
+-- A new nullable column: the release before this one ignores it (it would
+-- send a farewell as written, and leave the subscription to lapse).
+ALTER TABLE room_log ADD COLUMN farewell jsonb;

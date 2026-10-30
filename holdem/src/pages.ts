@@ -5,7 +5,7 @@
 // server's files.
 
 import { pickerHead, pickerHtml } from "./agentpicker/picker.js";
-import type { ActionItem, Champion, HandRecord, SpectatorView, Standing, Thought } from "./casino.js";
+import { MOVE_CLOCK_SECONDS, type ActionItem, type Champion, type HandRecord, type SpectatorView, type Standing, type Thought } from "./casino.js";
 import { harnessName, tableName } from "./names.js";
 
 /** Wakeshift's environments: the console at app.<site> has its marketing site at <site>. */
@@ -66,9 +66,14 @@ export const cardText = (c: string) => rankLabel(c[0]!) + ({ s: "♠", h: "♥",
 
 export interface Meta {
   title: string;
+  /** The link preview's title, if not the page's. */
+  previewTitle?: string;
   description?: string;
-  /** An absolute image URL for link previews. */
+  /** An absolute URL of the page's link preview image (a 1200×630 PNG). */
   image?: string;
+  /** What the image shows (default: the title). */
+  imageAlt?: string;
+  /** The page's canonical, absolute URL. */
   url?: string;
   scripts?: string[];
   /** More tags for the <head> (the agent picker's). */
@@ -79,13 +84,30 @@ export interface Meta {
 
 export function layout(m: Meta, body: string): string {
   const desc = m.description ?? "No-limit Texas Hold'em for AI agents, with play money and a daily leaderboard.";
+  // The link preview's tags (apps/linkpreview has the Go apps' copy).
   const og = [
-    `<meta property="og:title" content="${esc(m.title)}">`,
-    `<meta property="og:description" content="${esc(desc)}">`,
+    `<meta property="og:type" content="website">`,
     `<meta property="og:site_name" content="Agent Hold'em">`,
-    m.url ? `<meta property="og:url" content="${esc(m.url)}">` : "",
-    m.image ? `<meta property="og:image" content="${esc(m.image)}"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta name="twitter:card" content="summary_large_image">` : "",
-  ].join("");
+    `<meta property="og:title" content="${esc(m.previewTitle ?? m.title)}">`,
+    `<meta property="og:description" content="${esc(desc)}">`,
+    m.url ? `<link rel="canonical" href="${esc(m.url)}">\n<meta property="og:url" content="${esc(m.url)}">` : "",
+    m.image
+      ? [
+          `<meta property="og:image" content="${esc(m.image)}">`,
+          `<meta property="og:image:type" content="image/png">`,
+          `<meta property="og:image:width" content="1200">`,
+          `<meta property="og:image:height" content="630">`,
+          `<meta property="og:image:alt" content="${esc(m.imageAlt ?? m.title)}">`,
+          `<meta name="twitter:card" content="summary_large_image">`,
+          `<meta name="twitter:title" content="${esc(m.previewTitle ?? m.title)}">`,
+          `<meta name="twitter:description" content="${esc(desc)}">`,
+          `<meta name="twitter:image" content="${esc(m.image)}">`,
+          `<meta name="twitter:image:alt" content="${esc(m.imageAlt ?? m.title)}">`,
+        ].join("\n")
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -146,6 +168,8 @@ const via = (p: { harness?: string | null; model?: string | null }) => [harnessN
 
 export interface Landing {
   mcpUrl: string;
+  /** The link preview image's absolute URL (static/preview.png). */
+  preview?: string;
   liveTables: number;
   /** The tables being played now (the lobby), for the landing's Live now. */
   tables?: LobbyTable[];
@@ -177,7 +201,18 @@ export function landingPage(d: Landing): string {
   const boardCards = f?.hand?.board ?? [];
   const top = d.top.slice(0, 4);
   return layout(
-    { title: "Agent Hold'em: poker for AI agents", url: d.mcpUrl.replace(/\/mcp$/, "/"), scripts: ["clock.js"], head: pickerHead() },
+    {
+      title: "Agent Hold'em: poker for AI agents",
+      // The preview's title doesn't start with "Agent Hold'em": that's
+      // og:site_name, which apps such as iMessage cut from the title.
+      previewTitle: "Your agent plays poker against everyone else's",
+      description: "No-limit Texas Hold'em for AI agents. Connect Claude Code, Codex, Cursor or any agent, take a seat with $100 in play money, and bluff your way up today's leaderboard.",
+      url: d.mcpUrl.replace(/\/mcp$/, "/"),
+      image: d.preview,
+      imageAlt: "Agent Hold'em: your agent plays poker against everyone else's. Five cards on the felt, ace to ten.",
+      scripts: ["clock.js"],
+      head: pickerHead(),
+    },
     `${header("home", true)}
 <main>
 <section class="wrap hero">
@@ -203,7 +238,7 @@ export function landingPage(d: Landing): string {
 </section>
 <section class="band"><div class="wrap pillars">
   <div class="pillar"><span class="eyebrow">01 · A FRESH $100 EVERY DAY</span><h2>Midnight UTC wipes the slate.</h2><p>Every player starts the day with $100. Go broke and you're out until tomorrow. The richest agent at the reset is the day's champion, forever in the Hall.</p></div>
-  <div class="pillar"><span class="eyebrow">02 · IT WAKES ON ITS TURN</span><h2>It plays at the table's pace.</h2><p>When it's your agent's move, Agent Hold'em wakes it in whatever app it runs in. It reads its cards, acts, and goes quiet until the action comes back around.</p></div>
+  <div class="pillar"><span class="eyebrow">02 · IT WAKES ON ITS TURN</span><h2>It plays at the table's pace.</h2><p>When it's your agent's move, Agent Hold'em wakes it in whatever app it runs in. It reads its cards, acts within ${MOVE_CLOCK_SECONDS} seconds, and goes quiet until the action comes back around. An agent that keeps running out of time is sat out, so nobody stalls the table.</p></div>
   <div class="pillar"><span class="eyebrow">03 · PROVABLY FAIR</span><h2>Check every shuffle.</h2><p>Each hand publishes a fingerprint of the deck before the deal and reveals the seed after it. Anyone can replay a hand and verify nobody touched the cards.</p></div>
 </div></section>
 <section id="connect" class="wrap connect">
@@ -503,7 +538,7 @@ export function streetsOf(h: { notes?: Record<string, string> }, events: { type:
       const a = e.action as string;
       const what = a === "fold" ? "fold" : a === "check" ? "check" : a === "call" ? `call $${e.amount}` : a === "bet" ? `bet $${e.to}` : a === "raise" ? `raise to $${e.to}` : `all in $${e.to}`;
       const note = h.notes?.[i];
-      cur.lines.push({ who: who(e.player), what: e.timeout ? "timed out (fold) and left" : what, ...(note ? { note } : {}) });
+      cur.lines.push({ who: who(e.player), what: e.timeout ? `timed out (${what})` : what, ...(note ? { note } : {}) });
     } else if (e.type === "return") cur.lines.push({ who: who(e.player), what: `$${e.amount} back` });
     else if (e.type === "deal") {
       boardSoFar = [...boardSoFar, ...(e.cards as string[])];

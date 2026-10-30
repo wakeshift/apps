@@ -6,7 +6,22 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { act as engineAct, chipsInPlay, createTable, sit, startHand, type TableState, toAct as engineToAct } from "../engine/src/index.js";
 import { Anon, archiveHand } from "../src/archive.js";
-import { Casino, DAILY_BANKROLL, GameError, lastHandText, MIN_HANDS, REMOVED_SUBSCRIPTION_GRACE_MS, type LastHand, type Notifier } from "../src/casino.js";
+import {
+  Casino,
+  DAILY_BANKROLL,
+  GameError,
+  lastHandText,
+  MIN_HANDS,
+  MOVE_CLOCK_SECONDS,
+  PACES,
+  REMOVED_SUBSCRIPTION_GRACE_MS,
+  SIT_OUT_IN_A_ROW,
+  SIT_OUT_IN_WINDOW,
+  SIT_OUT_WINDOW_HANDS,
+  type LastHand,
+  type Notifier,
+} from "../src/casino.js";
+import { watchAwayMessage } from "../src/live.js";
 import type { Db } from "../src/db.js";
 import { Wakeshift, type WakeEvent } from "@wakeshift/sdk";
 import { defineHoldemEvents, holdemNotifier, turnRecipient, type HoldemEvents } from "../src/events.js";
@@ -29,7 +44,8 @@ interface Wake {
   data: Record<string, unknown>;
 }
 
-function room(db: Db, start = Date.parse("2026-10-21T12:00:00Z")) {
+/** delivered: whether Wakeshift takes a turn's wake (default: always); false, or a throw, is a wake that didn't go out. */
+function room(db: Db, start = Date.parse("2026-10-21T12:00:00Z"), delivered: (to: { player: string }) => boolean = () => true) {
   const clock = { t: start };
   const wakes: Wake[] = [];
   const results: { topic: string; text: string; data: Record<string, unknown> }[] = [];
@@ -39,6 +55,7 @@ function room(db: Db, start = Date.parse("2026-10-21T12:00:00Z")) {
   const notify: Notifier = {
     turn: async (to, e) => {
       wakes.push({ ...to, ...e });
+      return delivered(to);
     },
     result: async (table, e) => {
       results.push({ topic: table, text: e.text, data: e.data });
@@ -226,54 +243,232 @@ test("a player who folded can leave mid-hand; one still in the hand leaves when 
 
 // ── The clock ──────────────────────────────────────────────────────────────
 
-test("out of time, the player's hand is folded (even when a check was free) and they're taken off the table", async (t) => {
+const CLOCK_MS = MOVE_CLOCK_SECONDS * 1000;
+
+/** Who is to act, of ids, and their turn: read from state. */
+async function toActOf(casino: Casino, ids: string[]): Promise<{ id: string; turn: string; choices: string[] } | undefined> {
+  for (const id of ids) {
+    const s = await casino.state(id);
+    if (s.table?.hand && !s.table.hand.result && s.table.hand.yourTurn) return { id, turn: s.table.hand.turn!, choices: s.table.legal!.choices };
+  }
+  return undefined;
+}
+
+/**
+ * Plays until slow has had `plan.length` turns, or is off the table: on
+ * each of its turns, "out" lets the clock run out and "act" plays in time
+ * (check, else call); everyone else plays passively. Returns what happened
+ * on each of slow's turns.
+ */
+async function playSlow(casino: Casino, clock: { t: number }, ids: string[], slow: string, plan: ("out" | "act")[]): Promise<string[]> {
+  const did: string[] = [];
+  for (let step = 0; step < 400 && did.length < plan.length; step++) {
+    if (!(await casino.tableOf(slow))) break;
+    const next = await toActOf(casino, ids);
+    if (!next) {
+      clock.t += 1000;
+      await casino.tick();
+      continue;
+    }
+    const pass = next.choices.includes("check") ? "check" : next.choices.some((c) => c.startsWith("call")) ? "call" : "fold";
+    if (next.id === slow && plan[did.length] === "out") {
+      clock.t += CLOCK_MS + 1000;
+      await casino.tick();
+      did.push("out");
+      continue;
+    }
+    await casino.act(next.id, { type: pass }, next.turn);
+    if (next.id === slow) did.push("act");
+  }
+  return did;
+}
+
+/** The actions the clock made, in order: in finished hands' logs, then in the hands under way. */
+async function timeoutActions(db: Db): Promise<(string | undefined)[]> {
+  type Ev = { type: string; action?: string; timeout?: boolean };
+  const done = (await db.query<{ log: Ev[] }>("SELECT log FROM hands WHERE log IS NOT NULL ORDER BY number")).rows.map((r) => r.log);
+  const live = (await db.query<{ state: TableState }>("SELECT state FROM tables")).rows.flatMap((r) => (r.state.hand && r.state.hand.street !== "complete" ? [r.state.hand.log as Ev[]] : []));
+  return [...done, ...live].flatMap((log) => log.filter((e) => e.type === "action" && e.timeout).map((e) => e.action));
+}
+
+test("the clock: a standard table's is MOVE_CLOCK_SECONDS (30), with the sit-out thresholds in one place", () => {
+  assert.equal(MOVE_CLOCK_SECONDS, 30);
+  assert.equal(PACES.standard!.clock, MOVE_CLOCK_SECONDS);
+  assert.equal(PACES.standard!.label, "30 seconds a move");
+  assert.deepEqual([SIT_OUT_IN_A_ROW, SIT_OUT_IN_WINDOW, SIT_OUT_WINDOW_HANDS], [2, 3, 10]);
+});
+
+test("out of time after 30 seconds: the player checks if they can, else folds, stays seated, and is told", async (t) => {
   const db = await testDb(t);
-  const { casino, clock, wakes, removed, ended } = room(db);
+  const { casino, clock, wakes, removed } = room(db);
   const a = await player(casino, 1);
   const b = await player(casino, 2);
-  const c = await player(casino, 3);
   await casino.join(a.id, {});
   await casino.join(b.id, {});
-  await casino.join(c.id, {});
   const day = casino.today();
-  // Whoever is to act first never acts.
-  const slow = [a, b, c].find((p) => p.id === wakes[wakes.length - 1]!.player)!;
-  const others = [a, b, c].filter((p) => p !== slow);
-  const before = (await casino.state(slow.id)).table!.seats.find((x) => x?.player.startsWith(slow.name))!.stack;
-  clock.t += 61_000;
+  // Heads-up, the button (small blind) acts first; it calls in time.
+  const first = wakes[wakes.length - 1]!;
+  const sb = first.player === a.id ? a : b;
+  const bb = sb === a ? b : a;
+  assert.equal(Date.parse(String(first.data.deadline)) - clock.t, CLOCK_MS, "the turn's deadline is 30 seconds out");
+  await casino.act(sb.id, { type: "call" }, String(first.data.turn));
+  // The big blind can check: not before its 30 seconds are up, then the clock checks for it.
+  clock.t += CLOCK_MS - 1000;
   await casino.tick();
+  assert.equal((await toActOf(casino, [a.id, b.id]))?.id, bb.id);
+  clock.t += 2000;
+  await casino.tick();
+  assert.deepEqual(await timeoutActions(db), ["check"], "a free check: checked");
+  assert.equal((await casino.state(bb.id)).table!.hand!.street, "flop", "the hand goes on");
+  assert.ok(await casino.tableOf(bb.id), "still seated after one timeout");
+  assert.match((await casino.takeNotice(bb.id))!, /You ran out of time at .*, so you checked\. Time out twice in a row, or three times in ten hands/);
+  assert.equal(await casino.takeNotice(bb.id), null, "told once");
 
-  // Off the table, with the stack back in the bankroll, and every dollar accounted for.
-  const after = await casino.state(slow.id);
-  assert.equal(after.table, null);
-  assert.ok(after.balance >= before, "the stack went back to the bankroll");
-  assert.equal((await money(db, day)).total, 3 * DAILY_BANKROLL);
-  const log = await db.query<{ log: { type: string; action?: string; timeout?: boolean }[] }>("SELECT log FROM hands WHERE log IS NOT NULL");
-  assert.ok(log.rows.some((r) => r.log.some((e) => e.type === "action" && e.action === "fold" && e.timeout)), "the hand was folded for them");
-  assert.ok(!log.rows.some((r) => r.log.some((e) => e.type === "action" && e.action === "check" && e.timeout)), "never a check");
+  // It plays the rest of the hand in time. Next hand it has the button and,
+  // facing the big blind, can't check: the clock folds for it.
+  const handOf = async () => (await casino.state(a.id)).table!.hand!.number;
+  const hand = await handOf();
+  for (let i = 0; i < 20 && (await handOf()) === hand; i++) {
+    const n = (await toActOf(casino, [a.id, b.id]))!;
+    await casino.act(n.id, { type: n.choices.includes("check") ? "check" : "call" }, n.turn);
+  }
+  const next = (await toActOf(casino, [a.id, b.id]))!;
+  assert.equal(next.id, bb.id);
+  clock.t += CLOCK_MS + 1000;
+  await casino.tick();
+  assert.deepEqual(await timeoutActions(db), ["check", "fold"], "facing a bet: folded");
+  assert.match((await casino.takeNotice(bb.id))!, /so you folded\./);
+  assert.ok(await casino.tableOf(bb.id), "two timeouts, but not in a row: still seated");
+  assert.equal(removed.length, 0);
+  assert.equal((await money(db, day)).total, 2 * DAILY_BANKROLL);
+});
 
-  // One last personal event, to that player's own sign-in at that table.
+test("two timeouts in a row sit the player out: off the table, stack back, told, and shown on their watch page", async (t) => {
+  const db = await testDb(t);
+  const { casino, clock, wakes, removed, ended } = room(db);
+  const ps = [await player(casino, 1), await player(casino, 2), await player(casino, 3)];
+  for (const p of ps) await casino.join(p.id, {});
+  const day = casino.today();
+  const slow = ps.find((p) => p.id === wakes[wakes.length - 1]!.player)!;
+  const ids = ps.map((p) => p.id);
+  assert.deepEqual(await playSlow(casino, clock, ids, slow.id, ["out", "out"]), ["out", "out"]);
+  assert.equal(await casino.tableOf(slow.id), undefined, "sat out after the second in a row");
+  assert.equal((await money(db, day)).total, 3 * DAILY_BANKROLL, "the stack went back to the bankroll");
   assert.equal(removed.length, 1);
-  assert.deepEqual([removed[0]!.player, removed[0]!.guest], [slow.id, `guest:${slow.id === a.id ? 1 : slow.id === b.id ? 2 : 3}`]);
-  assert.match(removed[0]!.text, /You timed out at .* and were removed; your \$\d+ is back in your bankroll/);
-  assert.equal(removed[0]!.data.type, "removed");
-  assert.equal(removed[0]!.subscription, `sub_${slow.id === a.id ? 1 : slow.id === b.id ? 2 : 3}`, "addressed to the subscription join made");
+  assert.equal(removed[0]!.player, slow.id);
+  assert.equal(removed[0]!.subscription, slow.subscription, "addressed to the subscription join made");
+  assert.deepEqual([removed[0]!.data.type, removed[0]!.data.reason], ["removed", "timeouts"]);
+  assert.match(removed[0]!.text, /You were sat out at .* for timing out repeatedly \(twice in a row, or three times in ten hands\); rejoin to play again: call join\. Your \$\d+ is back in your bankroll/);
+  assert.equal(await casino.takeNotice(slow.id), removed[0]!.text, "and in the next tool result");
+  const away = await casino.watchAway(slow.id);
+  assert.equal(away.satOut, "timeouts");
+  assert.match(watchAwayMessage(away), /isn't at a table right now\. It was sat out for timing out repeatedly; rejoin to play again\./);
 
-  // The notice comes once, in the next tool result, then it's gone.
-  assert.match((await casino.takeNotice(slow.id))!, /You timed out/);
-  assert.equal(await casino.takeNotice(slow.id), null);
-
-  // The others carry on.
-  await playOut(casino, others.map((p) => p.id));
+  // The others carry on; the turn subscription ends after the grace period.
+  const others = ids.filter((id) => id !== slow.id);
+  await playOut(casino, others);
   assert.equal((await money(db, day)).total, 3 * DAILY_BANKROLL);
-  assert.ok((await casino.state(others[0]!.id)).table);
-
-  // The turn subscription ends after the grace period, not before (so the event arrives first).
-  const slowSub = `sub_${slow.id === a.id ? 1 : slow.id === b.id ? 2 : 3}`;
-  assert.ok(!ended.some((e) => e.subscription === slowSub));
   clock.t += REMOVED_SUBSCRIPTION_GRACE_MS + 1000;
   await casino.tick();
-  assert.ok(ended.some((e) => e.subscription === slowSub && e.guest === removed[0]!.guest));
+  assert.ok(ended.some((e) => e.subscription === slow.subscription));
+});
+
+test("a move in time ends a run of timeouts; three timeouts within ten hands sit the player out, older ones don't count", async (t) => {
+  const db = await testDb(t);
+  const { casino, clock, wakes, removed } = room(db);
+  const ps = [await player(casino, 1), await player(casino, 2), await player(casino, 3)];
+  for (const p of ps) await casino.join(p.id, {});
+  const slow = ps.find((p) => p.id === wakes[wakes.length - 1]!.player)!;
+  const ids = ps.map((p) => p.id);
+  // A timeout, then a move in time: never two in a row.
+  assert.deepEqual(await playSlow(casino, clock, ids, slow.id, ["out", "act"]), ["out", "act"]);
+  // Ten hands later, that timeout has left the window.
+  await db.query("UPDATE clock_records SET hands = hands + $2 WHERE player = $1", [slow.id, SIT_OUT_WINDOW_HANDS]);
+  assert.deepEqual(await playSlow(casino, clock, ids, slow.id, ["out", "act", "out", "act"]), ["out", "act", "out", "act"]);
+  assert.ok(await casino.tableOf(slow.id), "two in the window, none in a row: still seated");
+  const rec = (await db.query<{ in_a_row: number; strikes: number[] }>("SELECT in_a_row, strikes FROM clock_records WHERE player = $1", [slow.id])).rows[0]!;
+  assert.deepEqual([rec.in_a_row, rec.strikes.length], [0, 2]);
+  assert.equal(removed.length, 0);
+  // A third within ten hands.
+  assert.deepEqual(await playSlow(casino, clock, ids, slow.id, ["out"]), ["out"]);
+  assert.equal(await casino.tableOf(slow.id), undefined);
+  assert.equal(removed[0]?.data.reason, "timeouts");
+});
+
+test("rejoining after a sit-out: seated and dealt in again, and the watch page no longer says why", async (t) => {
+  const db = await testDb(t);
+  const { casino, clock, wakes } = room(db);
+  const ps = [await player(casino, 1), await player(casino, 2), await player(casino, 3)];
+  for (const p of ps) await casino.join(p.id, {});
+  const slow = ps.find((p) => p.id === wakes[wakes.length - 1]!.player)!;
+  const ids = ps.map((p) => p.id);
+  await playSlow(casino, clock, ids, slow.id, ["out", "out"]);
+  assert.equal(await casino.tableOf(slow.id), undefined);
+  // Not dealt in while sat out: hands go on without them.
+  await playOut(casino, ids);
+  assert.equal((await casino.state(slow.id)).table, null);
+
+  const back = await casino.join(slow.id, {});
+  assert.equal(back.already, false);
+  assert.equal((await casino.watchAway(slow.id)).satOut, null);
+  // Dealt into a hand again, and plays it in time.
+  assert.deepEqual(await playSlow(casino, clock, ids, slow.id, ["act"]), ["act"]);
+  assert.ok(await casino.tableOf(slow.id));
+});
+
+test("no strike when the turn's wake didn't go out: taken off the table as before, and it doesn't count against them", async (t) => {
+  const db = await testDb(t);
+  let down = "";
+  const { casino, clock, wakes, removed } = room(db, undefined, (to) => to.player !== down);
+  const ps = [await player(casino, 1), await player(casino, 2), await player(casino, 3)];
+  for (const p of ps) await casino.join(p.id, {});
+  const day = casino.today();
+  const ids = ps.map((p) => p.id);
+  // A strike first (their wakes went out), so another in a row would sit them out.
+  const slow = ps.find((p) => p.id === wakes[wakes.length - 1]!.player)!;
+  assert.deepEqual(await playSlow(casino, clock, ids, slow.id, ["out"]), ["out"]);
+  await casino.takeNotice(slow.id);
+  // Their subscription dies: their next turn's wake doesn't go out.
+  down = slow.id;
+  assert.deepEqual(await playSlow(casino, clock, ids, slow.id, ["out"]), ["out"]);
+  assert.equal(await casino.tableOf(slow.id), undefined, "taken off the table");
+  assert.equal(removed.length, 1);
+  assert.equal(removed[0]!.data.reason, "unreachable");
+  assert.match(removed[0]!.text, /we couldn't wake you for that move, so you were taken off the table; it doesn't count against you/);
+  const rec = (await db.query<{ in_a_row: number; strikes: number[]; sat_out: string }>("SELECT in_a_row, strikes, sat_out FROM clock_records WHERE player = $1", [slow.id])).rows[0]!;
+  assert.deepEqual([rec.in_a_row, rec.strikes.length, rec.sat_out], [1, 1, "unreachable"], "the record holds only the first timeout");
+  assert.match(watchAwayMessage(await casino.watchAway(slow.id)), /couldn't be delivered to it.*doesn't count against it/);
+  assert.equal((await money(db, day)).total, 3 * DAILY_BANKROLL);
+});
+
+test("a wake that throws is a wake that didn't go out", async (t) => {
+  const db = await testDb(t);
+  const clock = { t: Date.parse("2026-10-21T12:00:00Z") };
+  const wakes: string[] = [];
+  const removed: { data: Record<string, unknown> }[] = [];
+  const notify: Notifier = {
+    turn: async (to) => {
+      wakes.push(to.player);
+      throw new Error("core unreachable");
+    },
+    result: async () => {},
+    handResult: async () => {},
+    removed: async (_to, e) => {
+      removed.push(e);
+    },
+    endSubscription: async () => {},
+  };
+  const casino = new Casino({ db, notify, now: () => clock.t, handPauseMs: 0, log: () => {} });
+  const a = await player(casino, 1);
+  const b = await player(casino, 2);
+  await casino.join(a.id, {});
+  await casino.join(b.id, {});
+  const slow = wakes[wakes.length - 1]!;
+  clock.t += CLOCK_MS + 1000;
+  await casino.tick();
+  assert.equal(await casino.tableOf(slow), undefined);
+  assert.equal(removed[0]?.data.reason, "unreachable");
+  assert.equal((await db.query("SELECT 1 FROM clock_records WHERE player = $1 AND strikes <> '{}'", [slow])).rowCount, 0);
 });
 
 test("ending a removed player's subscription is tried again if it fails", async (t) => {
@@ -283,8 +478,10 @@ test("ending a removed player's subscription is tried again if it fails", async 
   const ended: string[] = [];
   let failures = 1;
   const notify: Notifier = {
+    // Wakes that don't go out: the first timeout takes the player off the table.
     turn: async (to) => {
       wakes.push(to);
+      return false;
     },
     result: async () => {},
     handResult: async () => {},
@@ -300,7 +497,7 @@ test("ending a removed player's subscription is tried again if it fails", async 
   const c = await player(casino, 3);
   for (const p of [a, b, c]) await casino.join(p.id, {});
   const slow = [a, b, c].find((p) => p.id === wakes[wakes.length - 1]!.player)!;
-  clock.t += 61_000;
+  clock.t += 31_000;
   await casino.tick();
   clock.t += REMOVED_SUBSCRIPTION_GRACE_MS + 1000;
   await casino.tick(); // fails once
@@ -311,15 +508,16 @@ test("ending a removed player's subscription is tried again if it fails", async 
   assert.equal((await db.query("SELECT 1 FROM subscription_ends WHERE subscription = $1", [slow.subscription])).rowCount, 0);
 });
 
-test("heads-up, a timeout leaves one player and no hand starts; joining again before the grace period keeps the turn subscription", async (t) => {
+test("heads-up, a player taken off the table leaves one player and no hand starts; joining again before the grace period keeps the turn subscription", async (t) => {
   const db = await testDb(t);
-  const { casino, clock, wakes, ended } = room(db);
+  // Wakes that don't go out: the first timeout takes the player off the table.
+  const { casino, clock, wakes, ended } = room(db, undefined, () => false);
   const a = await player(casino, 1);
   const b = await player(casino, 2);
   await casino.join(a.id, {});
   await casino.join(b.id, {});
   const slow = wakes[wakes.length - 1]!.player === a.id ? a : b;
-  clock.t += 61_000;
+  clock.t += 31_000;
   await casino.tick();
   assert.equal((await casino.state(slow.id)).table, null);
   // Heads-up after removal: one player left, no hand starts.
@@ -491,6 +689,7 @@ test("a turn's wake carries the player's own view, only to their own subscriptio
     turn: async (to, event) => {
       const state = (await db.query<{ state: TableState }>("SELECT state FROM tables")).rows[0]!.state;
       seen.push({ to, event, holes: new Map(state.hand!.players.map((p) => [p.player, [...p.hole]])), toAct: engineToAct(state)!.player });
+      return true;
     },
     result: async (table, event) => {
       published.push({ topic: table, data: event.data });
@@ -614,12 +813,23 @@ test("each hand's result goes to the table's native seats only; a bridged player
 
 test("Hold'em's events address a turn by seat: the bridged player's subscription, a native seat's native subscriptions", async () => {
   const sent: { event: string; args: unknown; data: unknown; opts: unknown }[] = [];
-  const fake = (event: string) => ({ emit: async (args: unknown, data: unknown, opts: unknown) => void sent.push({ event, args, data, opts }), end: async () => true }) as unknown as WakeEvent;
+  // A subscription ending in "_gone" has ended: the emit matches nothing.
+  const fake = (event: string) =>
+    ({
+      emit: async (args: unknown, data: unknown, opts: { to?: { subscription?: string } }) => {
+        sent.push({ event, args, data, opts });
+        const gone = opts.to?.subscription?.endsWith("_gone");
+        return { matched: gone ? 0 : 1, duplicate: false, unmatched: [], ended: gone ? [opts.to] : [] };
+      },
+      end: async () => true,
+    }) as unknown as WakeEvent;
   const events: HoldemEvents = { turn: fake("holdem.turn"), handResult: fake("holdem.hand_result") };
   const notify = holdemNotifier(() => events);
   const ev = { id: "e1", text: "x", data: { type: "turn" } };
-  await notify.turn({ player: "p1", guest: "g1", table: "t1", subscription: "es_1" }, ev);
-  await notify.turn({ player: "p2", guest: "g2", table: "t1", subscription: null }, ev);
+  assert.equal(await notify.turn({ player: "p1", guest: "g1", table: "t1", subscription: "es_1" }, ev), true, "delivered");
+  assert.equal(await notify.turn({ player: "p2", guest: "g2", table: "t1", subscription: null }, ev), true);
+  assert.equal(await notify.turn({ player: "p3", guest: "g3", table: "t1", subscription: "es_gone" }, ev), false, "an ended subscription: not delivered");
+  sent.pop();
   await notify.removed({ player: "p1", guest: "g1", table: "t1", subscription: "es_1" }, ev);
   await notify.removed({ player: "p2", guest: "g2", table: "t1", subscription: null }, ev);
   await notify.handResult({ player: "p2", guest: "g2", table: "t1", subscription: null }, { ...ev, id: "h:end:p2" });

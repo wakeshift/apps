@@ -7,15 +7,20 @@
 //
 //   - Registration (RFC 7591) keeps nothing: the client ID is signed (with a
 //     key derived from HOLDEM_SECRET) and carries the client's name and
-//     redirect URIs, and its secret is an HMAC of the ID. Every redirect URI
-//     must be one allowedRedirect accepts, checked again at every authorize,
-//     which also needs an exact match. Limited per address.
+//     redirect URIs, and its secret is an HMAC of the ID. A client that
+//     registers as public (token_endpoint_auth_method "none", as Codex does:
+//     it keeps no client secret, so it refreshes with its client ID alone)
+//     gets no secret, and its ID says so. Every redirect URI must be one
+//     allowedRedirect accepts, checked again at every authorize, which also
+//     needs an exact match. Limited per address.
 //   - Authorize needs response_type=code and a PKCE S256 challenge. The
 //     click makes the session and a code for it (a minute, once), and
 //     redirects back with it, the state and the issuer (RFC 9207). Limited
 //     per address.
 //   - The token endpoint needs the client's secret (client_secret_post or
-//     client_secret_basic). The code exchange makes the sign-in's workspace
+//     client_secret_basic); a public client sends its client ID alone, and
+//     PKCE (always required) and single-use refresh tokens bound to its ID
+//     stand in for it. The code exchange makes the sign-in's workspace
 //     in Wakeshift. The access token is signed and lasts an hour; the
 //     refresh token is random, kept as a hash, lasts 30 days and is replaced
 //     at every refresh (the one it replaced stops working).
@@ -66,6 +71,7 @@ interface Client {
   n: string; // name
   r: string[]; // redirect URIs
   x: string; // each registration its own client
+  p?: boolean; // public: registered with token_endpoint_auth_method "none", so it has no secret
 }
 
 interface Access {
@@ -180,7 +186,7 @@ export class SignIn {
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
-      token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic"],
+      token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic", "none"],
       authorization_response_iss_parameter_supported: true,
     });
   }
@@ -238,7 +244,7 @@ export class SignIn {
 
   private async register(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!this.registers.allow(this.addr(req), this.now())) throw new OAuthFailure(429, "slow_down", "too many registrations from this address; try again later");
-    let inp: { client_name?: unknown; redirect_uris?: unknown };
+    let inp: { client_name?: unknown; redirect_uris?: unknown; token_endpoint_auth_method?: unknown };
     try {
       inp = (JSON.parse(await readBody(req, 16 << 10)) ?? {}) as typeof inp;
     } catch {
@@ -251,15 +257,17 @@ export class SignIn {
     for (const u of uris as string[]) if (!allowedRedirect(u)) throw new OAuthFailure(400, "invalid_redirect_uri", BAD_REDIRECT);
     let name = typeof inp.client_name === "string" ? inp.client_name.trim() : "";
     if (!name || Buffer.byteLength(name) > 80) name = "MCP client";
-    const id = this.seal("client", { n: name, r: uris, x: random(16) } satisfies Client);
+    // A client asking to be public is one; any other method gets a secret
+    // (client_secret_post, or Basic: both work).
+    const pub = inp.token_endpoint_auth_method === "none";
+    const id = this.seal("client", { n: name, r: uris, x: random(16), ...(pub ? { p: true } : {}) } satisfies Client);
     res.setHeader("Cache-Control", "no-store");
     writeJSON(res, 201, {
       client_id: id,
-      client_secret: this.clientSecret(id),
-      client_secret_expires_at: 0,
+      ...(pub ? {} : { client_secret: this.clientSecret(id), client_secret_expires_at: 0 }),
       client_name: name,
       redirect_uris: uris,
-      token_endpoint_auth_method: "client_secret_post",
+      token_endpoint_auth_method: pub ? "none" : "client_secret_post",
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
     });
@@ -325,8 +333,12 @@ export class SignIn {
       id = f.get("client_id") ?? "";
       secret = f.get("client_secret") ?? "";
     }
-    const client = id && secret ? this.unseal<Client>("client", id) : null;
+    const client = id ? this.unseal<Client>("client", id) : null;
     if (!client || typeof client.n !== "string") return null;
+    // A public client has no secret to send. An empty client_secret carries
+    // none, and some clients send one, so it counts as not sent.
+    if (client.p === true) return basic || secret ? null : { id, client };
+    if (!secret) return null;
     const want = Buffer.from(this.clientSecret(id));
     const got = Buffer.from(secret);
     if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
@@ -419,11 +431,13 @@ export class SignIn {
   }
 
   /**
-   * Forgets a session: its players' watch links, Wakeshift's forgetUser, then
-   * its row. Throws if Wakeshift can't (tried again on the next pass).
+   * Forgets a session: its players' watch links, its joins (joins.ts),
+   * Wakeshift's forgetUser, then its row. Throws if Wakeshift can't (tried
+   * again on the next pass).
    */
   private async end(id: string): Promise<void> {
     await this.o.db.query(`DELETE FROM watch_links WHERE player IN (SELECT id FROM players WHERE guest = $1)`, [id]);
+    await this.o.db.query(`DELETE FROM joins WHERE player = $1`, [id]);
     await this.o.wake.forgetUser(id);
     await this.o.db.query(`DELETE FROM player_sessions WHERE id = $1`, [id]);
   }

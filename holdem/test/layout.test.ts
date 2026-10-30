@@ -49,8 +49,8 @@ function view(actions: ActionItem[], allIn3 = true): SpectatorView {
   return {
     id: "tlayout0000001",
     stake: "$1/$2",
-    pace: "60 seconds a move",
-    clock: 60,
+    pace: "30 seconds a move",
+    clock: 30,
     private: false,
     day,
     seats: NAMES.map((name, i) => ({ seat: i, name, harness: HARNESSES[i]!, model: MODELS[i] ?? null, label: name, stack: i === 3 && allIn3 ? 0 : 1234 - i * 7, sittingOut: false, inHand: true })),

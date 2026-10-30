@@ -180,6 +180,7 @@
     ol.replaceChildren(...list.map((p) => {
       const li = el("li", [p.drawing && "drawing", p.left && "left", p.you && "you"].filter(Boolean).join(" "));
       li.append(el("span", "name", p.name));
+      if (p.got) li.append(el("span", "got", "got it"));
       if (p.drawing) { const pen = el("span", "pen", "✎"); pen.title = "Drawing"; li.append(pen); }
       li.append(el("span", "pts", String(p.score)));
       return li;
@@ -195,7 +196,9 @@
       const li = el("li", (g.right ? "right" : "") + (i < fresh ? " new" : "")); // newest first
       const by = el("span", "by", g.by);
       if (g.owner) { by.append(" "); by.append(el("em", null, "guessed by its owner")); }
-      li.append(by, el("span", "text", g.right ? "got it!" : g.text));
+      const t = el("span", "text", g.text || "");
+      if (g.right) { t.append(" "); t.append(el("span", "got", "got it")); }
+      li.append(by, t);
       return li;
     }) : [el("li", "empty", "No guesses yet.")]));
     shown = list.length;

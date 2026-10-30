@@ -41,6 +41,8 @@ import (
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
+
+	"github.com/wakeshift/wakeshift-go/internal/mcpevents/event"
 )
 
 // EventDef describes an event type: A is a subscription's arguments, P an
@@ -511,7 +513,7 @@ func (e *DefinedEvent[A, P]) PublishURL(ctx context.Context, args A, opts ...Emi
 
 // definition is the event type as events/list describes it.
 func (t *eventType) definition() map[string]any {
-	d := map[string]any{"name": t.name, "description": t.description, "delivery": []string{"webhook"},
+	d := map[string]any{"name": t.name, "description": t.description, "delivery": event.Delivery,
 		"inputSchema": json.RawMessage(t.args), "payloadSchema": json.RawMessage(t.payload)}
 	if t.title != "" {
 		d["title"] = t.title

@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"reflect"
 	"strings"
 	"time"
 
@@ -27,6 +28,13 @@ const rollbackTimeout = 15 * time.Second
 
 func (at *Attachment) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (res mcp.Result, err error) {
+		if method == "tools/list" {
+			res, err = next(ctx, method, req)
+			if list, ok := res.(*mcp.ListToolsResult); ok && err == nil {
+				amendTools(list)
+			}
+			return res, err
+		}
 		call, ok := req.(*mcp.CallToolRequest)
 		if !ok || method != "tools/call" || call.Params == nil {
 			return next(ctx, method, req)
@@ -116,16 +124,113 @@ func (at *Attachment) addBlock(ctx context.Context, s *callScope, out *mcp.CallT
 	}
 	text := strings.TrimSpace(add.Text)
 	mergeBlock(out, text, add.Trailer, add.Meta)
-	if text == "" {
+	if text == "" || out.StructuredContent == nil {
 		return nil
 	}
-	if s.wakeOutput {
-		setWakeshift(out, text)
-	} else if out.StructuredContent != nil {
-		at.warnOnce("output:"+s.call.Tool, "appkit: a wrapped tool returns structured content without appkit.WakeOutput: hosts that show only structuredContent won't see how this conversation is woken",
+	if !setWakeshift(out, text) {
+		at.warnOnce("output:"+s.call.Tool, "appkit: a wrapped tool returns structuredContent that isn't an object, so it can't carry how this conversation is woken: hosts that show only structuredContent won't see it",
 			"tool", s.call.Tool)
 	}
 	return nil
+}
+
+// amendTools gives each wrapped tool's object output schema in a tools/list
+// answer an optional wakeshift string (withWakeshiftField), which its
+// structured results carry, so a client that checks structuredContent
+// against the schema takes it. A wrapped tool is one whose input takes
+// WakeArgs (Events requires it: takesWakeArgs), and its structured
+// results are the only ones that get the field. The tools are the
+// server's own, so each one changed is a copy.
+func amendTools(list *mcp.ListToolsResult) {
+	for i, t := range list.Tools {
+		if t == nil || t.OutputSchema == nil || !takesWakeArgs(t.InputSchema) {
+			continue
+		}
+		schema, ok := schemaMap(t.OutputSchema)
+		if !ok {
+			continue
+		}
+		if amended, changed := withWakeshiftField(schema); changed {
+			c := *t
+			c.OutputSchema = amended
+			list.Tools[i] = &c
+		}
+	}
+}
+
+// takesWakeArgs reports whether an input schema has WakeArgs' three
+// properties, each with WakeArgs' own description: the input of a tool
+// Events wraps (an embedded WakeArgs), not one that happens to use the
+// names.
+func takesWakeArgs(input any) bool {
+	m, ok := schemaMap(input)
+	if !ok {
+		return false
+	}
+	props, _ := m["properties"].(map[string]any)
+	for name, description := range wakeArgDescriptions {
+		p, _ := props[name].(map[string]any)
+		if p == nil || p["description"] != description {
+			return false
+		}
+	}
+	return true
+}
+
+// wakeArgDescriptions is WakeArgs' properties' descriptions, by JSON name.
+var wakeArgDescriptions = func() map[string]string {
+	out := map[string]string{}
+	t := reflect.TypeFor[WakeArgs]()
+	for i := range t.NumField() {
+		f := t.Field(i)
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		out[name] = f.Tag.Get("jsonschema")
+	}
+	return out
+}()
+
+// schemaMap is a schema (a *jsonschema.Schema, raw JSON or a map) as a
+// fresh map.
+func schemaMap(schema any) (map[string]any, bool) {
+	b, err := json.Marshal(schema)
+	if err != nil {
+		return nil, false
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil || m == nil {
+		return nil, false
+	}
+	return m, true
+}
+
+// withWakeshiftField is an object schema with an optional wakeshift string
+// added, and whether it changed: anything else, or a schema that already
+// names it, is left as it was. The shared fixture wrapped-block.json
+// (output_schemas) pins it.
+func withWakeshiftField(schema map[string]any) (map[string]any, bool) {
+	if schema["type"] != "object" {
+		return schema, false
+	}
+	props := map[string]any{}
+	if p, has := schema["properties"]; has && p != nil {
+		m, ok := p.(map[string]any)
+		if !ok {
+			return schema, false
+		}
+		if _, named := m[WakeshiftField]; named {
+			return schema, false
+		}
+		for k, v := range m {
+			props[k] = v
+		}
+	}
+	props[WakeshiftField] = map[string]any{"type": "string", "description": wakeshiftFieldDescription}
+	out := make(map[string]any, len(schema)+1)
+	for k, v := range schema {
+		out[k] = v
+	}
+	out["properties"] = props
+	return out, true
 }
 
 // mergeBlock adds Wakeshift's text to res as a block after the app's
@@ -182,27 +287,31 @@ func takeTrailer(res *mcp.CallToolResult) string {
 	return line
 }
 
-// setWakeshift sets a structured result's wakeshift field (WakeOutput).
-func setWakeshift(res *mcp.CallToolResult, text string) {
+// setWakeshift sets a structured result's wakeshift field to the block's
+// text, reporting false if structuredContent isn't an object.
+func setWakeshift(res *mcp.CallToolResult, text string) bool {
 	var b []byte
 	switch v := res.StructuredContent.(type) {
 	case nil:
-		return
+		return false
 	case json.RawMessage:
 		b = v
 	default:
 		var err error
 		if b, err = json.Marshal(v); err != nil {
-			return
+			return false
 		}
 	}
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(b, &obj) != nil || obj == nil {
-		return
+		return false
 	}
 	t, _ := json.Marshal(text)
-	obj["wakeshift"] = t
-	if nb, err := json.Marshal(obj); err == nil {
-		res.StructuredContent = json.RawMessage(nb)
+	obj[WakeshiftField] = t
+	nb, err := json.Marshal(obj)
+	if err != nil {
+		return false
 	}
+	res.StructuredContent = json.RawMessage(nb)
+	return true
 }

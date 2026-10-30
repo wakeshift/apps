@@ -29,6 +29,10 @@ const (
 	sweepAfter  = 2 * time.Second  // times (tries² + 1): about 5 minutes over an entry's 8 tries
 	tickHold    = 55 * time.Second // how long POST /tick keeps ticking
 	tickLease   = 30 * time.Second // a claimed step another instance may take over after
+	// lastWordWait is how long a game that's over waits for its last
+	// entries to be sent before its room closes anyway (about an entry's
+	// 8 tries).
+	lastWordWait = 5 * time.Minute
 )
 
 // Run ticks until ctx is done.
@@ -118,9 +122,9 @@ func (s *Server) tickers() int {
 
 // forget deletes what players have had lately (recent) once they haven't
 // played for recentFor, rooms' archive IDs unused for archiveRoomIdle
-// (archive.go), reasoning older than a day (thinking.go), and players'
-// sessions idle for SessionIdle (oauth.go). It runs about once an hour per
-// instance.
+// (archive.go), reasoning older than a day (thinking.go), joins older than
+// joinsFor (joins.go), and players' sessions idle for SessionIdle
+// (oauth.go). It runs about once an hour per instance.
 func (s *Server) forget(ctx context.Context, now time.Time) error {
 	last := s.forgotAt.Load()
 	if last != 0 && now.Sub(time.Unix(0, last)) < time.Hour || !s.forgotAt.CompareAndSwap(last, now.UnixNano()) {
@@ -133,6 +137,9 @@ func (s *Server) forget(ctx context.Context, now time.Time) error {
 		return err
 	}
 	if err := s.forgetThinking(ctx, now); err != nil {
+		return err
+	}
+	if err := s.forgetJoins(ctx, now); err != nil {
 		return err
 	}
 	if n, err := s.expireSessions(ctx, now, 500); err != nil {
@@ -179,13 +186,27 @@ func (s *Server) advance(ctx context.Context, id string, away map[string]bool) (
 		}
 		return true, tx.Commit(ctx)
 	case endedAt != nil: // over: close its room, retrying until it's closed
-		if _, err := tx.Exec(ctx, `UPDATE games SET closed_at = coalesce(closed_at, $2), deadline_at = $3 WHERE id = $1`, id, tx.Now, tx.Now.Add(closeRetry)); err != nil {
+		var closedAt time.Time
+		if err := tx.QueryRow(ctx, `UPDATE games SET closed_at = coalesce(closed_at, $2), deadline_at = $3 WHERE id = $1 RETURNING closed_at`,
+			id, tx.Now, tx.Now.Add(closeRetry)).Scan(&closedAt); err != nil {
 			return false, err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return false, err
 		}
-		s.deliver(ctx, id) // the last word first
+		// The last word first: the players hear how the game ended before
+		// their subscriptions do. While it can't be sent, the room waits
+		// (closeRetry), for up to lastWordWait.
+		s.deliver(ctx, id)
+		if s.now().Sub(closedAt) < lastWordWait {
+			var unsent bool
+			if err := s.Store.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM room_log WHERE game_id = $1 AND posted_at IS NULL AND tries < 8)`, id).Scan(&unsent); err != nil {
+				return true, err
+			}
+			if unsent {
+				return true, nil
+			}
+		}
 		if err := s.closeRoom(ctx, id); err != nil {
 			return true, err
 		}

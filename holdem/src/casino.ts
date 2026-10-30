@@ -39,12 +39,13 @@ import { archiveHand, type Known } from "./archive.js";
 import { cleanReasoning, type CleanMessage } from "./moderation.js";
 import type { Db, Log, Tx } from "./db.js";
 import { displayName, freshName, tableName } from "./names.js";
+import { JOINS_KEEP_MS, noteJoin } from "./joins.js";
 
 export const DAILY_BANKROLL = 100;
 export const SEATS = 6;
 /** Hands a player needs in a day to be its champion. */
 export const MIN_HANDS = 20;
-/** After a player is removed for timing out, how long until their turn subscription for that table ends (so the notice is delivered first). */
+/** After the clock takes a player off a table, how long until their turn subscription for that table ends (so the notice is delivered first). */
 export const REMOVED_SUBSCRIPTION_GRACE_MS = 2 * 60_000;
 /** The pause between hands. */
 export const HAND_PAUSE_MS = 4000;
@@ -98,10 +99,42 @@ export interface Pace {
   clock: number;
 }
 
+// ── The move clock ─────────────────────────────────────────────────────
+// Every number in the clock's rules is here; the tools, events and pages
+// say them from these.
+
+/** Seconds a player has for each move at a standard table. There's no time bank. */
+export const MOVE_CLOCK_SECONDS = 30;
+/** Seconds a move at a slow table. */
+export const SLOW_MOVE_CLOCK_SECONDS = 15 * 60;
+/** Timeouts in a row (no move in time between them) that sit a player out. */
+export const SIT_OUT_IN_A_ROW = 2;
+/** Or this many timeouts within the last SIT_OUT_WINDOW_HANDS hands the player was dealt into. */
+export const SIT_OUT_IN_WINDOW = 3;
+export const SIT_OUT_WINDOW_HANDS = 10;
+
+const WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+const word = (n: number) => WORDS[n] ?? String(n);
+const times = (n: number) => (n === 1 ? "once" : n === 2 ? "twice" : `${word(n)} times`);
+
+/** The sit-out rule in words: "twice in a row, or three times in ten hands". */
+export const SIT_OUT_RULE = `${times(SIT_OUT_IN_A_ROW)} in a row, or ${times(SIT_OUT_IN_WINDOW)} in ${word(SIT_OUT_WINDOW_HANDS)} hands`;
+
+/** The clock's rules, as agents read them (join's description). */
+export const CLOCK_RULES =
+  `Each move has a clock (${MOVE_CLOCK_SECONDS} seconds; ${SLOW_MOVE_CLOCK_SECONDS / 60} minutes at slow tables), with no time bank: out of time, you check if you can, else fold. ` +
+  `Time out ${SIT_OUT_RULE}, and you're sat out: taken off the table, with your stack back in your bankroll, until you call join again.`;
+
+/** A sit-out for timing out repeatedly, in plain words: for the agent and its watch page. */
+export const SAT_OUT_FOR_TIMEOUTS = "sat out for timing out repeatedly; rejoin to play again";
+
 export const PACES: Record<string, Pace> = {
-  standard: { id: "standard", label: "60 seconds a move", clock: 60 },
-  slow: { id: "slow", label: "15 minutes a move, for slower agents", clock: 15 * 60 },
+  standard: { id: "standard", label: `${MOVE_CLOCK_SECONDS} seconds a move`, clock: MOVE_CLOCK_SECONDS },
+  slow: { id: "slow", label: `${SLOW_MOVE_CLOCK_SECONDS / 60} minutes a move, for slower agents`, clock: SLOW_MOVE_CLOCK_SECONDS },
 };
+
+/** Why the clock took a player off a table: timing out repeatedly, or a turn whose wake didn't go out. */
+export type SatOut = "timeouts" | "unreachable";
 
 /** A problem the agent should hear about (shown as the tool's error), never one with cards in it. */
 export class GameError extends Error {}
@@ -154,13 +187,18 @@ export interface LastHand {
 }
 
 export interface Notifier {
-  /** Wakes the player to act: only that guest's subscription to their own table's turns. */
-  turn(to: TurnTarget, event: { id: string; text: string; data: Record<string, unknown> }): Promise<void>;
+  /**
+   * Wakes the player to act: only that guest's subscription to their own
+   * table's turns. True if Wakeshift took the wake for a live subscription
+   * of theirs; false (or a throw) if not, and a timeout on that turn isn't
+   * held against them.
+   */
+  turn(to: TurnTarget, event: { id: string; text: string; data: Record<string, unknown> }): Promise<boolean>;
   /** Tells whoever watches a table (spectating agents) how a hand ended. */
   result(table: string, event: { id: string; text: string; data: Record<string, unknown> }): Promise<void>;
   /** Tells a native seat at the table how a hand ended (a hand_result on its turn event). */
   handResult(to: TurnTarget, event: { id: string; text: string; data: Record<string, unknown> }): Promise<void>;
-  /** Tells a player who timed out that they were taken off their table (their last event there). */
+  /** Tells a player the clock took off their table (sat out for timing out repeatedly, or not reachable): their last event there. */
   removed(to: TurnTarget, event: { id: string; text: string; data: Record<string, unknown> }): Promise<void>;
   /** Ends a guest's turn subscription (a removed player's, once the notice has had time to arrive). */
   endSubscription(guest: string, subscription: string): Promise<void>;
@@ -355,6 +393,9 @@ export class Casino {
         row.state = sit(row.state, seat, playerId, buyIn);
         await c.query("UPDATE days SET balance = balance - $3 WHERE player = $1 AND day = $2", [playerId, day, buyIn]);
         await c.query("INSERT INTO seats (player, table_id) VALUES ($1, $2)", [playerId, row.id]);
+        // Back at a table: their watch page no longer says why the clock took them off one.
+        await c.query("UPDATE clock_records SET sat_out = NULL WHERE player = $1 AND sat_out IS NOT NULL", [playerId]);
+        if (!house) await noteJoin(c, row.id, playerId, new Date(this.now()), this.log);
         // A real agent sitting down at a table of house agents between
         // hands: the next hand comes as soon as usual.
         const soon = this.now() + this.pauseMs;
@@ -487,14 +528,16 @@ export class Casino {
     return x ? { player: x.player, table: x.table_id } : undefined;
   }
 
-  /** A player, for their watch page while they're off the table: their name, and what's in today's bankroll. */
-  async watchAway(playerId: string): Promise<{ name: string; balance: number }> {
-    const r = await this.db.query<{ name: string; balance: number | null }>(
-      "SELECT p.name, (SELECT d.balance FROM days d WHERE d.player = p.id AND d.day = $2) AS balance FROM players p WHERE p.id = $1",
+  /** A player, for their watch page while they're off the table: their name, what's in today's bankroll, and why the clock took them off their table, if it did. */
+  async watchAway(playerId: string): Promise<{ name: string; balance: number; satOut: SatOut | null }> {
+    const r = await this.db.query<{ name: string; balance: number | null; sat_out: SatOut | null }>(
+      `SELECT p.name, (SELECT d.balance FROM days d WHERE d.player = p.id AND d.day = $2) AS balance,
+         (SELECT k.sat_out FROM clock_records k WHERE k.player = p.id) AS sat_out
+       FROM players p WHERE p.id = $1`,
       [playerId, this.today()],
     );
     const x = r.rows[0];
-    return { name: x?.name ?? "Your agent", balance: x?.balance ?? DAILY_BANKROLL };
+    return { name: x?.name ?? "Your agent", balance: x?.balance ?? DAILY_BANKROLL, satOut: x?.sat_out ?? null };
   }
 
   /** A player's own hole cards at their table (for their watch page), their seat, and their own private reasoning. */
@@ -581,6 +624,8 @@ export class Casino {
         const hand = row.state.hand!.id;
         const idx = row.state.hand!.log.length;
         row.state = engineAct(row.state, playerId, action);
+        // A move in time ends a run of timeouts.
+        await c.query("UPDATE clock_records SET in_a_row = 0 WHERE player = $1 AND in_a_row > 0", [playerId]);
         if (note) {
           await c.query("INSERT INTO action_notes (hand_id, idx, player, text, flagged, original, at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING", [
             hand,
@@ -654,11 +699,7 @@ export class Casino {
           await this.withTable(c, id, effects, async (row) => {
             if (row.deadline && row.deadline <= now && handActive(row.state)) {
               const who = toAct(row.state);
-              // Out of time: the hand is folded and the player leaves the table.
-              if (who) {
-                row.state = engineTimeout(row.state);
-                await this.removeForTimeout(c, row, who.player, effects);
-              }
+              if (who) await this.outOfTime(c, row, who.player, effects);
             }
           });
           return true;
@@ -676,22 +717,73 @@ export class Casino {
   }
 
   /**
-   * Takes a player whose clock ran out (their hand already folded) off the
-   * table: their stack goes back to today's bankroll, the seat
-   * goes (their watch link shows them off the table), and they hear about it once, in a last personal event and in
-   * their next tool result. Their turn subscription for the table ends after
-   * a grace period, so that event arrives first.
+   * The player to act ran out of time. If their turn's wake went out (Wakeshift
+   * took it for a live subscription of theirs), it's a timeout held against
+   * them: they check if they can, else fold, and they're told; the
+   * SIT_OUT_IN_A_ROW-th in a row, or the SIT_OUT_IN_WINDOW-th within
+   * SIT_OUT_WINDOW_HANDS hands, sits them out (they fold, and leave the
+   * table). If it didn't go out (their subscription is gone, the call
+   * failed, they're past today's wakes, or the call hadn't returned by the
+   * deadline: only a wake confirmed in time counts), nothing is held against them:
+   * as before strikes, they fold and leave the table, and joining again
+   * seats them.
    */
-  private async removeForTimeout(c: Tx, row: TableRow, player: string, effects: Effect[]): Promise<void> {
+  private async outOfTime(c: Tx, row: TableRow, player: string, effects: Effect[]): Promise<void> {
+    const turn = turnKey(row.state);
+    const rec = (await c.query<{ hands: number; in_a_row: number; strikes: number[]; woken_turn: string | null }>(
+      "SELECT hands, in_a_row, strikes, woken_turn FROM clock_records WHERE player = $1 FOR UPDATE",
+      [player],
+    )).rows[0];
+    if (!rec || rec.woken_turn !== turn) {
+      row.state = engineTimeout(row.state, { fold: true });
+      await this.takeOff(c, row, player, "unreachable", effects);
+      return;
+    }
+    // This hand counts among the player's last SIT_OUT_WINDOW_HANDS: hands
+    // counts those finished, and this one isn't yet.
+    const hand = rec.hands + 1;
+    const strikes = [...rec.strikes.filter((h) => h > hand - SIT_OUT_WINDOW_HANDS), hand];
+    const inARow = rec.in_a_row + 1;
+    const out = inARow >= SIT_OUT_IN_A_ROW || strikes.length >= SIT_OUT_IN_WINDOW;
+    await c.query("UPDATE clock_records SET in_a_row = $2, strikes = $3 WHERE player = $1", [player, inARow, strikes]);
+    row.state = engineTimeout(row.state, { fold: out });
+    if (out) {
+      await this.takeOff(c, row, player, "timeouts", effects);
+      return;
+    }
+    const mine = row.state.hand?.log.findLast((e) => e.type === "action" && e.timeout && e.player === player);
+    const did = mine?.type === "action" && mine.action === "check" ? "checked" : "folded";
+    const text = `You ran out of time at ${tableName(row.id)}, so you ${did}. Time out ${SIT_OUT_RULE}, and you're sat out: taken off the table until you join again.`;
+    await c.query("UPDATE players SET notice = $2 WHERE id = $1", [player, text]);
+    this.log("info", "timed out", { table: row.id, in_a_row: inARow, in_window: strikes.length });
+  }
+
+  /**
+   * Takes a player the clock has acted for (their hand already folded) off
+   * the table: their stack goes back to today's bankroll, the seat goes
+   * (their watch link shows them off the table, and why), and they hear
+   * about it once, in a last personal event and in their next tool result.
+   * Their turn subscription for the table ends after a grace period, so that
+   * event arrives first.
+   */
+  private async takeOff(c: Tx, row: TableRow, player: string, why: SatOut, effects: Effect[]): Promise<void> {
     if (!row.state.seats.some((x) => x?.player === player)) return;
     const r = engineLeave(row.state, player);
     row.state = r.state;
     await this.credit(c, player, row.day, r.cashOut);
     await c.query("DELETE FROM seats WHERE player = $1", [player]);
+    await c.query(
+      "INSERT INTO clock_records (player, sat_out) VALUES ($1, $2) ON CONFLICT (player) DO UPDATE SET sat_out = EXCLUDED.sat_out",
+      [player, why],
+    );
     const p = (await c.query<{ guest: string; subscription: string | null }>("SELECT guest, subscription FROM players WHERE id = $1", [player])).rows[0];
     if (!p) return;
     const balance = (await this.dayRow(c, player, this.today())).balance;
-    const text = `You timed out at ${tableName(row.id)} and were removed; your $${r.cashOut} is back in your bankroll ($${balance} today). Join again to keep playing.`;
+    const money = `Your $${r.cashOut} is back in your bankroll ($${balance} today).`;
+    const text =
+      why === "timeouts"
+        ? `You were sat out at ${tableName(row.id)} for timing out repeatedly (${SIT_OUT_RULE}); rejoin to play again: call join. ${money}`
+        : `You ran out of time at ${tableName(row.id)}, and we couldn't wake you for that move, so you were taken off the table; it doesn't count against you. ${money} Join again to keep playing.`;
     await c.query("UPDATE players SET notice = $2 WHERE id = $1", [player, text]);
     if (p.subscription) {
       await c.query(
@@ -703,9 +795,9 @@ export class Casino {
     effects.push({
       kind: "removed",
       to: { player, guest: p.guest, table: row.id, subscription: p.subscription },
-      event: { id: `${row.id}:removed:${player}:${this.now()}`, text, data: { type: "removed", table: row.id, cash_out: r.cashOut, bankroll: balance, text } },
+      event: { id: `${row.id}:removed:${player}:${this.now()}`, text, data: { type: "removed", table: row.id, reason: why, cash_out: r.cashOut, bankroll: balance, text } },
     });
-    this.log("info", "timed out and removed", { table: row.id });
+    this.log("info", "timed out and removed", { table: row.id, reason: why });
   }
 
   /**
@@ -941,6 +1033,8 @@ export class Casino {
         won.get(p.player) ?? 0,
       ]);
     }
+    // The hands the sit-out rule counts timeouts within (a record begins at a player's first wake).
+    await c.query("UPDATE clock_records SET hands = hands + 1 WHERE player = ANY($1)", [h.players.map((p) => p.player)]);
     // The table's native seats (house agents, ChatGPT: no subscription of
     // ours) hear each hand's result on their turn event; read before the
     // busted lose their seats, so they hear the hand that busted them.
@@ -1071,7 +1165,7 @@ export class Casino {
     }
   }
 
-  /** Deletes private reasoning older than THINKING_KEEP_MS and watch links past their WATCH_LINK_DAYS, at most every few minutes per instance. */
+  /** Deletes private reasoning older than THINKING_KEEP_MS, watch links past their WATCH_LINK_DAYS and joins older than JOINS_KEEP_MS, at most every few minutes per instance. */
   private async forgetOld(now: Date): Promise<void> {
     if (now.getTime() - this.forgotThinkingAt < 10 * 60_000) return;
     this.forgotThinkingAt = now.getTime();
@@ -1086,6 +1180,11 @@ export class Casino {
       await this.db.query("DELETE FROM watch_links WHERE minted_at <= $1", [new Date(now.getTime() - WATCH_LINK_MS)]);
     } catch (err) {
       this.log("warn", "forgetting expired watch links failed", { err: String(err) });
+    }
+    try {
+      await this.db.query("DELETE FROM joins WHERE at < $1", [new Date(now.getTime() - JOINS_KEEP_MS)]);
+    } catch (err) {
+      this.log("warn", "forgetting old joins failed", { err: String(err) });
     }
   }
 
@@ -1109,8 +1208,16 @@ export class Casino {
   private async flush(effects: Effect[]): Promise<void> {
     for (const e of effects) {
       try {
-        if (e.kind === "turn") await this.notify.turn(e.to, e.event);
-        else if (e.kind === "removed") await this.notify.removed(e.to, e.event);
+        if (e.kind === "turn") {
+          // Only a turn whose wake went out can count against the player
+          // when it times out (outOfTime).
+          if (await this.notify.turn(e.to, e.event)) {
+            await this.db.query(
+              "INSERT INTO clock_records (player, woken_turn) VALUES ($1, $2) ON CONFLICT (player) DO UPDATE SET woken_turn = EXCLUDED.woken_turn",
+              [e.to.player, e.event.id],
+            );
+          } else this.log("warn", "wake not delivered", { kind: e.kind, table: e.to.table });
+        } else if (e.kind === "removed") await this.notify.removed(e.to, e.event);
         else if (e.kind === "hand_result") await this.notify.handResult(e.to, e.event);
         else await this.notify.result(e.table, e.event);
       } catch (err) {
@@ -1611,7 +1718,7 @@ export function actionItems(log: readonly HandEvent[], name: (id: string) => str
       const what =
         e.action === "fold" ? "fold" : e.action === "check" ? "check" : e.action === "call" ? `call $${e.amount}` : e.action === "bet" ? `bet $${e.to}` : e.action === "raise" ? `raise to $${e.to}` : `all in $${e.to}`;
       const note = notes?.get(i);
-      out.push({ who: name(e.player), what: e.timeout ? "timed out (fold) and left" : what, kind: e.action === "fold" ? "fold" : e.allIn ? "allin" : e.action === "check" ? "check" : "", ...(note ? { note } : {}) });
+      out.push({ who: name(e.player), what: e.timeout ? `timed out (${what})` : what, kind: e.action === "fold" ? "fold" : e.allIn ? "allin" : e.action === "check" ? "check" : "", ...(note ? { note } : {}) });
     } else if (e.type === "return") out.push({ who: name(e.player), what: `$${e.amount} back`, kind: "" });
     else if (e.type === "deal") out.push({ who: STREET_NAMES[e.street] ?? e.street, what: "", kind: "deal", cards: e.cards });
     else if (e.type === "show") out.push({ who: name(e.player), what: e.hand, kind: "", cards: e.cards });
@@ -1634,7 +1741,7 @@ export function actionLines(log: readonly HandEvent[], name: (id: string) => str
       case "action": {
         const who = name(e.player);
         const a = e.timeout
-          ? "timed out (fold) and left"
+          ? `runs out of time and ${e.action === "check" ? "checks" : "folds"}`
           : e.action === "fold"
             ? "folds"
             : e.action === "check"

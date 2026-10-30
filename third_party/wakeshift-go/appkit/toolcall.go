@@ -54,17 +54,24 @@ func (w WakeArgs) wakeArgs() WakeArgs { return w }
 // WakeArgs has the method, so nothing else satisfies it).
 type WakeInput interface{ wakeArgs() WakeArgs }
 
-// WakeOutput, embedded in a wrapped tool's output, opts the tool in to
-// carrying Wakeshift's block in its structured output too: Events sets
-// Wakeshift to the block's text (without a beacon line), for hosts that show
-// the model only structuredContent. The block stays in the content as well.
+// WakeshiftField is the structuredContent field a wrapped tool's
+// structured result carries Wakeshift's block in (without a beacon line),
+// for hosts that show the model only structuredContent. The three SDKs use
+// the same name.
+const WakeshiftField = "wakeshift"
+
+// wakeshiftFieldDescription is what the field is, in a wrapped tool's
+// output schema.
+const wakeshiftFieldDescription = "What Wakeshift adds for this conversation: how it's woken by this app's events"
+
+// WakeOutput, embedded in a wrapped tool's output, declares its wakeshift
+// field in the type itself. It's optional: every structured result of a
+// wrapped tool gets the block's text in wakeshift (Events), and tools/list
+// names it in the tool's output schema. The block stays in the content as
+// well.
 type WakeOutput struct {
 	Wakeshift string `json:"wakeshift,omitempty" jsonschema:"What Wakeshift adds for this conversation: how it's woken by this app's events"`
 }
-
-func (WakeOutput) wakeOutput() {}
-
-type wakeOutputter interface{ wakeOutput() }
 
 // Errors from a *ToolCall used where it can't be.
 var (
@@ -148,15 +155,15 @@ func Label(l string) SubscribeOption { return func(o *subscribeOptions) { o.labe
 // passed to it; register Attach after the server's own receiving
 // middleware, so its block stays last.
 //
-// In must embed WakeArgs. If Out embeds WakeOutput, its wakeshift field
-// carries the block's text too.
+// In must embed WakeArgs. A structured result (Out not any, or a
+// CallToolResult with StructuredContent an object) carries the block's text
+// in its wakeshift field too, and tools/list names the field in the tool's
+// output schema; embedding WakeOutput in Out declares it in the type.
 func Events[In WakeInput, Out any](at *Attachment, h func(context.Context, *ToolCall, In) (*mcp.CallToolResult, Out, error)) mcp.ToolHandlerFor[In, Out] {
 	if at == nil || h == nil {
 		panic("appkit.Events: needs the Attachment Attach returned, and a handler")
 	}
 	var zero Out
-	// A pointer Out's nil zero still has its type's methods.
-	_, wantsOutput := any(zero).(wakeOutputter)
 	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
 		s, _ := ctx.Value(scopeKey{}).(*callScope)
 		if s == nil || s.at != at || s.req != req {
@@ -165,7 +172,7 @@ func Events[In WakeInput, Out any](at *Attachment, h func(context.Context, *Tool
 		args := in.wakeArgs()
 		c, id := at.newToolCall(ctx, req, args)
 		c.s = s
-		s.begin(c, id, args, wantsOutput)
+		s.begin(c, id, args)
 		defer s.end()
 		return h(ctx, c, in)
 	}
@@ -235,9 +242,8 @@ type callScope struct {
 	at  *Attachment
 	req *mcp.CallToolRequest
 
-	wrapped    atomic.Bool
-	call       *ToolCall
-	wakeOutput bool
+	wrapped atomic.Bool
+	call    *ToolCall
 
 	busy  atomic.Int32 // requests to Wakeshift in flight
 	mu    sync.Mutex   // held for each request: one at a time per call
@@ -269,8 +275,8 @@ type nativeLine struct {
 // maxNativeLines is the most native lines Wakeshift takes for one call.
 const maxNativeLines = 20
 
-func (s *callScope) begin(c *ToolCall, id Identity, args WakeArgs, wakeOutput bool) {
-	s.call, s.identity, s.args, s.wakeOutput = c, id, args, wakeOutput
+func (s *callScope) begin(c *ToolCall, id Identity, args WakeArgs) {
+	s.call, s.identity, s.args = c, id, args
 	s.wrapped.Store(true)
 }
 

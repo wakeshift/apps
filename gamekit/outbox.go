@@ -49,6 +49,7 @@ type entry struct {
 	Mentions      []string
 	Recipients    []byte
 	RetryAt       *time.Time
+	Farewell      []byte // a removed seat's subscription, to end once this is sent (Tx.Remove)
 }
 
 // An entry's emits are tried 8 times (rate_limited doesn't count) before
@@ -71,7 +72,7 @@ func (s *Server) deliver(ctx context.Context, id string) {
 		if err != nil || tag.RowsAffected() == 0 {
 			return // nothing to send, or another instance is sending
 		}
-		rows, _ := s.Store.Pool.Query(ctx, `SELECT seq, at, from_handle, subject, text, mentions, recipients, retry_at FROM room_log
+		rows, _ := s.Store.Pool.Query(ctx, `SELECT seq, at, from_handle, subject, text, mentions, recipients, retry_at, farewell FROM room_log
 			WHERE game_id = $1 AND posted_at IS NULL AND tries < 8 ORDER BY seq LIMIT 50`, id)
 		entries, err := pgx.CollectRows(rows, pgx.RowToStructByPos[entry])
 		failed := err != nil
@@ -154,12 +155,20 @@ func (s *Server) sendEntry(ctx context.Context, game string, e entry) bool {
 				s.Store.Pool.Exec(ctx, `UPDATE room_log SET retry_at = date_trunc('minute', $3::timestamptz) + interval '1 minute' WHERE game_id = $1 AND seq = $2`,
 					game, e.Seq, s.now())
 			} else {
-				s.Store.Pool.Exec(ctx, `UPDATE room_log SET tries = tries + 1, retry_at = NULL WHERE game_id = $1 AND seq = $2`, game, e.Seq)
+				var tries int
+				s.Store.Pool.QueryRow(ctx, `UPDATE room_log SET tries = tries + 1, retry_at = NULL WHERE game_id = $1 AND seq = $2 RETURNING tries`, game, e.Seq).Scan(&tries)
+				if tries >= 8 {
+					s.farewellSent(ctx, e) // given up: the subscription ends anyway
+				}
 			}
 			return false
 		}
 		ended = append(ended, res.Ended...)
 	}
+	// A farewell's subscription ends before the entry is marked sent: if
+	// this stops between the two, the retry sends it again (the emits' IDs
+	// make that harmless) and ends it again (a no-op).
+	s.farewellSent(ctx, e)
 	if err := s.sent(ctx, game, e.Seq, ended); err != nil {
 		// Left until the lease runs out: clearing it would have the entry
 		// sent again at once (which the emits' IDs make harmless).
@@ -167,6 +176,19 @@ func (s *Server) sendEntry(ctx context.Context, game string, e entry) bool {
 		return false
 	}
 	return true
+}
+
+// farewellSent ends a removed seat's subscription once its farewell has
+// been sent (or given up): after the player was told why (Tx.Remove).
+func (s *Server) farewellSent(ctx context.Context, e entry) {
+	if len(e.Farewell) == 0 {
+		return
+	}
+	var f farewell
+	if err := json.Unmarshal(e.Farewell, &f); err != nil {
+		return
+	}
+	s.SeatEnded(ctx, f.User, f.Subscription)
 }
 
 func (s *Server) emit(ctx context.Context, args UpdateArgs, u Update, opts []appkit.EmitOption) (appkit.Emitted, error) {

@@ -3,7 +3,7 @@
 {{define "slack"}}<svg class="slack" viewBox="0 0 54 54" aria-hidden="true"><g transform="translate(27 27)"><g><rect x="-25" y="-9" width="22" height="9" rx="4.5" fill="#36C5F0"/><rect x="-12" y="-25" width="9" height="14" rx="4.5" fill="#36C5F0"/></g><g transform="rotate(90)"><rect x="-25" y="-9" width="22" height="9" rx="4.5" fill="#2EB67D"/><rect x="-12" y="-25" width="9" height="14" rx="4.5" fill="#2EB67D"/></g><g transform="rotate(180)"><rect x="-25" y="-9" width="22" height="9" rx="4.5" fill="#ECB22E"/><rect x="-12" y="-25" width="9" height="14" rx="4.5" fill="#ECB22E"/></g><g transform="rotate(270)"><rect x="-25" y="-9" width="22" height="9" rx="4.5" fill="#E01E5A"/><rect x="-12" y="-25" width="9" height="14" rx="4.5" fill="#E01E5A"/></g></g></svg>{{end}}
 
 {{/* Where people agree to Slackline's terms: by Add to Slack and Sign in with Slack, on the step that confirms where messages go, and by Connect on the consent page. The only copy of the sentence (apps/legal/agreement_test.go). */}}
-{{define "agree"}}By continuing, you agree to Slackline's <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.{{end}}
+{{define "agree"}}By continuing, you agree to Slackline's <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>. If your agent needs Wakeshift's connector, Wakeshift's <a href="https://wakeshift.ai/connector-terms">Connector Terms</a> and <a href="https://wakeshift.ai/privacy">Privacy Policy</a> apply to it.{{end}}
 
 {{define "disclosure"}}Messages that reach your agent are sent to Wakeshift, then to your own agent and its AI model provider (for example Anthropic or OpenAI). Slackline never uses Slack data to train AI models. Wakeshift deletes each message once your agent receives it.{{end}}
 
@@ -12,6 +12,11 @@
 <meta name="color-scheme" content="dark">
 <meta name="description" content="Talk to your own agents (Claude Code, Codex and others) from Slack.">
 <title>Slackline</title>
+{{.Preview}}
+<link rel="icon" href="{{asset "icon.svg"}}" type="image/svg+xml">
+<link rel="icon" href="{{asset "favicon-32.png"}}" type="image/png" sizes="32x32">
+<link rel="icon" href="{{asset "icon-192.png"}}" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="{{asset "apple-touch-icon.png"}}" sizes="180x180">
 <style>
 /* Slackline's look: slack.com's layout and type, with every color its RGB
    inverse (white → black, aubergine #4A154B → #B5EAB4, button purple

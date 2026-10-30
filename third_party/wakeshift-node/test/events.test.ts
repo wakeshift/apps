@@ -74,7 +74,7 @@ test("defineEvent makes the manifest's event type: a topic per required argument
   const turn = turnEvent(wake);
   assert.equal(turn.manifest.topic, "ev/game.turn/{table}");
   assert.equal(turn.manifest.personal, true);
-  assert.deepEqual(turn.definition().delivery, ["webhook"]);
+  assert.deepEqual(turn.definition().delivery, ["webhook", "poll"]);
 });
 
 test("a filter given without a topic gets the default's added, and the caller's object stays as it was", () => {
@@ -391,7 +391,7 @@ test("attach: a client that speaks MCP Events subscribes natively, and isn't off
   const list = (await client.request({ method: "events/list", params: {} } as any, z.any() as any)) as any;
   assert.equal(list.resultType, "complete");
   assert.equal(list.events[0].name, "chat.message");
-  assert.deepEqual(list.events[0].delivery, ["webhook"]);
+  assert.deepEqual(list.events[0].delivery, ["webhook", "poll"]);
 
   const delivery = { mode: "webhook", url: "https://chatgpt.example/cb", secret: "whsec_x" };
   const res = (await client.request(
@@ -445,7 +445,8 @@ test("attach: draft clients get the draft's codes", async () => {
   assert.equal(cb.code, -32027);
   assert.deepEqual(cb.data, { reason: "challenge" });
   assert.equal((await err("events/unsubscribe", { name: "chat.message", arguments: { channel: "eng" }, delivery })).code, -32023);
-  assert.equal((await err("events/poll", {})).code, -32026);
+  assert.equal((await err("events/stream", {})).code, -32026);
+  assert.equal((await err("events/poll", {})).code, -32023); // no such event
   await client.close();
 });
 
@@ -466,7 +467,7 @@ test("attach: a user at the subscription limit gets ResourceExhausted", async ()
     const err = e as McpError;
     assert.equal(err.code, -32025);
     assert.match(err.message, /20 live webhook subscriptions/);
-    assert.deepEqual(err.data, { kind: "subscriptions" });
+    assert.deepEqual(err.data, { limit: "subscriptions" });
   }
   await client.close();
 });
@@ -653,4 +654,93 @@ test("events/list, tools/list and the manifest match the Go SDK's for the same e
       .sort((a, b) => (a.name < b.name ? -1 : 1)),
   };
   assert.deepEqual(sorted(JSON.parse(JSON.stringify(got))), goldenFile("events-list.json"));
+});
+
+// test/mcp-events-wire.json: the wire format every SDK serves to a draft
+// client, both sides of each events/subscribe and events/poll.
+test("the MCP Events wire format is every SDK's (test/mcp-events-wire.json)", async () => {
+  const g = goldenFile("mcp-events-wire.json");
+  const spec = await import("../src/spec.js");
+  assert.equal(g.revision, spec.REVISION);
+  assert.deepEqual(g.delivery, [...spec.DELIVERY]);
+  for (const kind of ["subscribe", "poll"] as const) {
+    for (const c of g[kind]) {
+      const { wake, reqs } = fakeCore({ [`/events/${kind}`]: () => ({ json: c.core_response }) });
+      chatEvent(wake);
+      const server = new McpServer({ name: "chat", version: "1.0.0" });
+      wake.attach(server, { identify: () => ({ user: "u1" }) });
+      const client = await connect(server, "some-draft-client");
+      const res = await client.request({ method: `events/${kind}`, params: c.params } as any, z.any() as any);
+      assert.deepEqual(res, c.result, `${kind}: ${c.name}: result`);
+      const { call, dialect: _dialect, ...body } = reqs.find((q) => q.path === `/events/${kind}`)!.body;
+      assert.equal(call.user, "u1", `${kind}: ${c.name}: the caller`);
+      assert.deepEqual(body, c.core_request, `${kind}: ${c.name}: what Wakeshift is asked`);
+      await client.close();
+    }
+  }
+});
+
+// rawRpc sends JSON-RPC requests straight to server, with no initialize
+// first (protocol 2026-07-28 has none), returning each response.
+async function rawRpc(server: McpServer) {
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  const waiting = new Map<number, (m: any) => void>();
+  b.onmessage = (m: any) => waiting.get(m.id)?.(m);
+  await server.connect(a);
+  await b.start();
+  let n = 0;
+  return (method: string, params: any = {}) =>
+    new Promise<any>((resolve) => {
+      const id = ++n;
+      waiting.set(id, resolve);
+      b.send({ jsonrpc: "2.0", id, method, params } as any);
+    });
+}
+
+const as2026 = (caps: any = {}) => ({
+  _meta: {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": { name: "openclaw", version: "2026.10.10" },
+    "io.modelcontextprotocol/clientCapabilities": caps,
+  },
+});
+
+// Protocol 2026-07-28 on the MCP SDK 1.x (discover.ts): server/discover,
+// resultType on every 2026-07-28 result (and only those), the version the
+// transport accepts, and no subscribe_events for a request that declares the
+// extension itself.
+test("attach: a stateless server answers protocol 2026-07-28 clients", async () => {
+  const { wake } = fakeCore();
+  chatEvent(wake);
+  const server = new McpServer({ name: "chat", version: "1.0.0" }, { instructions: "A chat app." });
+  wake.attach(server, { identify: () => ({ user: "u1" }) });
+  server.registerTool("ping", { description: "Ping" }, async () => ({ content: [{ type: "text", text: "pong" }] }));
+  const rpc = await rawRpc(server);
+  const { SUPPORTED_PROTOCOL_VERSIONS } = await import("@modelcontextprotocol/sdk/types.js");
+  assert.ok(SUPPORTED_PROTOCOL_VERSIONS.includes("2026-07-28"), "the transport takes the version's header");
+
+  const d = (await rpc("server/discover", as2026())).result;
+  assert.equal(d.resultType, "complete");
+  assert.equal(d.supportedVersions[0], "2026-07-28");
+  assert.ok(d.supportedVersions.includes("2025-11-25"));
+  assert.deepEqual(d.capabilities.events, { listChanged: false });
+  assert.deepEqual(d.capabilities.extensions[EXTENSION_KEY], { listChanged: false });
+  assert.ok(d.capabilities.tools);
+  assert.deepEqual(d._meta["io.modelcontextprotocol/serverInfo"], { name: "chat", version: "1.0.0" });
+  assert.equal(d.instructions, "A chat app.");
+
+  const tools = (await rpc("tools/list", as2026())).result;
+  assert.equal(tools.resultType, "complete");
+  assert.ok(tools.tools.some((t: any) => t.name === "subscribe_events"), "a client that doesn't declare the extension is offered it");
+  const nativeTools = (await rpc("tools/list", as2026({ extensions: { [EXTENSION_KEY]: {} } }))).result;
+  assert.deepEqual(nativeTools.tools.map((t: any) => t.name).sort(), ["list_subscriptions", "ping", "unsubscribe_events"]);
+  const call = (await rpc("tools/call", { name: "ping", arguments: {}, ...as2026() })).result;
+  assert.equal(call.resultType, "complete");
+  assert.equal(call.content[0].text, "pong");
+  const list = (await rpc("events/list", as2026())).result;
+  assert.equal(list.resultType, "complete");
+
+  // An older client's results are as they were.
+  const old = (await rpc("tools/list", {})).result;
+  assert.equal(old.resultType, undefined);
 });

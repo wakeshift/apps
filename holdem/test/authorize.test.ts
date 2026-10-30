@@ -235,6 +235,54 @@ test("a forgotten player can't refresh", async (t) => {
   assert.deepEqual(core.forgot, [who.user]);
 });
 
+test("a public client (token_endpoint_auth_method none, as Codex registers) signs in and refreshes with its client ID alone", async (t) => {
+  // Codex keeps no client secret: its refresh sends only the client ID, which
+  // a confidential registration refused (invalid_client), so an hour after
+  // sign-in its tool calls failed until the user signed in again.
+  const { base, signIn, clientId: confId, clientSecret: confSecret } = await start(t);
+  const r = await fetch(base + "/oauth/register", {
+    method: "POST",
+    body: JSON.stringify({ client_name: "Codex", redirect_uris: [REDIRECT], token_endpoint_auth_method: "none" }),
+  });
+  assert.equal(r.status, 201);
+  const reg = (await r.json()) as { client_id: string; client_secret?: string; token_endpoint_auth_method: string };
+  assert.equal(reg.client_secret, undefined);
+  assert.equal(reg.token_endpoint_auth_method, "none");
+  const id = reg.client_id;
+
+  // PKCE still binds the code.
+  const exchange = async (verifier = VERIFIER) =>
+    token(base, { grant_type: "authorization_code", code: await code(base, id), code_verifier: verifier, redirect_uri: REDIRECT, client_id: id });
+  assert.equal((await exchange("v-" + "c".repeat(44))).body.error, "invalid_grant");
+  const ok = await exchange();
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  const who = signIn.verify(ok.body.access_token!)!;
+  assert.equal(who.agent, "codex");
+
+  const refresh = (rt: string, extra: Record<string, string> = {}) => token(base, { grant_type: "refresh_token", refresh_token: rt, client_id: id, ...extra });
+  const r2 = await refresh(ok.body.refresh_token!);
+  assert.equal(r2.status, 200, JSON.stringify(r2.body));
+  assert.equal(signIn.verify(r2.body.access_token!)!.user, who.user);
+  assert.equal((await refresh(ok.body.refresh_token!)).body.error, "invalid_grant", "the replaced refresh token");
+
+  // It has no secret to send: one sent, or Basic, is refused.
+  const withSecret = await refresh(r2.body.refresh_token!, { client_secret: "x" });
+  assert.equal(withSecret.status, 401);
+  assert.equal(withSecret.body.error, "invalid_client");
+  const basic = await fetch(base + "/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: "Basic " + Buffer.from(encodeURIComponent(id) + ":").toString("base64") },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: r2.body.refresh_token! }).toString(),
+  });
+  assert.equal(basic.status, 401);
+
+  // A client registered with a secret still needs it.
+  const conf = await token(base, { grant_type: "authorization_code", code: await code(base, confId), code_verifier: VERIFIER, redirect_uri: REDIRECT, client_id: confId, client_secret: confSecret });
+  const noSecret = await token(base, { grant_type: "refresh_token", refresh_token: conf.body.refresh_token!, client_id: confId });
+  assert.equal(noSecret.status, 401);
+  assert.equal(noSecret.body.error, "invalid_client");
+});
+
 test("registration takes only loopback, an app's own scheme, or a known web agent's callback", async (t) => {
   // The cases the games on the Go kit run too.
   const cases = JSON.parse(readFileSync(new URL("../../../gamekit/testdata/redirects.json", import.meta.url), "utf8")) as { accept: string[]; reject: string[] };

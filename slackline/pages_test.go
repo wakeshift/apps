@@ -28,6 +28,10 @@ func TestPagesRender(t *testing.T) {
 		if n := strings.Count(html, "<style>"); n != 1 {
 			t.Errorf("%s: %d stylesheets", page, n)
 		}
+		// Only the landing page (rendered by the app) has a link preview.
+		if strings.Contains(html, "og:image") || !strings.Contains(html, `<link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=`) {
+			t.Errorf("%s: a link preview, or no touch icon", page)
+		}
 	}
 }
 

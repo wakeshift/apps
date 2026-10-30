@@ -25,6 +25,7 @@ import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/proto
 import { getObjectShape, isZ4Schema, normalizeObjectSchema, safeParseAsync, type AnySchema, type SchemaInput, type ShapeOutput, type ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import { WakeshiftError } from "./errors.js";
 import { EXTENSION_KEY, dialectOf } from "./spec.js";
+import { takesTasks } from "./discover.js";
 import type { Identity, WakeEvent } from "./events.js";
 import { packCall, type Call, type Duration, type Recognized, type Wakeshift } from "./wakeshift.js";
 
@@ -46,6 +47,8 @@ const HARNESS_DESCRIPTION =
 const CONVERSATION_DESCRIPTION =
   "Your own ID for this conversation, if your program gives you one. Cursor and Grok Bot: the output of `printenv CURSOR_CONVERSATION_ID`. Codex and Antigravity send it automatically; others leave it empty";
 const WAKESHIFT_OUTPUT_DESCRIPTION = "What Wakeshift adds for this conversation: how it's woken by this app's events";
+/** @internal Wakeshift's three arguments' descriptions, for a tool whose input schema is written out (the wait tool, tasks.ts). */
+export const WAKE_ARG_DESCRIPTIONS = { session_key: SESSION_KEY_DESCRIPTION, harness: HARNESS_DESCRIPTION, conversation_id: CONVERSATION_DESCRIPTION } as const;
 
 const wakeInputs = {
   [SESSION_ARG]: z.string().optional().describe(SESSION_KEY_DESCRIPTION),
@@ -236,15 +239,36 @@ function takeTrailer(content: Content[]): string {
   return line;
 }
 
+/** The structuredContent field a wrapped tool's structured result carries Wakeshift's block in (the same in every SDK). */
+export const WAKESHIFT_FIELD = "wakeshift";
+
+/**
+ * @internal An object output schema (JSON Schema, as tools/list gives it)
+ * with an optional wakeshift string added, as a copy, so a client that
+ * checks structuredContent against it takes the block. Anything else, or a
+ * schema that already names it, comes back as it was.
+ * test/wrapped-block.json (output_schemas) pins it.
+ */
+export function withWakeshiftField(schema: unknown): unknown {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
+  const s = schema as Record<string, unknown>;
+  if (s.type !== "object") return schema;
+  const props = s.properties;
+  if (props !== undefined && (!props || typeof props !== "object" || Array.isArray(props))) return schema;
+  if (props && WAKESHIFT_FIELD in (props as object)) return schema;
+  return { ...s, properties: { ...((props as object) ?? {}), [WAKESHIFT_FIELD]: { type: "string", description: WAKESHIFT_OUTPUT_DESCRIPTION } } };
+}
+
 /**
  * @internal Adds the call's block to a wrapped handler's result: Wakeshift's
  * text as a block after the app's content, then a text-carried beacon last,
  * and _meta; a string result stays one text block. A result that already
- * carries a beacon keeps it, last, and gets no second one. With wakeOutput,
- * structuredContent's wakeshift is the block's text. test/wrapped-block.json
- * is the shape, shared with the other SDKs.
+ * carries a beacon keeps it, last, and gets no second one. A structured
+ * result (structuredContent an object) gets the block's text in its
+ * wakeshift field too. test/wrapped-block.json is the shape, shared with
+ * the other SDKs.
  */
-export function mergeBlock(result: WrappedResult, add: CallAddition, wakeOutput: boolean): CallToolResult {
+export function mergeBlock(result: WrappedResult, add: CallAddition): CallToolResult {
   const isString = typeof result === "string";
   const base: CallToolResult = isString ? { content: [{ type: "text", text: result }] } : result;
   const out: CallToolResult = { ...base, content: [...(base.content ?? [])] };
@@ -263,8 +287,8 @@ export function mergeBlock(result: WrappedResult, add: CallAddition, wakeOutput:
     const texts = out.content.map((c) => (c.type === "text" ? c.text : "")).filter((t) => t !== "");
     out.content = [{ type: "text", text: texts.join("\n\n") }];
   }
-  if (text && wakeOutput && out.structuredContent && typeof out.structuredContent === "object" && !Array.isArray(out.structuredContent)) {
-    out.structuredContent = { ...out.structuredContent, wakeshift: text };
+  if (text && out.structuredContent && typeof out.structuredContent === "object" && !Array.isArray(out.structuredContent)) {
+    out.structuredContent = { ...out.structuredContent, [WAKESHIFT_FIELD]: text };
   }
   return out;
 }
@@ -395,6 +419,7 @@ class CallScope implements ToolCall {
       harness: this.args.harness,
       conversation: this.args.conversation,
       tool: this.tool,
+      tasks: takesTasks(meta, this.extra),
     });
   }
 
@@ -620,8 +645,10 @@ export class Attached {
 
   /**
    * shape plus an optional wakeshift string, for a wrapped tool's
-   * outputSchema: the wrapper sets it to the block's text (without the
-   * beacon line), for hosts that show the model only structuredContent.
+   * outputSchema. Optional: every structured result of a wrapped tool gets
+   * the block's text (without the beacon line) in wakeshift, for hosts that
+   * show the model only structuredContent, and tools/list names it in the
+   * tool's output schema; this declares it in your own schema and types.
    * The block stays in the content too.
    */
   output<S extends ZodRawShapeCompat>(shape: S): S & WakeOutputShape {
@@ -656,7 +683,6 @@ export class Attached {
     if (tool === undefined || (tool && (tool.handler ?? tool.callback) !== cb)) {
       throw new Error(`wakeshift: attached.events("${name}", …) isn't the tool named ${name} on the server passed to attach: register it with the same name, on that server`);
     }
-    let wakeOutput = false;
     let outputSchema: AnySchema | undefined;
     if (tool) {
       const shape = getObjectShape(normalizeObjectSchema(tool.inputSchema));
@@ -664,8 +690,6 @@ export class Attached {
         throw new Error(`wakeshift: the tool ${name} doesn't take Wakeshift's arguments: make its inputSchema with attached.inputs(…)`);
       }
       outputSchema = tool.outputSchema;
-      const out = getObjectShape(normalizeObjectSchema(outputSchema));
-      wakeOutput = !!out && "wakeshift" in out;
     } else {
       this.at.warnOnce("internals", "wakeshift: this MCP SDK keeps its tools where Wakeshift can't read them, so wrapped tools' registration and output aren't checked");
     }
@@ -704,14 +728,50 @@ export class Attached {
       this.at.wake.warn(`wakeshift: Wakeshift's block for a result of ${name} failed, so the call's subscriptions were rolled back: ${detailOf(err)}`);
       return { isError: true, content: [{ type: "text", text: `Wakeshift couldn't finish setting up this conversation's wakes (${detailOf(err)}). Try again.` }] };
     }
-    const out = mergeBlock(result, add ?? {}, wakeOutput);
-    if ((add?.text ?? "").trim() && !wakeOutput && out.structuredContent) {
+    const out = mergeBlock(result, add ?? {});
+    if (out.structuredContent && WAKESHIFT_FIELD in out.structuredContent && !(await validOutput(outputSchema, out))) {
+      // A schema that refuses fields it doesn't name (a strict object):
+      // MCP would refuse the result, so it goes without the field.
+      const { [WAKESHIFT_FIELD]: _dropped, ...own } = out.structuredContent;
+      out.structuredContent = own;
       this.at.warnOnce(
         "output:" + name,
-        `wakeshift: the wrapped tool ${name} returns structuredContent without attached.output: hosts that show only structuredContent won't see how this conversation is woken`,
+        `wakeshift: the wrapped tool ${name}'s outputSchema refuses a wakeshift field, so hosts that show only structuredContent won't see how this conversation is woken: make it with attached.output`,
       );
     }
     return out;
+  }
+
+  /**
+   * @internal Wraps the server's tools/list handler so each wrapped tool's
+   * object output schema names wakeshift (withWakeshiftField). McpServer
+   * sets the handler when the first tool is registered, perhaps after
+   * attach, so a later set is wrapped too (as tasks.ts does).
+   */
+  amendToolsList(): void {
+    type Handler = (request: any, extra: any) => Promise<any>;
+    const handlers = (this.at.server.server as any)._requestHandlers as Map<string, Handler> | undefined;
+    if (!(handlers instanceof Map)) return; // a future SDK: schemas stay as registered
+    const wrap =
+      (h: Handler): Handler =>
+      async (request, extra) => {
+        const out = await h(request, extra);
+        if (out && Array.isArray(out.tools)) this.amendTools(out.tools);
+        return out;
+      };
+    const h = handlers.get("tools/list");
+    if (h) Map.prototype.set.call(handlers, "tools/list", wrap(h));
+    const set = handlers.set.bind(handlers);
+    handlers.set = (method: string, h: Handler) => set(method, method === "tools/list" ? wrap(h) : h);
+  }
+
+  private amendTools(tools: unknown[]): void {
+    for (let i = 0; i < tools.length; i++) {
+      const t = tools[i] as { name?: unknown; outputSchema?: unknown } | null;
+      if (!t || typeof t !== "object" || typeof t.name !== "string" || !this.wrapped.has(t.name) || !t.outputSchema) continue;
+      const schema = withWakeshiftField(t.outputSchema);
+      if (schema !== t.outputSchema) tools[i] = { ...t, outputSchema: schema };
+    }
   }
 }
 

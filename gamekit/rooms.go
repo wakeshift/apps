@@ -2,6 +2,7 @@ package gamekit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -223,6 +224,7 @@ func (s *Server) join(ctx context.Context, j joining, seat func(tx *Tx, g State,
 				taken = false
 				return nil
 			}
+			noteJoin(tx, r.game, p)
 			return seat(tx, g, p)
 		})
 		if err != nil {
@@ -330,6 +332,67 @@ func (s *Server) SeatEnded(ctx context.Context, user, subscription string) {
 	if _, err := s.events().End(ctx, user, subscription); err != nil && !appkit.IsCode(err, "not_found") && !appkit.IsCode(err, "unknown_workspace") {
 		slog.Warn(s.Name+": ending a seat's subscription", "err", err)
 	}
+}
+
+// farewell is a removed seat's subscription, as room_log.farewell keeps
+// it: ended once its entry is sent (sendEntry). Empty for a seat with
+// nothing to end (a native one).
+type farewell struct {
+	User         string `json:"user,omitempty"`
+	Subscription string `json:"subscription,omitempty"`
+}
+
+// Remove takes a seated player (by key) out of game, in the move's
+// transaction: its seat goes, and once the move commits its seat's
+// subscription is ended (SeatEnded). If text is set, the player is told it
+// first: a last update to it alone (mentioning it), sent before the
+// subscription ends, so it hears why it was taken out and how to play again
+// rather than only Wakeshift's notice that the subscription ended. A player
+// that left at its own request (its tool result says so) needs no text. A
+// seat that nothing delivers to (its subscription ended) is just removed.
+// It reports whether there was a seat.
+func (tx *Tx) Remove(game, player, subject, text string) (bool, error) {
+	var handle *string
+	var sub, user, agentUser string
+	var native bool
+	err := tx.QueryRow(tx.Ctx, `DELETE FROM seats WHERE game_id = $1 AND player = $2 RETURNING handle, subscription, subscriber, native, workspace || '/' || agent`,
+		game, player).Scan(&handle, &sub, &user, &native, &agentUser)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if handle == nil {
+		return true, nil // a reservation: nobody to tell, nothing subscribed yet
+	}
+	var to halves
+	var end farewell
+	switch {
+	case native:
+		// A client that subscribes itself keeps its subscription (it reaches
+		// every game it's seated in): it's only told.
+		to.M = []recipient{{Native: agentUser}}
+	case sub != "":
+		to.M = []recipient{{User: user, Subscription: sub}}
+		end = farewell{User: user, Subscription: sub}
+	default:
+		return true, nil // nothing delivers to it, and nothing to end
+	}
+	if text == "" {
+		if end.Subscription == "" {
+			return true, nil
+		}
+		to = halves{} // the subscription's end alone, in its turn
+	}
+	toJSON, _ := json.Marshal(to)
+	endJSON, _ := json.Marshal(end)
+	if _, err := tx.Exec(tx.Ctx, `INSERT INTO room_log (game_id, at, subject, text, mentions, recipients, farewell) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		game, tx.Now, subject, text, []string{*handle}, toJSON, endJSON); err != nil {
+		return false, err
+	}
+	tx.said = true
+	return true, nil
 }
 
 // Away lists the game's players that nothing is delivering to now: ones

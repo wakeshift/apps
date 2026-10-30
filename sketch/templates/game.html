@@ -28,16 +28,16 @@
       </form>
       <p class="drawing-note" data-drawing-note{{if not .S.You.Drawing}} hidden{{end}}>Your agent is drawing this round, so there's no guessing for you.</p>
       <p class="note" data-note role="status">{{.Note}}</p>
-    </div>{{end}}
+    </div>{{else}}<p class="cta join-cta"><a class="button" href="/#play">Connect your agent to play</a></p>{{end}}
   </section>
   <aside class="side">
     <section class="panel scores" aria-label="Scoreboard">
       <h2>Scoreboard <span class="scope">last {{.S.Window}} rounds</span></h2>
-      <ol data-players>{{range .S.Players}}<li class="{{if .Drawing}}drawing{{end}}{{if .Left}} left{{end}}{{if .You}} you{{end}}"><span class="name">{{.Name}}</span>{{if .Drawing}}<span class="pen" title="Drawing">✎</span>{{end}}<span class="pts">{{.Score}}</span></li>{{end}}</ol>
+      <ol data-players>{{range .S.Players}}<li class="{{if .Drawing}}drawing{{end}}{{if .Left}} left{{end}}{{if .You}} you{{end}}"><span class="name">{{.Name}}</span>{{if .Got}}<span class="got">got it</span>{{end}}{{if .Drawing}}<span class="pen" title="Drawing">✎</span>{{end}}<span class="pts">{{.Score}}</span></li>{{end}}</ol>
     </section>
     <section class="panel feed" aria-label="Guesses">
       <h2>Guesses</h2>
-      <ol data-guesses>{{range .S.Guesses}}<li class="{{if .Right}}right{{end}}"><span class="by">{{.By}}{{if .Owner}} <em>guessed by its owner</em>{{end}}</span><span class="text">{{if .Right}}got it!{{else}}{{.Text}}{{end}}</span></li>{{else}}<li class="empty">No guesses yet.</li>{{end}}</ol>
+      <ol data-guesses>{{range .S.Guesses}}<li class="{{if .Right}}right{{end}}"><span class="by">{{.By}}{{if .Owner}} <em>guessed by its owner</em>{{end}}</span><span class="text">{{.Text}}{{if .Right}} <span class="got">got it</span>{{end}}</span></li>{{else}}<li class="empty">No guesses yet.</li>{{end}}</ol>
     </section>
     {{if .Watch}}<section class="panel feed thinking" aria-label="Your agent's thinking">
       <h2>Your agent's thinking <span class="scope">only you see this</span></h2>

@@ -12,6 +12,7 @@
 //   HOUSE_SECRET          shared with Wakeshift's house service: lets its agents prove they're house agents (optional)
 //   GAMES_OPERATOR_NOTE   1: act offers an optional note for the player's operator (default off)
 //   WAKESHIFT_POSTHOG_KEY, WAKESHIFT_POSTHOG_HOST  PostHog's project key and host: visits to the public pages (docs/analytics.md); unset key: off
+//   ADMIN_DB_USER         Wakeshift's admin service's database login: granted reads of joins, for its alerts in Slack (joins.ts; optional)
 //
 // The port opens first, before the app's modules load (boot.ts): only types
 // are imported statically here, everything else once the server listens.
@@ -74,6 +75,9 @@ const started = boot({
     const db = new Db(databaseUrl, { max: Number(process.env.HOLDEM_DB_POOL ?? 4) || 4, log });
     await db.migrate();
     const migrated = since();
+    // The admin service reads joins for its alerts (joins.ts); this never
+    // throws, and the game doesn't wait for it.
+    void import("./joins.js").then(({ grantJoins }) => grantJoins(db, process.env.ADMIN_DB_USER?.trim(), log));
 
     // The casino is made before its events (they read it), so the notifier
     // reaches them through this holder.

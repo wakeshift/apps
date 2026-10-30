@@ -379,7 +379,7 @@ func (s *Server) Find(ctx context.Context, workspace, agent, session string) (ga
 // Log is what's been said in a game's room (the last logLimit entries).
 func (s *Server) Log(ctx context.Context, id string) ([]Entry, error) {
 	rows, _ := s.Store.Pool.Query(ctx, `SELECT at, from_handle, text FROM (
-		SELECT seq, at, from_handle, text FROM room_log WHERE game_id = $1 ORDER BY seq DESC LIMIT $2) l ORDER BY seq`, id, logLimit)
+		SELECT seq, at, from_handle, text FROM room_log WHERE game_id = $1 AND farewell IS NULL ORDER BY seq DESC LIMIT $2) l ORDER BY seq`, id, logLimit)
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Entry, error) {
 		var e Entry
 		err := r.Scan(&e.At, &e.From, &e.Text)

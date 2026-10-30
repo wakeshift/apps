@@ -148,7 +148,9 @@ func (a *App) Attach(srv *mcp.Server, opts AttachOptions) *Attachment {
 }
 
 // Wrap puts Wakeshift in front of the MCP endpoint's handler, after the
-// endpoint's authentication: today, MCP Events' methods and capability.
+// endpoint's authentication: MCP Events' methods and capability, and for
+// clients on protocol 2026-07-28 that take MCP tasks, Wakeshift's wait tool
+// and the tasks it answers with (tasks.go).
 func (at *Attachment) Wrap(next http.Handler) http.Handler {
 	a := at.app
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -176,12 +178,45 @@ func (at *Attachment) Wrap(next http.Handler) http.Handler {
 			return
 		}
 		switch req.Method {
-		case "server/discover", "initialize":
+		case "server/discover":
+			// The tasks extension too: the wait tool (tasks.go).
+			rewrite(next, w, r, func(b []byte) []byte { return addTasksCapability(addEventsCapability(b)) })
+			return
+		case "initialize":
 			withEventsCapability(next, w, r)
 			return
 		case "tools/list":
+			var p struct {
+				Meta map[string]any `json:"_meta"`
+			}
+			json.Unmarshal(req.Params, &p)
+			drop := ""
 			if nativeClient(r, req.Params) {
-				withoutTool(next, w, r, SubscribeEventsTool)
+				drop = SubscribeEventsTool
+			}
+			if wait := takesTasks(p.Meta, r.Header); drop != "" || wait {
+				rewrite(next, w, r, editTools(drop, wait))
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		case "tools/call":
+			var p struct {
+				Name string `json:"name"`
+			}
+			if json.Unmarshal(req.Params, &p) == nil && p.Name == WaitTool {
+				at.serveTask(w, r, req.ID, req.Method, req.Params)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		case "tasks/get", "tasks/cancel":
+			// Only Wakeshift's own tasks: any other ID goes on to the handler.
+			var p struct {
+				TaskID string `json:"taskId"`
+			}
+			if json.Unmarshal(req.Params, &p) == nil && strings.HasPrefix(p.TaskID, TaskIDPrefix) {
+				at.serveTask(w, r, req.ID, req.Method, req.Params)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -219,9 +254,9 @@ func (at *Attachment) Wrap(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if req.Method == "events/poll" || req.Method == "events/stream" {
-			rpcError(w, req.ID, codes.Unsupported, "only webhook delivery is offered", map[string]string{"feature": "deliveryMode",
-				"value": strings.TrimPrefix(req.Method, "events/")})
+		if req.Method == "events/stream" {
+			rpcError(w, req.ID, codes.Unsupported, "push delivery isn't offered: use a webhook (events/subscribe) or poll (events/poll)",
+				map[string]string{"feature": "deliveryMode", "value": strings.TrimPrefix(req.Method, "events/")})
 			return
 		}
 		t := a.eventByName(p.Name)
@@ -240,7 +275,9 @@ func (at *Attachment) Wrap(next http.Handler) http.Handler {
 			rpcError(w, req.ID, codes.Forbidden, eventTools["native_no_user"], nil)
 			return
 		}
-		if req.Method == "events/subscribe" && t.authorize != nil {
+		// A poll has no subscribe step (each poll can start the subscription),
+		// so every poll asks Authorize: access is checked again each time.
+		if (req.Method == "events/subscribe" || req.Method == "events/poll") && t.authorize != nil {
 			args, _ := json.Marshal(p.Arguments)
 			if !t.authorize(r.Context(), Subscriber{User: call.User, Client: call.Client, Native: true}, args) {
 				rpcError(w, req.ID, codes.Forbidden, fill("native_refused", "{event}", t.name), nil)
@@ -293,36 +330,8 @@ func nativeClient(r *http.Request, params json.RawMessage) bool {
 	return ok
 }
 
-// withoutTool serves a tools/list request with next, leaving out the tool
-// named name, in a JSON answer or an SSE one.
-func withoutTool(next http.Handler, w http.ResponseWriter, r *http.Request, name string) {
-	rewrite(next, w, r, func(b []byte) []byte {
-		var resp map[string]any
-		if json.Unmarshal(b, &resp) != nil {
-			return b
-		}
-		res, ok := resp["result"].(map[string]any)
-		if !ok {
-			return b
-		}
-		tools, _ := res["tools"].([]any)
-		kept := []any{}
-		for _, t := range tools {
-			if m, ok := t.(map[string]any); ok && m["name"] == name {
-				continue
-			}
-			kept = append(kept, t)
-		}
-		res["tools"] = kept
-		out, err := json.Marshal(resp)
-		if err != nil {
-			return b
-		}
-		return out
-	})
-}
-
-// eventParams are events/subscribe's and events/unsubscribe's params.
+// eventParams are events/subscribe's, events/unsubscribe's and
+// events/poll's params.
 type eventParams struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
@@ -331,16 +340,20 @@ type eventParams struct {
 		URL    string `json:"url"`
 		Secret string `json:"secret,omitempty"`
 	} `json:"delivery"`
-	TTLMs    *int64         `json:"ttlMs"`
-	Cursor   *string        `json:"cursor"`
-	MaxAgeMs *int64         `json:"maxAgeMs"`
-	Meta     map[string]any `json:"_meta"`
+	TTLMs     *int64         `json:"ttlMs"`
+	Cursor    *string        `json:"cursor"`
+	MaxAgeMs  *int64         `json:"maxAgeMs"`
+	MaxEvents *int           `json:"maxEvents"`
+	Meta      map[string]any `json:"_meta"`
 }
 
 // errNoSubscription is an events/unsubscribe that matched nothing.
 var errNoSubscription = errors.New("no subscription matches")
 
 func (a *App) eventCall(ctx context.Context, method string, call wireCall, dialect string, p eventParams) (map[string]any, error) {
+	if method == "events/poll" {
+		return a.pollCall(ctx, call, p)
+	}
 	body := map[string]any{"call": call, "name": p.Name, "arguments": p.Arguments, "delivery": p.Delivery, "dialect": dialect}
 	if method == "events/unsubscribe" {
 		var out struct {
@@ -383,6 +396,37 @@ func (a *App) eventCall(ctx context.Context, method string, call wireCall, diale
 	return res, nil
 }
 
+// pollCall passes an events/poll on to Wakeshift, which keeps the
+// subscription the first poll starts and the events waiting for it
+// (sdk/typescript/test/mcp-events-wire.json has both sides of each).
+func (a *App) pollCall(ctx context.Context, call wireCall, p eventParams) (map[string]any, error) {
+	body := map[string]any{"call": call, "name": p.Name, "arguments": p.Arguments}
+	if p.Cursor != nil {
+		body["cursor"] = *p.Cursor
+	}
+	if p.MaxAgeMs != nil {
+		body["max_age_ms"] = *p.MaxAgeMs
+	}
+	if p.MaxEvents != nil {
+		body["max_events"] = *p.MaxEvents
+	}
+	var out struct {
+		Events     []json.RawMessage `json:"events"`
+		Cursor     string            `json:"cursor"`
+		Truncated  bool              `json:"truncated"`
+		HasMore    bool              `json:"has_more"`
+		NextPollMs int64             `json:"next_poll_ms"`
+	}
+	if err := a.eventsCall(ctx, "POST", "/api/apps/v1/events/poll", body, &out); err != nil {
+		return nil, err
+	}
+	if out.Events == nil {
+		out.Events = []json.RawMessage{}
+	}
+	return map[string]any{"resultType": event.ResultType, "events": out.Events, "cursor": out.Cursor, "truncated": out.Truncated,
+		"hasMore": out.HasMore, "nextPollMs": out.NextPollMs}, nil
+}
+
 // rpcInternal is JSON-RPC's internal error.
 const rpcInternal = -32603
 
@@ -405,7 +449,9 @@ func rpcErrorOf(err error, codes event.Codes) (code int, msg string, data any) {
 	case "unsupported":
 		return codes.Unsupported, e.Message, map[string]string{"feature": "deliveryMode"}
 	case "subscription_limit":
-		return codes.ResourceExhausted, e.Message, map[string]string{"kind": "subscriptions"}
+		return codes.ResourceExhausted, e.Message, map[string]string{"limit": "subscriptions"}
+	case "subscription_stopped":
+		return codes.Forbidden, e.Message, map[string]string{"reason": "stopped"}
 	case "bad_request", "bad_arguments":
 		return event.InvalidParams, e.Message, nil
 	case "unknown_session", "other_client", "unknown_conversation":

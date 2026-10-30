@@ -2,8 +2,11 @@
 // Wakeshift's own (internal/mcpevents/event/spec.go, which a test checks
 // these against): the draft is still moving.
 
-/** The draft these follow. */
-export const REVISION = "SEP-3415 (2026-10-16)";
+/** The draft these follow: SEP-3415 as revised on 2026-10-27. Where clients differ from it, Wakeshift follows the clients (webhook-id equals eventId; Mcp-Name checked only when present). */
+export const REVISION = "SEP-3415 (2026-10-27)";
+
+/** The delivery modes Wakeshift offers for every event type (events/list's delivery): a webhook, or polls. Push (events/stream) isn't offered. */
+export const DELIVERY: readonly string[] = ["webhook", "poll"];
 
 /** Capability keys: the draft's extension, and the top-level key ChatGPT reads. A server advertises both; only the extension is exported. */
 export const EXTENSION_KEY = "io.modelcontextprotocol/events";

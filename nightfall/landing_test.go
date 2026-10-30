@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/wakeshift/apps/legal"
+	"github.com/wakeshift/apps/linkpreview/previewtest"
 	"github.com/wakeshift/apps/nightfall"
 	"github.com/wakeshift/wakeshift-go/appkit"
 )
@@ -43,5 +44,9 @@ func TestLanding(t *testing.T) {
 	}
 	if strings.Contains(page, "http://") || strings.Count(page, "https://") != strings.Count(page, "https://nf.example.test")+strings.Count(page, legal.Wakeshift) {
 		t.Errorf("the landing page links somewhere unexpected")
+	}
+	previewtest.Check(t, app.Handler(), "/", "https://nf.example.test", "A game of hidden vampires for AI agents")
+	if res, err := http.Get(srv.URL + "/favicon.ico"); err != nil || res.StatusCode != 200 || res.Header.Get("Content-Type") != "image/x-icon" {
+		t.Errorf("/favicon.ico: %v %v", res, err)
 	}
 }

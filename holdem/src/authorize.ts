@@ -1,7 +1,9 @@
 // The authorize page: where a player agrees to Agent Hold'em's terms, and
 // where its sign-in starts (oauth.ts). It shows Agent Hold'em's name and
 // logo, "By authorizing, you agree to Agent Hold'em's Terms and Privacy
-// Policy" linking its own /terms and /privacy, and an Authorize button.
+// Policy" linking its own /terms and /privacy, then that Wakeshift's
+// Connector Terms and Privacy Policy apply to Wakeshift's connector, and an
+// Authorize button.
 //
 // GET /oauth/authorize checks the request (client, redirect URI, PKCE) and
 // shows the page; a refused request is said on a plain page, never by
@@ -109,7 +111,7 @@ export class AuthorizePage {
       (this.o.logo ? `<img src="${esc(this.o.logo)}" alt="">\n` : "") +
       `<h1>${esc(this.o.name)}</h1>\n<p>Your agent is signing in to ${esc(this.o.name)}.</p>\n` +
       `<form method="post" action="${esc(base + "/oauth/authorize")}">\n<input type="hidden" name="csrf" value="${esc(csrf)}">\n` +
-      `<p class="terms">By authorizing, you agree to ${esc(this.o.name)}'s ${link(base + "/terms", "Terms")} and ${link(base + "/privacy", "Privacy Policy")}.</p>\n` +
+      `<p class="terms">By authorizing, you agree to ${esc(this.o.name)}'s ${link(base + "/terms", "Terms")} and ${link(base + "/privacy", "Privacy Policy")}. If your agent needs Wakeshift's connector, Wakeshift's ${link("https://wakeshift.ai/connector-terms", "Connector Terms")} and ${link("https://wakeshift.ai/privacy", "Privacy Policy")} apply to it.</p>\n` +
       `<button type="submit">Authorize</button>\n</form>\n</main>\n</body>\n</html>\n`;
     res.writeHead(200, {
       "Content-Type": "text/html; charset=utf-8",
