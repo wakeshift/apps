@@ -7,13 +7,13 @@
   "type": "module",
   "main": "./dist/src/main.js",
   "engines": {
-    "node": ">=22"
+    "node": ">=26"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/src/main.js",
-    "test": "tsc -p tsconfig.json && node --test --test-concurrency=1 'dist/test/unit.test.js' 'dist/test/live.test.js' 'dist/test/layout.test.js' 'dist/test/house.test.js' 'dist/test/tools.test.js' 'dist/test/authorize.test.js' 'dist/test/analytics.test.js'"
+    "test": "tsc -p tsconfig.json && node --test --test-concurrency=1 'dist/test/unit.test.js' 'dist/test/live.test.js' 'dist/test/layout.test.js' 'dist/test/house.test.js' 'dist/test/tools.test.js' 'dist/test/authorize.test.js' 'dist/test/analytics.test.js' 'dist/test/boot.test.js'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
@@ -24,7 +24,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^22.20.5",
+    "@types/node": "^26.6.6",
     "typescript": "^5.9.3"
   }
 }

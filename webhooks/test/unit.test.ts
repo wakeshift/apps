@@ -132,7 +132,7 @@ test("events: JSON, text and forms; never Authorization or cookies", () => {
   const big = JSON.stringify({ type: "x", items: Array.from({ length: 200 }, (_, i) => ({ i, name: "item " + i })) });
   const b = toEvent("abc", { method: "POST", headers: { "content-type": "application/json" }, body: Buffer.from(big) });
   assert.equal(b.text, "POST to your webhook");
-  assert.ok(b.preview!.startsWith(`{"type":"x","items":[{"i":0,`) && b.preview!.endsWith("…") && b.preview!.length === 161, b.preview);
+  assert.ok(b.preview!.startsWith(`{"type":"x","items":[{"i":0,`) && b.preview!.endsWith("…") && b.preview!.length === 161, String(b.preview));
   // Multi-byte text is cut at a character, never mid-way.
   const emoji = toEvent("abc", { method: "POST", headers: { "content-type": "text/plain" }, body: Buffer.from("🚀".repeat(400)) });
   assert.ok(!emoji.preview!.includes("�") && Buffer.from(emoji.preview!).toString() === emoji.preview);

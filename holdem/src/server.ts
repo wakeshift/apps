@@ -87,7 +87,16 @@ const CSP =
 /** The pages that count visits (analytics.ts): never sign-in, the legal pages or an API. */
 export const PUBLIC_PAGES = ["/", "/tables", "/tables/{id}", "/watch/{secret}", "/leaderboard"];
 
+/** Agent Hold'em's HTTP server: holdemHandler's requests, its live streams closed with the server. */
 export function holdemHttp(o: ServerOptions): Server {
+  const h = holdemHandler(o);
+  const server = createServer(h.handle);
+  server.on("close", h.close);
+  return server;
+}
+
+/** What holdemHttp serves, for a server that listens before the app is ready (main.ts); close ends its live streams. */
+export function holdemHandler(o: ServerOptions): { handle: (req: IncomingMessage, res: ServerResponse) => void; close: () => void } {
   const base = o.publicUrl.replace(/\/+$/, "");
   const now = o.now ?? Date.now;
   const signIn = o.signIn ?? new SignIn({ wake: o.wake, db: o.casino.db, secret: o.secret, base, proxyHops: o.proxyHops ?? 0, log: o.log, now });
@@ -268,15 +277,14 @@ export function holdemHttp(o: ServerOptions): Server {
     return png;
   }
 
-  const server = createServer((req, res) => {
+  const handle = (req: IncomingMessage, res: ServerResponse) => {
     route(req, res).catch((err) => {
       o.log("error", "request failed", { path: loggable((req.url ?? "").split("?")[0]!), err: String(err) });
       if (!res.headersSent) page(res, 500, messagePage("Something went wrong", "That didn't work on our side. Try again in a moment.", "500"));
       else res.end();
     });
-  });
-  server.on("close", () => live.close());
-  return server;
+  };
+  return { handle, close: () => live.close() };
 }
 
 /** What a player took from a hand's pots. */
