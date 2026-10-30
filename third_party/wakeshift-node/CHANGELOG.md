@@ -2,6 +2,18 @@
 
 What changed in each release of `@wakeshift/sdk`. 0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
+## 0.5.0 (2026-10-29)
+
+### Breaking
+
+- **`recognised` is now `recognized`.** The `Recognised` type is `Recognized`, and `Subscription.recognised` and `ToolCall.recognised` are `recognized`. Rename them where you read them: `sub.recognised.harness` becomes `sub.recognized.harness`. What they hold is unchanged.
+
+### Fixed
+
+- **Processes that share your key no longer remove each other's events.** In 0.4.0 every process sent the events it defined as your app's whole list. With an MCP server and a separate emitter on one key, whichever sent last removed the other's events, and the other's emits failed with `unknown_event` until it restarted. Now only your MCP server, the process that calls `attach`, sends the manifest automatically, and Wakeshift merges it into the one it has: it adds or updates your events and the settings you passed to `publishManifest`, and never removes an event or clears a setting. A process that doesn't call `attach` never sends it, whatever it calls (`emit`, `status`). `publishManifest` still replaces the whole manifest, and is how you remove an event.
+- A process with no events defined never sends the manifest. In 0.4.0 any app call from one (even a status read) sent an empty list, which removed every one of your app's events.
+- If an event is defined only in a process that emits it, define it in your MCP server too (or publish it with `publishManifest`): until a server sends it, emitting it fails with `unknown_event`.
+
 ## 0.4.0 (2026-10-29)
 
 Define your app's events (`defineEvent`), attach Wakeshift to your MCP server (`attach`), subscribe the conversations that call your own tools (`attached.events`, `call.subscribe`), and emit to them (`emit`). The rest of this section is what changed since 0.3.0.
@@ -108,7 +120,7 @@ Errors the SDK throws before asking Wakeshift have the status and code Wakeshift
 - Topics and their types: `wake.subscribe`, `wake.unsubscribe`, `wake.publish`, `wake.send`, `wake.topicStatus`, `wake.subscriptionStatus`, `wake.publishUrl(topic)`, `wake.closeTopic`, `wake.endSubscription`, `wake.unsubscribeUser`; `TopicSubscription`, `TopicEvent`, `TopicStatus`, `SubscriptionStatus`, `SendStatus`, `SubscribeOptions` and `Published` (its `matched` and `duplicate` are on `Emitted`). `PublishUrl.topic` goes with them.
 - `wake.args`: `attached.inputs(shape)`.
 - `wake.call`, `wake.callOf`, `Call`, `CallOptions`, `ClientInfoSource`, `applyAddition`, `wake.addition`, `wake.annotate` and `Addition`: the wrapper.
-- `UNKNOWN_CLIENT_WARNING`, which only the removed calls gave. A wrapped tool's `call.recognised` says what Wakeshift recognised the agent as.
+- `UNKNOWN_CLIENT_WARNING`, which only the removed calls gave. A wrapped tool's `call.recognised` says what Wakeshift recognized the agent as.
 - `AgentScope.groups`.
 - `AppKey.mode` and `wake.mode`, which meant nothing since current keys came in. Older keys (`wst_test_…`, `wst_live_…`) still work and name their app; a `wst_test_` key still needs a core.
 - `session` as a hidden alias of `session_key`: a wrapped tool takes `session_key` only, and a `session` argument is dropped like any other the tool doesn't take.
@@ -134,8 +146,8 @@ Kept: `defineEvent`, `emit`, `event.publishUrl`, `event.status` and `event.statu
 ### Changed
 
 - A wrapped tool's reply carries one Wakeshift block, however many subscriptions the call makes, and only what the conversation needs.
-- A subscription a failed tool call made is ended: a call that throws, returns `isError`, returns output its `outputSchema` refuses, or is cancelled.
-- A client that speaks MCP Events is told which event to subscribe to, or that it has: `call.native` is true, and `call.subscribe` makes nothing. The SDK recognises ChatGPT's `_meta["openai/session"]`, its client name or User-Agent, and clients that declare MCP Events, on stateless servers too; `attach`'s `events.native(extra)` names callers it can't recognise, such as your own agents.
+- A subscription a failed tool call made is ended: a call that throws, returns `isError`, returns output its `outputSchema` refuses, or is canceled.
+- A client that speaks MCP Events is told which event to subscribe to, or that it has: `call.native` is true, and `call.subscribe` makes nothing. The SDK recognizes ChatGPT's `_meta["openai/session"]`, its client name or User-Agent, and clients that declare MCP Events, on stateless servers too; `attach`'s `events.native(extra)` names callers it can't recognize, such as your own agents.
 - `session_key` is the one name for the session argument.
 - `attach`'s own tools (`subscribe_events`, `unsubscribe_events`, `list_subscriptions`) describe `session_key` to the agent as a wrapped tool does.
 - `list_subscriptions` is marked read-only and idempotent (`readOnlyHint: true`, `idempotentHint: true`), so clients that run read-only tools without asking (Codex, by default) don't ask before it.
@@ -148,7 +160,7 @@ Kept: `defineEvent`, `emit`, `event.publishUrl`, `event.status` and `event.statu
 - A successful answer that is a JSON array is a `bad_response` error, as it is in the Go and Python SDKs.
 - An error whose `code` isn't a string has an empty code, and one whose `message` is empty takes the body's start, else the status's text.
 - An MCP Events client gets "Wakeshift couldn't be reached" when the core is unreachable, without the core's address; a `callback_failed` error's `data.reason` is always a string.
-- Google's 500 page is recognised by "Server Error" within the body's first 4 KB.
+- Google's 500 page is recognized by "Server Error" within the body's first 4 KB.
 - A failed tool call's rollback no longer ends a subscription that another call on the same conversation renewed in the meantime (two calls in parallel, or a second call while the first was still running). The call that renewed it told the agent it would be woken; now it is.
 - `defineEvent` no longer adds the default route's filter to the `filter` object you passed: it copies it.
 - A personal event's `emit` without `to` says to pass the subscribers it's for, not one.

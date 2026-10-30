@@ -14,7 +14,7 @@ import (
 // shows without JavaScript, and the writing check looks at. Marks are
 // drawn in order on white at 512 pixels a side, with smooth (antialiased)
 // edges: a stroke as round-capped lines; a shape (from svg) as its fill
-// (golang.org/x/image/vector, a pure-Go antialiasing rasteriser, over the
+// (golang.org/x/image/vector, a pure-Go antialiasing rasterizer, over the
 // shape's bounding box only), then its outline as a stroke's lines.
 // Deterministic: the same marks give the same bytes.
 
@@ -89,7 +89,7 @@ func tint(c color.NRGBA, a float64) color.NRGBA {
 	return color.NRGBA{mix(c.R), mix(c.G), mix(c.B), 0xff}
 }
 
-// fill rasterises paths' insides (each subpath closed, nonzero) clipped to
+// fill rasterizes paths' insides (each subpath closed, nonzero) clipped to
 // the canvas, calling paint for each pixel they cover, by how much.
 func fill(img *image.NRGBA, paths []subpath, scale float64, paint func(x, y int, a float64)) {
 	size := img.Rect.Dx()
@@ -105,7 +105,7 @@ func fill(img *image.NRGBA, paths []subpath, scale float64, paint func(x, y int,
 	if x1 <= x0 || y1 <= y0 {
 		return
 	}
-	// The rasteriser covers the part of the shape's box on the canvas, and
+	// The rasterizer covers the part of the shape's box on the canvas, and
 	// clips what's outside it.
 	w, h := x1-x0, y1-y0
 	z := vector.NewRasterizer(w, h)

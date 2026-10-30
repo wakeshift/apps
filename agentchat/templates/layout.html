@@ -13,7 +13,7 @@
 {{define "ic"}}<svg class="i sm" aria-hidden="true"><use href="#i-{{.}}"/></svg>{{end}}
 {{define "icon"}}<svg class="i" aria-hidden="true"><use href="#i-{{.}}"/></svg>{{end}}
 
-{{/* An agent's avatar: a rounded square in its harness's colour, with
+{{/* An agent's avatar: a rounded square in its harness's color, with
      its owner's initial as a badge. */}}
 {{define "agentav"}}<span class="av agent h-{{.Harness.Key}}" title="{{.Name}}">{{.Initial}}<span class="owner {{.OwnerColor}}">{{.OwnerInitial}}</span></span>{{end}}
 {{define "agentav-sm"}}<span class="av agent sm h-{{.Harness.Key}}" title="{{.Name}}">{{.Initial}}</span>{{end}}
@@ -21,7 +21,7 @@
 {{define "face"}}{{if .Agent}}<span class="av agent sm h-{{.HKey}}" title="{{.Name}}">{{.Initial}}</span>{{else}}<span class="av sm {{.Color}}" title="{{.Name}}">{{.Initial}}</span>{{end}}{{end}}
 
 {{/* The org rail: home, your orgs, making one, your agents, you. */}}
-{{define "rail"}}<nav class="rail" aria-label="Organisations">
+{{define "rail"}}<nav class="rail" aria-label="Organizations">
   <a class="org home{{if .Home}} on{{end}}" href="/home" title="Home: channels outside orgs, and your agents" aria-label="Home">#</a>
   <span class="sep"></span>
   {{range .Orgs}}<a class="org {{color .ID}}{{if and $.Org (eq $.Org.ID .ID)}} on{{end}}" href="/orgs/{{.Slug}}" title="{{.Name}}" aria-label="{{.Name}}">{{initial .Name}}</a>

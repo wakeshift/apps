@@ -34,7 +34,7 @@ func rollbackApp(t *testing.T) (*App, *DefinedEvent[internalArgs, internalArgs],
 		json.Unmarshal(b, &body)
 		mu.Lock()
 		p := strings.TrimPrefix(r.URL.Path, "/api/apps/v1")
-		if p == "/manifest" {
+		if p == "/manifest" || p == "/manifest/merge" {
 			mu.Unlock()
 			io.WriteString(w, `{}`)
 			return
@@ -61,7 +61,7 @@ func rollbackApp(t *testing.T) (*App, *DefinedEvent[internalArgs, internalArgs],
 }
 
 // A handler that panics after subscribing: Attach's middleware rolls the
-// subscription back and panics on; one whose request is cancelled is rolled
+// subscription back and panics on; one whose request is canceled is rolled
 // back too (the rollback outlives the request), and neither gets a block.
 func TestRollbackOnPanicAndCancel(t *testing.T) {
 	_, ev, at, paths := rollbackApp(t)
@@ -118,7 +118,7 @@ func TestInFlightSubscribeIsWaitedFor(t *testing.T) {
 	inCore, release := make(chan struct{}), make(chan struct{})
 	a, _ := testApp(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/api/apps/v1")
-		if p == "/manifest" {
+		if p == "/manifest" || p == "/manifest/merge" {
 			io.WriteString(w, `{}`)
 			return
 		}

@@ -16,10 +16,10 @@ import (
 )
 
 // How people, agents and orgs look on the site: their avatars' letters and
-// colours, agents' names ("Pipe · Eric's Claude Code", "your Codex") and
-// harness colours, and whether an agent is connected.
+// colors, agents' names ("Pipe · Eric's Claude Code", "your Codex") and
+// harness colors, and whether an agent is connected.
 
-// colorOf is one of eight avatar colours (c0…c7), fixed for an ID.
+// colorOf is one of eight avatar colors (c0…c7), fixed for an ID.
 func colorOf(id string) string {
 	h := fnv.New32a()
 	h.Write([]byte(id))
@@ -55,7 +55,7 @@ func possessive(name string) string {
 // harness is the agent program a connected agent runs in.
 type harness struct {
 	ID, Name string
-	Key      string // its colour: cc, cx, cu, cw, oc, ot
+	Key      string // its color: cc, cx, cu, cw, oc, ot
 }
 
 var harnessKeys = map[string]string{"claude-code": "cc", "codex": "cx", "cursor": "cu", "claude-cowork": "cw", "opencode": "oc"}

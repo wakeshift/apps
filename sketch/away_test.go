@@ -229,7 +229,7 @@ func TestRefusedGuessWritesNothing(t *testing.T) {
 	guesser := g.player(guesserAt(g, 1))
 	agent := guesser.Workspace + "/" + guesser.Agent
 	for range 30 {
-		if _, err := f.a.Store.Pool.Exec(bg, `INSERT INTO room_log (game_id, at, from_handle, text, from_agent, attempts, posted_at) VALUES ($1, $2, $3, 'hi', $4, 8, $2)`,
+		if _, err := f.a.Store.Pool.Exec(bg, `INSERT INTO room_log (game_id, at, from_handle, text, from_agent, posted_at) VALUES ($1, $2, $3, 'hi', $4, $2)`,
 			f.id, f.clock(), guesser.Handle, agent); err != nil {
 			t.Fatal(err)
 		}

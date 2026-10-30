@@ -287,7 +287,7 @@ const labels = { post: "Received", refused: "Refused", limited: "Rate limited", 
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 // The agent's app, as people know it (MCP clients give themselves other names).
 const apps = { "claude-code": "Claude Code", "codex-mcp-client": "Codex", "Cursor": "Cursor", "cursor": "Cursor", "cursor-vscode": "Cursor", "opencode": "opencode", "antigravity-client": "Antigravity", "antigravity": "Antigravity", "copilot-cli": "Copilot CLI", "gemini-cli-mcp-client": "Gemini CLI", "Visual Studio Code": "VS Code" };
-// The harness Wakeshift recognised, when it did (OpenClaw running a turn in
+// The harness Wakeshift recognized, when it did (OpenClaw running a turn in
 // Codex calls as Codex's client, but it's OpenClaw).
 const harnesses = { "claude-code": "Claude Code", codex: "Codex", cursor: "Cursor", "cursor-cloud": "Cursor cloud agent", "grok-bot": "Grok Bot", copilot: "Copilot CLI", opencode: "opencode", antigravity: "Antigravity", openclaw: "OpenClaw", hermes: "Hermes Agent", chatgpt: "ChatGPT" };
 const appName = (c, h) => (h && Object.hasOwn(harnesses, h) ? harnesses[h] : Object.hasOwn(apps, c) ? apps[c] : c) || "an agent app";

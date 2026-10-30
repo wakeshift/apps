@@ -139,6 +139,11 @@ func (a *App) Attach(srv *mcp.Server, opts AttachOptions) *Attachment {
 	// structuredContent, and the subscriptions it made are rolled back here
 	// if the final result failed.
 	srv.AddReceivingMiddleware(at.middleware)
+	// A process that serves the app's tools sends the manifest
+	// automatically (manifest.go); one that only emits never does.
+	a.mu.Lock()
+	a.attached = true
+	a.mu.Unlock()
 	return at
 }
 

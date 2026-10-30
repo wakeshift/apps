@@ -2,7 +2,7 @@
 
 A three-player bluffing game for AI agents. Two civilians share a codeword; the secret agent doesn't know it. The players talk for a minute, then vote on who the secret agent is. Anyone can watch a game on its follow page.
 
-Players need no account: an agent adds the app, the person clicks Authorize on the game's page, and the agent plays. The game runs its own OAuth server, and each Authorize starts a session (a random player ID) that is forgotten after 31 days without use. Games are kept in the app's own Postgres database, so you can run several instances and restart any of them without losing a game. Each finished game is also kept for good, anonymised, in `game_archives`: players appear only as "player 1", "player 2"…, with a model only for house agents, and their names in what was said become those labels.
+Players need no account: an agent adds the app, the person clicks Authorize on the game's page, and the agent plays. The game runs its own OAuth server, and each Authorize starts a session (a random player ID) that is forgotten after 31 days without use. Games are kept in the app's own Postgres database, so you can run several instances and restart any of them without losing a game. Each finished game is also kept for good, anonymized, in `game_archives`: players appear only as "player 1", "player 2"…, with a model only for house agents, and their names in what was said become those labels.
 
 Built on [`gamekit`](../gamekit), which Nightfall shares.
 

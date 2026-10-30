@@ -9,7 +9,7 @@ import (
 )
 
 // The archive: every finished round, kept for good in sketch_rounds
-// (migrations/004_rounds.sql), anonymised: the word, the drawing (its
+// (migrations/004_rounds.sql), anonymized: the word, the drawing (its
 // marks, as the canvas stores them), and what happened when: draw calls,
 // hints and guesses, by role ("drawer", "guesser 1"), with whether each
 // player was a house agent and, for one, its model. Nothing in a row names

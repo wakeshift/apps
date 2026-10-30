@@ -13,10 +13,10 @@
 <meta name="description" content="Talk to your own agents (Claude Code, Codex and others) from Slack.">
 <title>Slackline</title>
 <style>
-/* Slackline's look: slack.com's layout and type, with every colour its RGB
+/* Slackline's look: slack.com's layout and type, with every color its RGB
    inverse (white → black, aubergine #4A154B → #B5EAB4, button purple
    #611F69 → #9EE096, lavender → #162C08, link blue → #ED9B5C). Slack's
-   own logo and "Add to Slack" button keep their brand colours. */
+   own logo and "Add to Slack" button keep their brand colors. */
 :root{
   --bg:#000;--card:#0B0B0B;--ink:#E2E3E2;--ink-2:#B9BAB9;--ink-3:#9E9F9E;--line:#262626;--line-2:#141414;
   --green:#9EE096;--green-2:#83CF7A;--pale:#B5EAB4;--green-soft:#132A0E;--wash:#162C08;--pink:#D14982;--link:#ED9B5C;
@@ -64,7 +64,7 @@ code{font:13px/1.5 var(--mono);background:var(--line-2);border:1px solid var(--l
 button.danger{background:transparent;color:var(--danger);border-color:var(--danger)}
 button.danger:hover{background:#04262A}
 button.sm,.btn.sm{padding:7px 14px;font-size:13px;border-width:1.5px}
-/* Slack's dark "Add to Slack" button, in its own colours */
+/* Slack's dark "Add to Slack" button, in its own colors */
 .btn-slack{background:#000;color:#fff;border:1.5px solid #3A3A3A;border-radius:8px;font-weight:700;padding:12px 20px 12px 16px}
 .btn-slack:hover{background:#0F0F0F;border-color:#5A5A5A}
 .btn-wide{width:100%}
@@ -94,7 +94,7 @@ label.check{display:flex;gap:10px;align-items:flex-start;font-size:13.5px;color:
 label.check input{margin:3px 0 0;accent-color:var(--green)}
 form.inline{display:inline}
 
-/* Landing: a centred hero fading into dark green, like slack.com's lavender */
+/* Landing: a centered hero fading into dark green, like slack.com's lavender */
 .hero{background:linear-gradient(180deg,#000 0%,#000 38%,#0E1C05 70%,var(--wash) 100%);color:var(--ink)}
 .hero .wrap{display:grid;grid-template-columns:1fr;justify-items:center;text-align:center;gap:48px;padding-top:72px;padding-bottom:96px}
 .hero .wrap>div:first-child{display:flex;flex-direction:column;align-items:center}
@@ -323,7 +323,7 @@ section.band+section.band .feat{background:#000;border-color:#000;color:var(--in
 <div class="callout warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.01"/></svg>
 <p>It calls itself <strong>“{{.Req.Client.Name}}”</strong>, but anyone can register any name: Slackline can't verify it.
 Approving sends access to <strong>{{if .Local}}a program on this computer ({{.RedirectHost}}){{else}}{{.RedirectHost}}{{end}}</strong>.
-Continue only if you just added Slackline to your own agent{{if not .Local}} and you recognise that site{{end}}.</p></div>
+Continue only if you just added Slackline to your own agent{{if not .Local}} and you recognize that site{{end}}.</p></div>
 <p>It will be <strong>your agent</strong>, as {{.User.Name}}{{if .User.TeamName}} in {{.User.TeamName}}{{end}}. It can:</p>
 <ul class="perm">
 <li><svg viewBox="0 0 24 24" fill="none" stroke="#9EE096" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>get a thread in your DM with Slackline, and be woken by what you write there;</li>

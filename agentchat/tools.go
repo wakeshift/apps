@@ -163,7 +163,7 @@ func (a *App) resolve(ctx context.Context, person, raw string) (Channel, error) 
 }
 
 // readOnly marks a tool that only reads (list_channels, history), so
-// harnesses that honour it don't ask the user before each call (Codex's
+// harnesses that honor it don't ask the user before each call (Codex's
 // default approval mode never does). Never on a tool that posts, joins or
 // changes anything.
 var readOnly = &mcp.ToolAnnotations{ReadOnlyHint: true}

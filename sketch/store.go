@@ -22,7 +22,7 @@ var migrationFiles embed.FS
 
 const (
 	leaderRooms = 20                   // a player's best rooms that are kept
-	keepResults = 180 * 24 * time.Hour // a result older than this is deleted
+	keepResults = 180 * 24 * time.Hour // a best score older than this is deleted
 	keepLog     = 6 * time.Hour        // a room's posted messages are kept this long
 	outboxEvery = 500 * time.Millisecond
 	outboxLease = 30 * time.Second
@@ -246,17 +246,13 @@ func (a *App) runOutbox(ctx context.Context) {
 	}
 }
 
-// forget deletes results older than keepResults (sketch_results is 001's
-// per-match table, no longer written), when players last did something in
-// rooms after keepSeen (rooms long closed), and rooms' messages posted more
-// than keepLog ago (and players' reasoning as old): a room that plays for
-// days would otherwise keep every stroke announcement it ever made.
+// forget deletes best scores older than keepResults, when players last did
+// something in rooms after keepSeen (rooms long closed), and rooms' messages
+// posted more than keepLog ago (and players' reasoning as old): a room that
+// plays for days would otherwise keep every stroke announcement it ever made.
 func (a *App) forget(ctx context.Context) error {
 	now := a.now()
 	if _, err := a.Store.Pool.Exec(ctx, `DELETE FROM sketch_best WHERE updated_at < $1`, now.Add(-keepResults)); err != nil {
-		return err
-	}
-	if _, err := a.Store.Pool.Exec(ctx, `DELETE FROM sketch_results WHERE ended_at < $1`, now.Add(-keepResults)); err != nil {
 		return err
 	}
 	if _, err := a.Store.Pool.Exec(ctx, `DELETE FROM sketch_seen WHERE at < $1`, now.Add(-keepSeen)); err != nil {

@@ -53,7 +53,7 @@ export function tableFrom(s: string | undefined): string | undefined {
 export function holdemServer(o: ToolOptions): McpServer {
   const { wake, casino, events } = o;
   const server = new McpServer({ name: "agent-holdem", version: "0.1.0" });
-  // A house agent (house.ts): a native client, labelled and seated as one.
+  // A house agent (house.ts): a native client, labeled and seated as one.
   const houseOf = (extra: { requestInfo?: { headers?: Record<string, string | string[] | undefined> } }): HouseClaim | undefined =>
     verifyHouseClaim(o.houseSecret, "holdem", extra.requestInfo?.headers?.[HOUSE_HEADER], bearerOf(extra.requestInfo?.headers?.authorization));
   // holdem.turn and holdem.hand_result: events/list and events/subscribe for
@@ -132,7 +132,7 @@ export function holdemServer(o: ToolOptions): McpServer {
     const table = picked.id;
     let sub = await turns(table);
     const before = await casino.playerFor(conversationKey(guest.user, sub.session));
-    let player = await casino.identify(conversationKey(guest.user, sub.session), guest.user, { harness: sub.recognised.harness ?? guest.agent ?? null, subscription: sub.id, ...info });
+    let player = await casino.identify(conversationKey(guest.user, sub.session), guest.user, { harness: sub.recognized.harness ?? guest.agent ?? null, subscription: sub.id, ...info });
     let seated;
     try {
       seated = await casino.join(player.id, { ...opts, table });

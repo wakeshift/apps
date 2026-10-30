@@ -190,7 +190,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
         // The page names the conversation by a label: its session key acts
         // as the conversation, so it's never shown, stored or logged here.
         const who = conversationLabel(sub.session);
-        const harness = sub.recognised.harness ?? undefined;
+        const harness = sub.recognized.harness ?? undefined;
         await state.sessionWatched(session.id, who);
         await state.watched(l.hook, { conversation: who, client: client(), harness, since: new Date(now()).toISOString() });
         await state.record(l.hook, { kind: "watch", conversation: who, client: client(), harness });
@@ -207,7 +207,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
       "unwatch",
       { description: "Stop waking this conversation for your webhook.", inputSchema: attached.inputs({}) },
       attached.events("unwatch", async (_args, call) => {
-        // The session_key the agent passed: the conversation watch labelled.
+        // The session_key the agent passed: the conversation watch labeled.
         const passed = call.session;
         const ended = await call.unsubscribe(received, hookArgs);
         const who = passed ? conversationLabel(passed) : session.watchedAs;

@@ -235,7 +235,7 @@ async function connect(server: McpServer, clientName: string) {
   return client;
 }
 
-// wrappedCore answers a wrapped tool's requests: a subscribe (recognised
+// wrappedCore answers a wrapped tool's requests: a subscribe (recognized
 // as agent says), and the call's block.
 function wrappedCore(agent?: unknown) {
   return fakeCore((path) => {
@@ -280,7 +280,7 @@ test("tools are the app's: only wrapped tools get Wakeshift's arguments and bloc
   assert.deepEqual(sub.body.call, { client: "Cursor", user: "ada", meta: { k: "v" }, session: "wsc_1", harness: "grok-bot", conversation: "bc-6f1d", tool: "watch_ci" });
   assert.deepEqual(watched.content, [{ type: "text", text: "Watching CI on acme.\n\nWakeshift: woken." }]);
   // An ignored claim shows: claimed differs from harness.
-  assert.deepEqual(subs[0].recognised, { harness: "cursor", via: "client", claimed: "grok-bot" });
+  assert.deepEqual(subs[0].recognized, { harness: "cursor", via: "client", claimed: "grok-bot" });
 
   const before = core.sent.length;
   const pinged = (await client.callTool({ name: "ping", arguments: { repo: "acme" } })) as CallToolResult;
@@ -291,7 +291,7 @@ test("tools are the app's: only wrapped tools get Wakeshift's arguments and bloc
   assert.equal(core.sent.length, before, "tools that aren't wrapped don't reach Wakeshift");
 });
 
-test("a stateless server forwards the User-Agent, and what the core recognised reaches call.subscribe", async () => {
+test("a stateless server forwards the User-Agent, and what the core recognized reaches call.subscribe", async () => {
   for (const agent of [{ harness: "claude-code", via: "user_agent", claimed: null }, undefined]) {
     const core = wrappedCore(agent);
     const warnings: string[] = [];
@@ -328,8 +328,8 @@ test("a stateless server forwards the User-Agent, and what the core recognised r
     assert.equal(call.client, "", "a stateless server has no client name");
     assert.equal(call.user_agent, "claude-code/2.1.280 (cli)", "the request's User-Agent goes to the core");
     assert.equal(call.harness, "Homegrown");
-    // A core that doesn't say: nothing recognised.
-    assert.deepEqual(subs[0].recognised, agent ?? { harness: null, via: null, claimed: null });
+    // A core that doesn't say: nothing recognized.
+    assert.deepEqual(subs[0].recognized, agent ?? { harness: null, via: null, claimed: null });
     assert.deepEqual(warnings, []);
   }
 });

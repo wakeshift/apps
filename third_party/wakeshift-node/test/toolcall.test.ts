@@ -40,11 +40,12 @@ class WakeCore {
   fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     const path = String(url).replace("http://core.test/api/apps/v1", "");
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    if (path !== "/manifest") this.calls.push({ path, body });
+    if (path !== "/manifest" && path !== "/manifest/merge") this.calls.push({ path, body });
     const reply = (status: number, json: unknown) => new Response(JSON.stringify(json), { status, headers: { "Content-Type": "application/json" } });
     if (this.fail.has(path)) return reply(503, { error: { code: "unavailable", message: "down" } });
     switch (path) {
       case "/manifest":
+      case "/manifest/merge":
         return reply(200, body ?? { description: "" }); // GET: nothing published yet
       case "/event-subscriptions": {
         if (this.hold) await this.hold;
@@ -165,13 +166,13 @@ const texts = (r: Rpc) => (r.result?.content ?? []).map((c: any) => c.text ?? ""
 
 test("two subscribes in one call: one block from one /calls/addition, the pending record passed on", async (t) => {
   const got: Subscription[] = [];
-  const seen: { user?: string; tool: string; native: boolean; session: string | null; recognised: unknown }[] = [];
+  const seen: { user?: string; tool: string; native: boolean; session: string | null; recognized: unknown }[] = [];
   const w = await wrapped(t, (server, attached, ev) => {
     server.registerTool(
       "join",
       { inputSchema: attached.inputs({ table: z.string() }) },
       attached.events("join", async ({ table }, call) => {
-        seen.push({ user: call.user, tool: call.tool, native: call.native, session: call.session, recognised: call.recognised });
+        seen.push({ user: call.user, tool: call.tool, native: call.native, session: call.session, recognized: call.recognized });
         got.push(await call.subscribe(ev.turn, { table }, { reason: `Playing at ${table}`, ttl: 3600 }));
         got.push(await call.subscribe(ev.news, { table }, { label: "poker" }));
         return { content: [{ type: "text", text: `Seated at ${table}.` }] };
@@ -182,7 +183,7 @@ test("two subscribes in one call: one block from one /calls/addition, the pendin
   assert.equal(res.result?.isError, undefined, JSON.stringify(res));
   assert.deepEqual(texts(res), ["Seated at oak.", WOKEN, TRAILER]);
   assert.deepEqual(res.result?._meta, { "wakeshift/connector": "tok", other: "x" });
-  assert.deepEqual(seen, [{ user: "ada", tool: "join", native: false, session: null, recognised: null }]);
+  assert.deepEqual(seen, [{ user: "ada", tool: "join", native: false, session: null, recognized: null }]);
   assert.deepEqual(w.core.paths(), ["/event-subscriptions", "/event-subscriptions", "/calls/addition"]);
   const [a, b] = w.core.bodies("/event-subscriptions");
   assert.equal(a.defer_addition, true);
@@ -201,7 +202,7 @@ test("two subscribes in one call: one block from one /calls/addition, the pendin
   assert.equal(add.pending, "pa_first");
   assert.equal(add.native, undefined);
   assert.equal(add.call.session, "wsc_s1");
-  assert.deepEqual(got[0], { id: "sub-1", user: "ada", created: true, session: "wsc_s1", recognised: { harness: "claude-code", via: "user_agent", claimed: null }, native: false });
+  assert.deepEqual(got[0], { id: "sub-1", user: "ada", created: true, session: "wsc_s1", recognized: { harness: "claude-code", via: "user_agent", claimed: null }, native: false });
   assert.equal(got[1].id, "sub-2");
 });
 
@@ -248,7 +249,7 @@ test("resolveSession makes the call's record without subscribing; a subscribe af
         const s = await call.resolveSession();
         assert.equal(s, "wsc_resolved");
         assert.equal(call.session, s);
-        assert.equal(call.recognised?.harness, "codex");
+        assert.equal(call.recognized?.harness, "codex");
         assert.equal(await call.resolveSession(), s);
         await call.subscribe(ev.news, { table: "oak" });
         return "ok";
@@ -336,7 +337,7 @@ test("rollback is decided from the final result: each failure ends what the call
     // this call made it and no other call has renewed it since.
     assert.equal(ends[0].pending, "pa_first");
   }
-  // A cancelled request (its signal aborted) is rolled back too. The
+  // A canceled request (its signal aborted) is rolled back too. The
   // signal is MCP's own, so this drives the callback with one directly.
   const server = new McpServer({ name: "cards", version: "1" });
   const attached = w.wake.attach(server, { identify: () => ({ user: "ada" }) });
@@ -546,7 +547,7 @@ test("native callers aren't subscribed: the block names the events to subscribe 
     assert.notEqual(res.result?.isError, true, `${c.name}: ${JSON.stringify(res)}`);
     assert.deepEqual(seen, [{ native: true, conversation: c.conversation }], c.name);
     assert.equal(subs.length, 2);
-    assert.deepEqual(subs[0], { id: "", user: "ada", created: false, session: "", recognised: { harness: null, via: null, claimed: null }, native: true }, c.name);
+    assert.deepEqual(subs[0], { id: "", user: "ada", created: false, session: "", recognized: { harness: null, via: null, claimed: null }, native: true }, c.name);
     assert.deepEqual(w.core.paths(), ["/calls/addition"], c.name);
     assert.deepEqual(w.core.bodies("/calls/addition")[0].native, [{ name: "game.turn", arguments: { table: "oak" } }], c.name);
     assert.match(texts(res).join("\n"), /subscribe to it \(MCP Events\)/);

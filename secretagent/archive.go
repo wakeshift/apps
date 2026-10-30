@@ -38,7 +38,7 @@ type archivedClue struct {
 	Text     string `json:"text"`
 }
 
-// archive keeps the finished game, anonymised. Called under its lock, in
+// archive keeps the finished game, anonymized. Called under its lock, in
 // the move that finishes it.
 func archive(tx *gamekit.Tx, g *game) error {
 	said, err := tx.Said(g.ID)

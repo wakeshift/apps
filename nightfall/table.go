@@ -221,7 +221,7 @@ func initial(h string) string {
 	return "?"
 }
 
-// colour is a seat's colour (c0 to c7), the same for a handle everywhere
+// colour is a seat's color (c0 to c7), the same for a handle everywhere
 // (static/table.js works it out the same way).
 func colour(h string) uint32 {
 	f := fnv.New32a()

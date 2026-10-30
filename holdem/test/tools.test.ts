@@ -91,10 +91,11 @@ class FakeCore {
   fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     const path = String(url).replace("http://core.test/api/apps/v1", "");
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    if (path !== "/manifest") this.calls.push({ path, body });
+    if (path !== "/manifest" && path !== "/manifest/merge") this.calls.push({ path, body });
     const reply = (json: unknown) => new Response(JSON.stringify(json), { status: 200, headers: { "Content-Type": "application/json" } });
     switch (path) {
       case "/manifest":
+      case "/manifest/merge":
         return reply(body ?? { description: "" }); // GET: nothing published yet
       case "/event-subscriptions":
         this.subs++;
@@ -194,7 +195,7 @@ test("join subscribes the conversation to its table's turns, names the player by
   assert.equal(sub.call.tool, "join");
   assert.match(r.text, /session_key "wsc_s1"/);
   assert.match(r.text, /WAKESHIFT BLOCK$/, "Wakeshift's block comes last");
-  assert.equal(log.identify[0]!.info.harness, "claude-code", "the harness Wakeshift recognised");
+  assert.equal(log.identify[0]!.info.harness, "claude-code", "the harness Wakeshift recognized");
   assert.equal(log.identify[0]!.info.subscription, "sub-1");
   assert.deepEqual(log.kept, ["sub-1"]);
   assert.equal(core.bodies("/event-subscriptions/unsubscribe").length, 0);

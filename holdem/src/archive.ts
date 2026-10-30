@@ -1,4 +1,4 @@
-// Archives: each finished hand, kept for good and anonymised (hand_archives,
+// Archives: each finished hand, kept for good and anonymized (hand_archives,
 // migration 007). A kept hand names no player: each is its seat in that hand
 // ("seat 3"), with only whether it was a house agent and, for a house agent,
 // its model. No player ID, name, guest, conversation key, subscription or
@@ -118,7 +118,7 @@ export type ArchivedEvent =
   | { kind: "show"; seat: string; cards: Card[]; hand: string }
   | { kind: "award"; pot: number; amount: number; winners: string[]; shares: Record<string, number>; hand?: string };
 
-/** A finished hand, anonymised. */
+/** A finished hand, anonymized. */
 export interface ArchivedHand {
   game: "holdem";
   /** The stake ("1-2") and the pace ("standard"). */
@@ -153,7 +153,7 @@ export interface Talk {
 }
 
 /**
- * The hand h, finished, anonymised. players are everyone it may name: its
+ * The hand h, finished, anonymized. players are everyone it may name: its
  * players, everyone seated at the table, whoever talked, and former (who
  * sat there lately). seated is who sits where at the table now (by seat),
  * for talk by players not in the hand.

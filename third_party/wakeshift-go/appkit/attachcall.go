@@ -5,7 +5,7 @@ package appkit
 // MCP SDK has finished (the output validated, structuredContent and the
 // JSON text fallback filled), it decides from the final result whether the
 // call failed, and either rolls back the subscriptions the call made or adds
-// the call's one block (docs/subscribe-from-tools.md, "Wrapper behaviour").
+// the call's one block (docs/subscribe-from-tools.md, "Wrapper behavior").
 
 import (
 	"context"
@@ -66,7 +66,7 @@ func (at *Attachment) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 
 // rollback ends every subscription the call created and no other call has
 // renewed since, with reason rolled_back (audited as such, no "ended" notice), even if the request was
-// cancelled.
+// canceled.
 func (at *Attachment) rollback(ctx context.Context, s *callScope) {
 	if len(s.created) == 0 {
 		return

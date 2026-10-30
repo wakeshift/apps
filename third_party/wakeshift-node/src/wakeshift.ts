@@ -78,14 +78,14 @@ export interface Call {
 }
 
 /**
- * What Wakeshift recognised the calling conversation's harness as, and by
+ * What Wakeshift recognized the calling conversation's harness as, and by
  * which signal ("claim": only the agent's harness argument named it); both
  * null when nothing named one. claimed is what the agent said (normalized:
  * "Grok Bot" is grok-bot), null if it didn't; a claimed that differs from
- * harness was ignored, since it contradicted what the call was recognised
+ * harness was ignored, since it contradicted what the call was recognized
  * as (the claim only refines it: Cursor's calls may be Grok Bot's).
  */
-export interface Recognised {
+export interface Recognized {
   harness: string | null;
   via: "client" | "meta" | "user_agent" | "claim" | null;
   claimed: string | null;
@@ -354,10 +354,12 @@ export class Wakeshift {
    * Tells Wakeshift what the app may do, replacing what it said before: m,
    * with the events you defined (defineEvent) after m's own events. An
    * event both defined and listed in m.events is an error, and nothing is
-   * sent. You needn't call it: Wakeshift gets the manifest automatically
-   * when the app first needs it. Once called, m is what every automatic
-   * send carries (even if this one failed), with the events defined by
-   * then. Returns the manifest as Wakeshift keeps it.
+   * sent. You needn't call it: a process that serves your tools (attach)
+   * sends the manifest automatically, merged into the one Wakeshift has.
+   * Call it to remove an event or clear a setting. Once called, m's
+   * settings are what every automatic send carries (even if this one
+   * failed), with the events defined by then. Returns the manifest as
+   * Wakeshift keeps it.
    */
   async publishManifest(m: Manifest): Promise<Manifest> {
     const version = this.manifestVersion; // before the body: a later defineEvent is sent again
@@ -404,29 +406,30 @@ export class Wakeshift {
     return events.length > 0 ? { ...rest, events } : rest;
   }
 
-  // The automatic send: the manifest the app last published, or else the
-  // settings Wakeshift has (asked for first, so the send never wipes what
-  // was published separately), with the defined events.
+  // The automatic send, from a process that serves the app's tools: the
+  // settings the app last published (only those it set), with the defined
+  // events, merged into the manifest Wakeshift has, so it never removes an
+  // event or clears a setting another process sent.
   private async sendManifest(): Promise<void> {
-    if (this.manifestBase) {
-      await this.request("PUT", "/manifest", this.manifestBody(this.manifestBase));
-      return;
+    const body: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(this.manifestBody(this.manifestBase ?? {}))) {
+      if (v === undefined || v === null || v === "" || v === false || (Array.isArray(v) && v.length === 0)) continue;
+      body[k] = v;
     }
-    const stored = await this.request<Record<string, unknown>>("GET", "/manifest");
-    const kept: Manifest = { description: typeof stored.description === "string" ? stored.description : "" };
-    if (stored.agent !== null && typeof stored.agent === "object") kept.agent = stored.agent as AgentScope;
-    if (stored.others_can_wake === true) kept.others_can_wake = true;
-    if (Array.isArray(stored.preapprove_tools) && stored.preapprove_tools.length > 0) kept.preapprove_tools = stored.preapprove_tools as string[];
-    await this.request("PUT", "/manifest", this.manifestBody(kept));
+    if (!body.events) return; // nothing to add (attach refuses with no events, but never send an empty list)
+    await this.request("POST", "/manifest/merge", body);
   }
 
   // ── Events (MCP Events, natively or bridged) ──────────────────────────
 
   private readonly events = new Map<string, WakeEvent>();
-  // What publishManifest was last given (null: nothing yet); whether
-  // Wakeshift has the manifest for the events defined now (the send; null:
-  // not yet, or a defineEvent since); and how many defineEvents there were.
+  // What publishManifest was last given (null: nothing yet); whether this
+  // process serves the app's tools (attach: only then is the manifest sent
+  // automatically); whether Wakeshift has the manifest for the events
+  // defined now (the send; null: not yet, or a defineEvent since); and how
+  // many defineEvents there were.
   private manifestBase: Manifest | null = null;
+  private serving = false;
   private published: Promise<void> | null = null;
   private manifestVersion = 0;
 
@@ -469,11 +472,19 @@ export class Wakeshift {
    * Wakeshift's arguments with attached.inputs.
    */
   attach(server: McpServer, opts: AttachOptions = {}): Attached {
-    return attachEvents(this, server, [...this.events.values()], opts);
+    const attached = attachEvents(this, server, [...this.events.values()], opts);
+    this.serving = true; // the manifest is sent automatically from now on
+    return attached;
   }
 
-  /** @internal Sends the manifest with the defined events, once (again after a defineEvent). */
+  /**
+   * @internal Sends the manifest with the defined events, once (again after
+   * a defineEvent), from a process that serves the app's tools (attach). A
+   * process that only emits never sends it: its events may be fewer, or
+   * older, than its server's.
+   */
   ensureEvents(): Promise<void> {
+    if (!this.serving) return Promise.resolve();
     if (!this.published) this.track(this.serial(() => this.sendManifest()), this.manifestVersion);
     return this.published!;
   }

@@ -19,6 +19,8 @@ declare global {
   // The app around a tool.
   const wake: SDK.Wakeshift;
   const server: McpServerClass;
+  // The quickstart's per-session server, which its serving block connects.
+  function newServer(): McpServerClass;
   // Inside a tool callback.
   const extra: RequestHandlerExtra<ServerRequest, ServerNotification>;
   const args: { session_key?: string; harness?: string; conversation_id?: string };

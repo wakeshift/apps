@@ -120,22 +120,51 @@ test("defineEvent refuses what Wakeshift would", () => {
   assert.throws(() => wake.defineEvent("a.e", { description: "d", args: {}, payload: p, text }), /twice/);
 });
 
-test("emit checks the payload, publishes the manifest first, and sends the rendered line", async () => {
+test("emit checks the payload, merges the manifest first from a process that serves tools, and sends the rendered line", async () => {
   const { wake, reqs } = fakeCore({ "/events/emit": () => ({ json: { matched: 2, duplicate: false } }) });
   const chat = chatEvent(wake);
+  wake.attach(new McpServer({ name: "chat", version: "1.0.0" }));
   await assert.rejects(chat.emit({ channel: "eng" }, { from: "ada" } as any), (e: unknown) => e instanceof WakeshiftError && e.code === "bad_arguments" && e.detail.startsWith("payload for"));
   await assert.rejects(chat.emit({ channel: "eng" }, { from: "ada", text: "hi" }, { to: "u1" }), /isn't personal/);
   const out = await chat.emit({ channel: "eng" }, { from: "ada", text: "shipped" }, { id: "m1" });
   assert.deepEqual(out, { matched: 2, duplicate: false, unmatched: [], ended: [] });
   assert.deepEqual(
     reqs.map((r) => `${r.method} ${r.path}`),
-    ["GET /manifest", "PUT /manifest", "POST /events/emit"],
+    ["POST /manifest/merge", "POST /events/emit"],
   );
-  assert.equal(reqs[1].body.events[0].name, "chat.message");
-  assert.deepEqual(reqs[2].body, { name: "chat.message", arguments: { channel: "eng" }, payload: { from: "ada", text: "shipped" }, text: "ada: shipped", id: "m1" });
+  assert.equal(reqs[0].body.events[0].name, "chat.message");
+  assert.deepEqual(reqs[1].body, { name: "chat.message", arguments: { channel: "eng" }, payload: { from: "ada", text: "shipped" }, text: "ada: shipped", id: "m1" });
   // Sent once: the next emit goes straight out.
   await chat.emit({ channel: "eng" }, { from: "bob", text: "ok" });
-  assert.equal(reqs.filter((r) => r.path === "/manifest").length, 2);
+  assert.equal(reqs.filter((r) => r.path.startsWith("/manifest")).length, 1);
+});
+
+test("requestApp never sends the manifest from a process with no events, or one that doesn't serve tools", async () => {
+  // 0.4.0 sent an empty list here, which cleared every one of the app's events.
+  const bare = fakeCore({ "/manifest": () => ({ json: { description: "" } }) });
+  await bare.wake.requestApp("GET", "/manifest");
+  assert.deepEqual(
+    bare.reqs.map((r) => `${r.method} ${r.path}`),
+    ["GET /manifest"],
+  );
+  const { wake, reqs } = fakeCore({ "/events/status": () => ({ json: { subscriptions: 0, connected: 0 } }) });
+  const chat = chatEvent(wake);
+  await wake.requestApp("GET", "/manifest");
+  await chat.status({ channel: "eng" });
+  assert.deepEqual(
+    reqs.map((r) => `${r.method} ${r.path}`),
+    ["GET /manifest", "POST /events/status"],
+  );
+});
+
+test("a process that only emits never sends the manifest", async () => {
+  const { wake, reqs } = fakeCore({ "/events/emit": () => ({ json: { matched: 0 } }) });
+  const chat = chatEvent(wake);
+  await chat.emit({ channel: "eng" }, { from: "ada", text: "shipped" });
+  assert.deepEqual(
+    reqs.map((r) => `${r.method} ${r.path}`),
+    ["POST /events/emit"],
+  );
 });
 
 test("a personal event is emitted to one subscriber", async () => {

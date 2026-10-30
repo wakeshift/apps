@@ -7,7 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// A game that finishes keeps an anonymised record of itself for good, in
+// A game that finishes keeps an anonymized record of itself for good, in
 // game_archives (migration 005): the game builds the record with Anon
 // (archive.go), from its state and what its players said (Said), and writes
 // it with Archive in the move that finishes it. The record carries no game

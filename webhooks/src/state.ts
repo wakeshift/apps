@@ -52,7 +52,7 @@ export interface Activity {
   /**
    * The conversation that watched or stopped, by a public label (never its
    * session key, which acts as the conversation), its client and the
-   * harness Wakeshift recognised.
+   * harness Wakeshift recognized.
    */
   conversation?: string;
   client?: string;

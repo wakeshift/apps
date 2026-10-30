@@ -1,18 +1,20 @@
 package appkit
 
-// The manifest: what the app may do, with its event types. Wakeshift gets
-// it automatically the first time the app needs it (an emit, a status, a
-// publish URL, a subscription: any call about its events), and again after
-// a DefineEvent, so an app needn't publish it at all. PUT /manifest replaces
-// the whole manifest, so the automatic send carries everything the app
-// configured: the manifest it last gave PublishManifest, or else the
-// settings Wakeshift already has (published separately, or by an earlier
-// run), with the defined event types either way. The TypeScript and Python
-// SDKs do the same (sdk/typescript/test/manifest.json).
+// The manifest: what the app may do, with its event types. A process that
+// serves the app's tools (Attach) sends it automatically the first time it
+// needs it (a subscription, a wrapped tool's call, an emit: any call about
+// its events), and again after a DefineEvent, so an app needn't publish it
+// at all. The automatic send is a merge (POST /manifest/merge): the
+// settings the app last gave PublishManifest, if any, and the defined
+// event types, which Wakeshift adds to or updates in the manifest it has,
+// never removing an event or clearing a setting. So processes sharing a
+// key, each with its own events, never remove each other's; a process that
+// only emits never sends it. PublishManifest replaces the whole manifest
+// (PUT /manifest): the only way to remove an event. The TypeScript and
+// Python SDKs do the same (sdk/typescript/test/manifest.json).
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
 )
@@ -20,10 +22,11 @@ import (
 // PublishManifest tells Wakeshift what the app may do, replacing what it
 // said before: m, with the event types DefineEvent made after m.Events.
 // An event type both defined and listed in m.Events is an error, and
-// nothing is sent. The app needn't call it: Wakeshift gets the manifest
-// automatically when the app first needs it. Once it's called, m is what
-// every automatic send carries (even if this one failed), with the event
-// types defined by then.
+// nothing is sent. The app needn't call it: a process that serves the
+// app's tools (Attach) sends the manifest automatically, merged into the
+// one Wakeshift has. Call it to remove an event type or clear a setting.
+// Once it's called, m's settings are what every automatic send carries
+// (even if this one failed), with the event types defined by then.
 func (a *App) PublishManifest(ctx context.Context, m Manifest) error {
 	a.sendMu.Lock()
 	defer a.sendMu.Unlock()
@@ -68,7 +71,8 @@ func (a *App) markSent(gen uint64) {
 }
 
 // eventsCall is appCall for a call about the app's events, once Wakeshift
-// has the manifest with them (ensureManifest).
+// has the manifest with them, in a process that serves them
+// (ensureManifest).
 func (a *App) eventsCall(ctx context.Context, method, path string, body, out any) error {
 	if err := a.ensureManifest(ctx); err != nil {
 		return err
@@ -76,24 +80,26 @@ func (a *App) eventsCall(ctx context.Context, method, path string, body, out any
 	return a.appCall(ctx, method, path, body, out)
 }
 
-// storedManifest is what the automatic send keeps of the manifest
-// Wakeshift has when the app hasn't published one: its settings, the agent
-// scope passed on as Wakeshift gave it. Its events are replaced by the
-// defined ones.
-type storedManifest struct {
-	Description     string          `json:"description"`
-	Agent           json.RawMessage `json:"agent,omitempty"`
+// mergeBody is the automatic send (POST /manifest/merge): only the
+// settings the app configured, and its event types. Wakeshift merges it
+// into the manifest it has.
+type mergeBody struct {
+	Description     string          `json:"description,omitempty"`
+	Agent           *AgentScope     `json:"agent,omitempty"`
 	Events          []ManifestEvent `json:"events,omitempty"`
 	OthersCanWake   bool            `json:"others_can_wake,omitempty"`
 	PreapproveTools []string        `json:"preapprove_tools,omitempty"`
 }
 
-// ensureManifest sends the manifest unless Wakeshift has it for the event
-// types defined now: the one the app last published, or else the settings
-// Wakeshift has (asked for first), with the defined event types.
+// ensureManifest sends the manifest, in a process that serves the app's
+// tools (Attach), unless Wakeshift has it for the event types defined
+// now: the settings the app last published, if any, with the defined event
+// types, merged into what Wakeshift has. A process that only emits never
+// sends it: the event types it defines may be fewer, or older, than its
+// server's.
 func (a *App) ensureManifest(ctx context.Context) error {
 	a.mu.Lock()
-	done := a.sent && a.sentGen == a.gen
+	done := !a.attached || a.sent && a.sentGen == a.gen
 	a.mu.Unlock()
 	if done {
 		return nil
@@ -106,28 +112,18 @@ func (a *App) ensureManifest(ctx context.Context) error {
 	if done {
 		return nil // sent while this one waited
 	}
-	var body any
-	if base != nil {
-		m, err := a.manifestBody(*base)
-		if err != nil {
-			return err
-		}
-		body = m
-	} else {
-		var stored storedManifest
-		if err := a.appCall(ctx, "GET", "/api/apps/v1/manifest", nil, &stored); err != nil {
-			return err
-		}
-		if string(stored.Agent) == "null" {
-			stored.Agent = nil
-		}
-		stored.Events = nil
-		for _, t := range a.events() {
-			stored.Events = append(stored.Events, t.manifestEntry())
-		}
-		body = stored
+	if base == nil {
+		base = &Manifest{}
 	}
-	if err := a.appCall(ctx, "PUT", "/api/apps/v1/manifest", body, nil); err != nil {
+	m, err := a.manifestBody(*base)
+	if err != nil {
+		return err
+	}
+	if len(m.Events) == 0 {
+		return nil // nothing to add (Attach refuses with no events, but never send an empty list)
+	}
+	body := mergeBody{Description: m.Description, Agent: m.Agent, Events: m.Events, OthersCanWake: m.OthersCanWake, PreapproveTools: m.PreapproveTools}
+	if err := a.appCall(ctx, "POST", "/api/apps/v1/manifest/merge", body, nil); err != nil {
 		return err
 	}
 	a.markSent(gen)

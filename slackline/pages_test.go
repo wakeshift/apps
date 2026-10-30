@@ -6,7 +6,7 @@ import (
 )
 
 // Every page renders with Slackline's one stylesheet (inline, under the
-// CSP) and its dark colour scheme.
+// CSP) and its dark color scheme.
 func TestPagesRender(t *testing.T) {
 	views := map[string]any{
 		"landing": nil,

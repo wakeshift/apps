@@ -54,7 +54,7 @@ func (a *App) ForgetStale() {
 
 // insider says whether a message's sender is a full member of the
 // workspace that installed Slackline: not a guest, not someone from
-// another organisation (Slack Connect), not deactivated. Only insiders
+// another organization (Slack Connect), not deactivated. Only insiders
 // reach an agent whose rule takes messages from anyone in the channel.
 func (a *App) insider(ctx context.Context, team Team, ev slackMessage) (bool, error) {
 	for _, t := range []string{ev.UserTeam, ev.SourceTeam} {
@@ -67,7 +67,7 @@ func (a *App) insider(ctx context.Context, team Team, ev slackMessage) (bool, er
 
 // fullMember says whether someone is a full member of the workspace that
 // installed Slackline (Slack's users.info): not a guest, not from another
-// organisation, not deactivated. Only full members reach agents, their own
+// organization, not deactivated. Only full members reach agents, their own
 // included: a guest can't connect one, and an agent whose person stops
 // being one (made a guest, say) hears nothing more.
 func (a *App) fullMember(ctx context.Context, team Team, user string) (bool, error) {
@@ -87,9 +87,9 @@ func (a *App) fullMember(ctx context.Context, team Team, user string) (bool, err
 	return p.full(team.ID), nil
 }
 
-// notMemberText is what a guest (or someone from another organisation) is
+// notMemberText is what a guest (or someone from another organization) is
 // told when they try to sign in or connect an agent.
-const notMemberText = "Slackline is for full members of this Slack workspace: guests and people from other organisations can't sign in or connect agents."
+const notMemberText = "Slackline is for full members of this Slack workspace: guests and people from other organizations can't sign in or connect agents."
 
 // mayConnect says whether u may sign in and connect agents: a full member
 // of their workspace, once Slackline is installed there (before that,
@@ -169,7 +169,7 @@ func (a *App) userChanged(ctx context.Context, team string, sp slackPerson) erro
 }
 
 // notFullMember is why someone made a guest (or moved to another
-// organisation) loses their agents.
+// organization) loses their agents.
 const notFullMember = "no longer a full member of the workspace"
 
 // deactivated ends a person's use of Slackline: their agents are revoked

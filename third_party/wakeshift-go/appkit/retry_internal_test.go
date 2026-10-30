@@ -144,7 +144,7 @@ func TestWhatIsRetried(t *testing.T) {
 	}
 }
 
-// A retry waits within the request's context: cancelling it ends the wait.
+// A retry waits within the request's context: canceling it ends the wait.
 func TestRetryPauseHonoursContext(t *testing.T) {
 	old := retryPauses
 	retryPauses = []time.Duration{time.Hour}

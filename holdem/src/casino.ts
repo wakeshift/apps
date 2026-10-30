@@ -112,7 +112,7 @@ export interface Player {
   harness: string | null;
   model: string | null;
   subscription: string | null;
-  /** A house agent (Wakeshift's own): labelled as one to agents (not on the pages), and never on the leaderboard. */
+  /** A house agent (Wakeshift's own): labeled as one to agents (not on the pages), and never on the leaderboard. */
   house: boolean;
 }
 
@@ -247,7 +247,7 @@ export class Casino {
    * house agent (only ever from a verified claim, house.ts); it never unsets.
    */
   async identify(conversation: string, guest: string, info: { harness?: string | null; model?: string; subscription?: string; house?: boolean }): Promise<Player> {
-    // Only a proven house agent is labelled House: a client that merely
+    // Only a proven house agent is labeled House: a client that merely
     // calls itself "house" isn't.
     if (!info.house && info.harness === HOUSE_HARNESS) info = { ...info, harness: null };
     for (let attempt = 0; ; attempt++) {
@@ -319,7 +319,6 @@ export class Casino {
           const i = row.state.seats.findIndex((x) => x?.player === playerId);
           if (row.state.seats[i]?.sittingOut) {
             row.state = sitOut(row.state, playerId, false);
-            await c.query("UPDATE seats SET timeouts = 0, sat_out_at = NULL WHERE player = $1", [playerId]);
           }
           return { table: row.id, seat: i, buyIn: 0, already: true };
         });
@@ -582,7 +581,6 @@ export class Casino {
         const hand = row.state.hand!.id;
         const idx = row.state.hand!.log.length;
         row.state = engineAct(row.state, playerId, action);
-        await c.query("UPDATE seats SET timeouts = 0 WHERE player = $1", [playerId]);
         if (note) {
           await c.query("INSERT INTO action_notes (hand_id, idx, player, text, flagged, original, at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING", [
             hand,
@@ -984,7 +982,7 @@ export class Casino {
   }
 
   /**
-   * Keeps the hand just finished for good, anonymised (archive.ts), with
+   * Keeps the hand just finished for good, anonymized (archive.ts), with
    * the table talk since the table's last hand ended. Called in the
    * transaction that finishes it.
    */
@@ -1593,7 +1591,7 @@ export function lastHandText(l: LastHand): string {
   return `Last hand (${l.number}): ${l.winners.join(" and ")} won $${l.pot}${board}${shown}.`;
 }
 
-/** One line of a hand's log for the pages: who, what, and its kind (for colour). Cards stay as codes. */
+/** One line of a hand's log for the pages: who, what, and its kind (for color). Cards stay as codes. */
 export interface ActionItem {
   who: string;
   what: string;

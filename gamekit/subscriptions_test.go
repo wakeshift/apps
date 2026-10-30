@@ -109,7 +109,7 @@ func putGame(t *testing.T, s *Server, id string, seats ...string) {
 // their subscriptions (or, for a native seat, to its native
 // subscriptions), in two emits (the players it mentions, and the others),
 // with IDs that make a retry safe (and one emit for native seats). A
-// player's line is labelled as a player's, even one that imitates the moderator. A retry sends the
+// player's line is labeled as a player's, even one that imitates the moderator. A retry sends the
 // recipients the first try fixed, even after someone joined; a
 // rate_limited emit doesn't count as a try; a subscription Wakeshift says
 // has ended is forgotten (its seat is away until its player joins again).
@@ -129,8 +129,8 @@ func TestOutbox(t *testing.T) {
 	}
 	// The same, as an entry that mentions otter (players' entries don't
 	// yet: the moderator's do).
-	if _, err := s.Store.Pool.Exec(ctx, `INSERT INTO room_log (game_id, at, from_handle, subject, text, mentions, from_agent, attempts)
-		VALUES ('g1', now(), 'raven', 'Moderator: otter is eliminated', 'Moderator: otter is eliminated', '{otter}', 'w-raven/a', 8)`); err != nil {
+	if _, err := s.Store.Pool.Exec(ctx, `INSERT INTO room_log (game_id, at, from_handle, subject, text, mentions, from_agent)
+		VALUES ('g1', now(), 'raven', 'Moderator: otter is eliminated', 'Moderator: otter is eliminated', '{otter}', 'w-raven/a')`); err != nil {
 		t.Fatal(err)
 	}
 	core.reset()
@@ -167,7 +167,7 @@ func TestOutbox(t *testing.T) {
 		t.Errorf("a player's line: %q, %v", m.Text, m.Payload)
 	}
 
-	// The moderator's lines go unlabelled.
+	// The moderator's lines go unlabeled.
 	if got := updateText(Update{Subject: "Night falls", Text: "Night falls.  Close your eyes."}, UpdateArgs{}); got != "Night falls. Close your eyes." {
 		t.Errorf("the moderator's line: %q", got)
 	}
@@ -265,10 +265,8 @@ func (s *Server) saveAnnouncements(ctx context.Context, g *Game) error {
 func js(v any) string { b, _ := json.Marshal(v); return string(b) }
 
 // A player's agent says at most 30 things a minute, across its seats and
-// games: the 31st is refused and writes nothing. What a player says is
-// kept from a draining revision from before 008, which would post it as
-// the moderator's (attempts = 8), and a line for a game that's gone isn't
-// logged.
+// games: the 31st is refused and writes nothing, and a line for a game
+// that's gone isn't logged.
 func TestSayLimit(t *testing.T) {
 	ctx := context.Background()
 	s := kitServer(t, "4", newRecCore())
@@ -287,10 +285,10 @@ func TestSayLimit(t *testing.T) {
 	if err := s.Say(ctx, "g1", Player{Workspace: "w-otter", Agent: "a", Session: "s", Handle: "otter"}, "hi"); err != nil {
 		t.Fatal(err)
 	}
-	var n, hidden int
-	s.Store.Pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE attempts = 8) FROM room_log WHERE from_agent = 'w-raven/a'`).Scan(&n, &hidden)
-	if n != saysPerMinute || hidden != n {
-		t.Fatalf("%d logged, %d hidden from an old revision", n, hidden)
+	var n int
+	s.Store.Pool.QueryRow(ctx, `SELECT count(*) FROM room_log WHERE from_agent = 'w-raven/a'`).Scan(&n)
+	if n != saysPerMinute {
+		t.Fatalf("%d logged", n)
 	}
 	if err := s.Say(ctx, "nope", Player{Workspace: "w-x", Agent: "a", Handle: "x"}, "no game"); !errors.Is(err, ErrNoGame) {
 		t.Fatalf("a line for no game: %v", err)

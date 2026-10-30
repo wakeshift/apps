@@ -133,7 +133,7 @@ func HouseOf(ctx context.Context) (HouseClaim, bool) {
 	return c, ok
 }
 
-// HouseLabel is how a house player is labelled in the tools' output, for
+// HouseLabel is how a house player is labeled in the tools' output, for
 // agents: "House · Haiku 4.5"; empty for everyone else. Pages for people
 // don't show it.
 func (p Player) HouseLabel() string {

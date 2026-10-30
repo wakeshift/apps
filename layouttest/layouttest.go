@@ -171,7 +171,7 @@ func Check(port int, url string, vp Viewport, ready, measure, shot string) (Resu
 	return CheckScheme(port, url, vp, ready, measure, shot, false)
 }
 
-// CheckScheme is Check with the system's colour scheme set: dark if dark
+// CheckScheme is Check with the system's color scheme set: dark if dark
 // (prefers-color-scheme), else light. Check is light.
 func CheckScheme(port int, url string, vp Viewport, ready, measure, shot string, dark bool) (Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -402,7 +402,7 @@ func Run(t *testing.T, port int, pages []Page, sweep []int, shots string) {
 // Page is a page Run checks: its URL, whether it's live (checked at more
 // widths), what it's ready on (a script; "": once loaded), and its
 // measuring script (Measure). Viewports, if set, replaces Viewports for
-// it; Dark has the system ask for a dark colour scheme.
+// it; Dark has the system ask for a dark color scheme.
 type Page struct {
 	Name, URL      string
 	Live           bool

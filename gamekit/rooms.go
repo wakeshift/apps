@@ -439,9 +439,7 @@ func (tx *Tx) Say(game string, p Player, text string) error {
 	if recent >= saysPerMinute {
 		return ErrRateLimited
 	}
-	// attempts = 8 keeps a revision from before 008 from posting it as the
-	// moderator's (migrations/008_subscriptions.sql).
-	if _, err := tx.Exec(tx.Ctx, `INSERT INTO room_log (game_id, at, from_handle, subject, text, from_agent, attempts) VALUES ($1, $2, $3, $4, $5, $6, 8)`,
+	if _, err := tx.Exec(tx.Ctx, `INSERT INTO room_log (game_id, at, from_handle, subject, text, from_agent) VALUES ($1, $2, $3, $4, $5, $6)`,
 		game, tx.Now, p.Handle, truncate(text, subjectMax), text, agent); err != nil {
 		return err
 	}

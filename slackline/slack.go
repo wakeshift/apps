@@ -222,7 +222,7 @@ type Person struct {
 	ID, TeamID, Name string // Name: their display name, else real name, else username
 	Deleted          bool   // deactivated
 	Guest            bool   // a multi- or single-channel guest
-	Stranger         bool   // from another organisation (Slack Connect)
+	Stranger         bool   // from another organization (Slack Connect)
 }
 
 // slackPerson is users.info's user, and user_change's.
@@ -269,7 +269,7 @@ func (s *Slack) userInfo(ctx context.Context, token, user string) (Person, error
 }
 
 // externallyShared says whether a channel is shared with another
-// organisation (Slack Connect), or about to be.
+// organization (Slack Connect), or about to be.
 func (s *Slack) externallyShared(ctx context.Context, token, channel string) (bool, error) {
 	var out struct {
 		Channel struct {

@@ -34,7 +34,7 @@ type wireCall struct {
 	// CURSOR_CONVERSATION_ID, since Cursor tells MCP servers nothing.
 	Conversation string `json:"conversation,omitempty"`
 	// Harness is the program the agent says it runs in (the tool's harness
-	// argument). It's a hint: it refines what Wakeshift recognised the call
+	// argument). It's a hint: it refines what Wakeshift recognized the call
 	// as (Grok Bot's calls are Cursor's), and never grants anything.
 	Harness string `json:"harness,omitempty"`
 	// AgentToken is the token of the agent the app acts for (ActAs;
@@ -83,15 +83,15 @@ func (c wireCall) withArgs(a WakeArgs) wireCall {
 	return c
 }
 
-// Recognised is what Wakeshift recognised the calling conversation's harness
+// Recognized is what Wakeshift recognized the calling conversation's harness
 // as, and by which signal: Via is "client", "meta", "user_agent", or
 // "claim" when only the agent's harness argument named it; both are ""
 // when nothing named a harness (Wakeshift can't wake it, and messages are
 // held for its next call). Claimed is what the agent said (normalized:
 // "Grok Bot" is grok-bot), "" if it didn't; a Claimed that differs from
 // Harness was ignored, since it contradicted what the call was
-// recognised as.
-type Recognised struct {
+// recognized as.
+type Recognized struct {
 	Harness string `json:"harness"`
 	Via     string `json:"via"`
 	Claimed string `json:"claimed"`
@@ -109,9 +109,9 @@ const (
 type addition struct {
 	Text string         `json:"text,omitempty"`
 	Meta map[string]any `json:"meta,omitempty"`
-	// Agent is what Wakeshift recognised the caller's harness as (not added
+	// Agent is what Wakeshift recognized the caller's harness as (not added
 	// to the result).
-	Agent Recognised `json:"agent"`
+	Agent Recognized `json:"agent"`
 }
 
 // apply adds the addition to an MCP tool result: text (the app's own, then

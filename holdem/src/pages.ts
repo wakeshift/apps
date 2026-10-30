@@ -329,7 +329,7 @@ const sides = (pots: number[]) => pots.slice(1).map((p) => `<span class="side-po
 /** "sha256 3f9a·c2e1·…": the commitment, grouped for reading. */
 export const fingerprintOf = (hex: string) => "sha256 " + (hex.match(/.{1,4}/g) ?? []).join("·");
 
-/** The log of the live hand: "who" and "what" columns, coloured by kind. */
+/** The log of the live hand: "who" and "what" columns, colored by kind. */
 function logItems(items: ActionItem[]): string {
   return items
     .slice(-60)

@@ -23,7 +23,7 @@ type Tab struct {
 }
 
 // Open loads url in a new tab at vp (dark: the system asks for a dark
-// colour scheme), and waits for it to load. The tab closes with the test.
+// color scheme), and waits for it to load. The tab closes with the test.
 func Open(t *testing.T, port int, url string, vp Viewport, dark bool) *Tab {
 	t.Helper()
 	tab := NewTab(t, port, vp, dark)
@@ -31,7 +31,7 @@ func Open(t *testing.T, port int, url string, vp Viewport, dark bool) *Tab {
 	return tab
 }
 
-// NewTab opens a blank tab at vp (dark: the system asks for a dark colour
+// NewTab opens a blank tab at vp (dark: the system asks for a dark color
 // scheme). The tab closes with the test.
 func NewTab(t *testing.T, port int, vp Viewport, dark bool) *Tab {
 	t.Helper()

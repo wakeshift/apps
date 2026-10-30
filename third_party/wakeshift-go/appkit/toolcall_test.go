@@ -53,7 +53,7 @@ func (f *wakeCore) handler(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	path := strings.TrimPrefix(r.URL.Path, "/api/apps/v1")
-	if path == "/manifest" { // the automatic send (manifest_test.go tests it)
+	if path == "/manifest" || path == "/manifest/merge" { // the automatic send (manifest_test.go tests it)
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{}`)
 		return
@@ -283,7 +283,7 @@ func TestEventsOneBlockPerCall(t *testing.T) {
 	w := newWrapped(t, appkit.AttachOptions{})
 	var got []appkit.Subscription
 	mcp.AddTool(w.srv, &mcp.Tool{Name: "join"}, appkit.Events(w.at, func(ctx context.Context, call *appkit.ToolCall, in tableIn) (*mcp.CallToolResult, any, error) {
-		if call.Recognised != nil || call.Session != "" || call.User != "ada" || call.Tool != "join" || call.Native {
+		if call.Recognized != nil || call.Session != "" || call.User != "ada" || call.Tool != "join" || call.Native {
 			return nil, nil, fmt.Errorf("before subscribing: %+v", call)
 		}
 		a, err := w.turn.Subscribe(ctx, call, tableArgs{Table: in.Table}, appkit.Reason("Playing at "+in.Table), appkit.TTL(time.Hour))
@@ -324,7 +324,7 @@ func TestEventsOneBlockPerCall(t *testing.T) {
 	if add["pending"] != "pa_first" || add["native"] != nil || add["call"].(map[string]any)["session"] != "wsc_s1" {
 		t.Fatalf("addition: %v", add)
 	}
-	if len(got) != 2 || got[0].ID != "sub-1" || got[0].User != "ada" || !got[0].Created || got[0].Session != "wsc_s1" || got[0].Recognised.Harness != "claude-code" {
+	if len(got) != 2 || got[0].ID != "sub-1" || got[0].User != "ada" || !got[0].Created || got[0].Session != "wsc_s1" || got[0].Recognized.Harness != "claude-code" {
 		t.Fatalf("subscriptions: %+v", got)
 	}
 }
@@ -402,7 +402,7 @@ func TestEventsResolveSession(t *testing.T) {
 	w := newWrapped(t, appkit.AttachOptions{})
 	mcp.AddTool(w.srv, &mcp.Tool{Name: "join"}, appkit.Events(w.at, func(ctx context.Context, call *appkit.ToolCall, in tableIn) (*mcp.CallToolResult, any, error) {
 		s, err := call.ResolveSession(ctx)
-		if err != nil || s != "wsc_resolved" || call.Session != s || call.Recognised == nil || call.Recognised.Harness != "codex" {
+		if err != nil || s != "wsc_resolved" || call.Session != s || call.Recognized == nil || call.Recognized.Harness != "codex" {
 			return nil, nil, fmt.Errorf("resolve: %q %v %+v", s, err, call)
 		}
 		if again, err := call.ResolveSession(ctx); err != nil || again != s {
@@ -1083,7 +1083,7 @@ func TestClientChecksGolden(t *testing.T) {
 			t.Errorf("%s: IsCode(err, %q) is false", c.Name, c.Code)
 		}
 		for _, p := range append(w.core.paths(), anon.core.paths()...) {
-			if p != "/manifest" && p != "/calls/addition" {
+			if p != "/manifest" && p != "/manifest/merge" && p != "/calls/addition" {
 				t.Errorf("%s: Wakeshift was asked: %s", c.Name, p)
 			}
 		}

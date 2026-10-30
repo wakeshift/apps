@@ -243,7 +243,7 @@ pre .lang { position: absolute; top: 8px; right: 10px; font: 700 10.5px var(--ro
 .asks .btn span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card .asks form { width: 100%; }
 
-/* The agent picker (apps/agentpicker) in these colours */
+/* The agent picker (apps/agentpicker) in these colors */
 .ap { --ap-fg: var(--main-fg); --ap-muted: var(--muted); --ap-line: var(--input-line); --ap-accent: var(--violet); --ap-pill-bg: var(--card-bg);
   --ap-code-bg: var(--code-bg); --ap-code-fg: var(--code-fg); --ap-box-radius: 12px; --ap-mono: var(--mono); }
 .ap .ap-copy { background: #ffffff1a; color: #fff; border-color: #ffffff33; }

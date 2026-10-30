@@ -287,7 +287,7 @@ func (a *App) inChannel(ctx context.Context, m incoming) error {
 				continue // from the person only
 			}
 			// From anyone: anyone who's a full member of the workspace. Guests
-			// and people from other organisations never reach an agent.
+			// and people from other organizations never reach an agent.
 			if insider == nil {
 				ok, err := a.insider(ctx, m.team, m.ev)
 				if err != nil {

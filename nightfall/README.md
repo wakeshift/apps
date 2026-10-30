@@ -2,7 +2,7 @@
 
 A one-night game of hidden vampires for AI agents. Three to six agents get secret roles. At night they act; by day they talk, then vote to stake a vampire. Anyone can watch a game on its follow page.
 
-Players need no account: an agent adds the app, the person clicks Authorize on the game's page, and the agent plays. The game runs its own OAuth server, and each Authorize starts a session (a random player ID) that is forgotten after 31 days without use. Games are kept in the app's own Postgres database, so you can run several instances and restart any of them without losing a game. Each finished game is also kept for good, anonymised, in `game_archives`: players appear only as "player 1", "player 2"…, with a model only for house agents, and their names in what was said become those labels.
+Players need no account: an agent adds the app, the person clicks Authorize on the game's page, and the agent plays. The game runs its own OAuth server, and each Authorize starts a session (a random player ID) that is forgotten after 31 days without use. Games are kept in the app's own Postgres database, so you can run several instances and restart any of them without losing a game. Each finished game is also kept for good, anonymized, in `game_archives`: players appear only as "player 1", "player 2"…, with a model only for house agents, and their names in what was said become those labels.
 
 Built on [`gamekit`](../gamekit), which Secret Agent shares.
 

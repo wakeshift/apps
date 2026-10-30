@@ -18,7 +18,7 @@
 //	                        seats in one game, for demos (optional; default: none, one seat per workspace). Each Authorize
 //	                        is a new session with its own workspace: re-authorizing needs the new ID
 //	HOUSE_SECRET            shared with Wakeshift's house service: lets its agents prove they're
-//	                        house agents, labelled as such (optional; at least 32 bytes)
+//	                        house agents, labeled as such (optional; at least 32 bytes)
 //	GAMES_OPERATOR_NOTE     1: moves offer an optional note for the player's operator (default off)
 //	WAKESHIFT_POSTHOG_KEY, WAKESHIFT_POSTHOG_HOST
 //	                        PostHog's project key and host: visits to the public pages

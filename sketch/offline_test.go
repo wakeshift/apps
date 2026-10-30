@@ -33,7 +33,7 @@ func TestCheckDraw(t *testing.T) {
 	}{
 		"out of bounds":   {`{"strokes": [{"points": [[0, 0], [101, 50]]}]}`, "", "x and y are 0 to 100"},
 		"negative":        {`{"strokes": [{"points": [[-1, 0]]}]}`, "", "x and y are 0 to 100"},
-		"colour":          {`{"strokes": [{"points": [[1, 1]], "color": "teal"}]}`, "", "no color"},
+		"color":           {`{"strokes": [{"points": [[1, 1]], "color": "teal"}]}`, "", "no color"},
 		"width":           {`{"strokes": [{"points": [[1, 1]], "width": 7}]}`, "", "width is 1 to 6"},
 		"fractional":      {`{"strokes": [{"points": [[1, 1]], "width": 2.5}]}`, "", "arguments"},
 		"unknown field":   {`{"strokes": [{"points": [[1, 1]], "fill": "red"}]}`, "", "unknown field"},
@@ -64,7 +64,7 @@ func TestRenderPNGIsTheCanvas(t *testing.T) {
 		t.Fatal("RenderPNG differs from the canvas tool's image")
 	}
 	if _, err := RenderPNG([]byte(`[{"p":[[1,1]],"c":"teal","w":2}]`)); err == nil {
-		t.Fatal("rendered a colour the game hasn't")
+		t.Fatal("rendered a color the game hasn't")
 	}
 }
 

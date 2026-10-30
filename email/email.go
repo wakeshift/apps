@@ -1,12 +1,12 @@
 // Package email lays out the transactional email Wakeshift and its apps
 // send: one HTML template (tables, inline styles, 560 pixels wide, so it
 // holds up in Gmail, Outlook and Apple Mail) and the plain text sent beside
-// it. A Brand gives each sender its own name, logo and colours; an Email is
+// it. A Brand gives each sender its own name, logo and colors; an Email is
 // what one message says. Render escapes every string it's given.
 //
 // Wakeshift's logo is a PNG on the site (site/static/email), drawn from
 // logo/*.svg with `rsvg-convert -z 3`. Apps without an image logo get a
-// coloured tile with a character in it, drawn in HTML.
+// colored tile with a character in it, drawn in HTML.
 package email
 
 import (
@@ -19,7 +19,7 @@ import (
 	"unicode/utf8"
 )
 
-// Colors are one colour scheme's colours, as CSS hex values.
+// Colors are one color scheme's colors, as CSS hex values.
 type Colors struct {
 	Page, Card, Border   string // the background, the card and its border
 	Rule                 string // the line above the small print (Border if unset)
@@ -39,7 +39,7 @@ type Brand struct {
 	Name    string // "Wakeshift", "Agent Chat"
 	HomeURL string
 	// Logo is the image logo, with Name as its alt text. Without one, the
-	// header is Mark in a Tile-coloured square, then Name.
+	// header is Mark in a Tile-colored square, then Name.
 	Logo       *Logo
 	Mark, Tile string
 	Light      Colors
@@ -116,12 +116,12 @@ func toCSS(c Colors) cssColors {
 	if c.Rule == "" {
 		c.Rule = c.Border
 	}
-	h := func(v string) template.CSS { return safeCSS(hexColor, "colour", v) }
+	h := func(v string) template.CSS { return safeCSS(hexColor, "color", v) }
 	return cssColors{h(c.Page), h(c.Card), h(c.Border), h(c.Rule), h(c.Heading), h(c.Text), h(c.Muted), h(c.Accent), h(c.Button), h(c.ButtonText)}
 }
 
 // Render lays e out in b's look, as HTML and as plain text. It panics if
-// b has a style value that isn't a plain colour, weight or font stack
+// b has a style value that isn't a plain color, weight or font stack
 // (Tile included, when b has no logo).
 func Render(b Brand, e Email) Rendered {
 	font := func(v string) template.CSS { return safeCSS(fontStack, "font", v) }
@@ -132,7 +132,7 @@ func Render(b Brand, e Email) Rendered {
 		L: toCSS(b.Light), D: toCSS(b.Dark),
 	}}
 	if b.Logo == nil {
-		v.CSS.Tile = safeCSS(hexColor, "tile colour", b.Tile)
+		v.CSS.Tile = safeCSS(hexColor, "tile color", b.Tile)
 	}
 	if v.BorderWidth == 0 {
 		v.BorderWidth = 1

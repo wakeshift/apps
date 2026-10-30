@@ -2,6 +2,18 @@
 
 What changed in each release of `github.com/wakeshift/wakeshift-go`. v0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
+## v0.5.0 (2026-10-29)
+
+### Breaking
+
+- **`Recognised` is now `Recognized`.** The type `appkit.Recognised` is `appkit.Recognized`, and the fields `ToolCall.Recognised` and `Subscription.Recognised` are `Recognized`; `Subscription` marshals it to JSON as `recognized`. Rename them where you use them: `sub.Recognised.Harness` becomes `sub.Recognized.Harness`. What they hold is unchanged.
+
+### Fixed
+
+- **Processes that share your key no longer remove each other's events.** In v0.4.0 every process sent the event types it defined as your app's whole list. With an MCP server and a separate emitter on one key, whichever sent last removed the other's events, and the other's emits failed with `unknown_event` until it restarted. Now only your MCP server, the process that calls `Attach`, sends the manifest automatically, and Wakeshift merges it into the one it has: it adds or updates your event types and the settings you passed to `PublishManifest`, and never removes an event or clears a setting. A process that doesn't call `Attach` never sends it, whatever it calls (`Emit`, `Status`). `PublishManifest` still replaces the whole manifest, and is how you remove an event.
+- A process with no events defined never sends the manifest. In v0.4.0 an app call from one about events sent an empty list, which removed every one of your app's events.
+- If an event is defined only in a process that emits it, define it in your MCP server too (or publish it with `PublishManifest`): until a server sends it, emitting it fails with `unknown_event`.
+
 ## v0.4.0 (2026-10-29)
 
 Define your app's events (`DefineEvent`), attach Wakeshift to your MCP server (`Attach`), subscribe the conversations that call your own tools (`appkit.Events`, `event.Subscribe`), and emit to them (`Emit`). The rest of this section is what changed since v0.3.0.
@@ -105,7 +117,7 @@ Kept: `DefineEvent`, `Emit`, `PublishURL`, `End`, `Attach` and its three tools a
 - `appkit.WakeArgs` (embed it in a wrapped tool's input: `session_key`, `harness`, `conversation_id`) and `appkit.WakeOutput` (embed it in a tool's output to get the block's text in `structuredContent` too).
 - `Identity.Client`: the MCP client's name, for a stateless server that never sees `initialize`. Wakeshift reads it to tell which program the agent runs in, and whether the client subscribes to events itself. A name the request carries (its `_meta`'s, or `initialize`'s) wins.
 - `AttachOptions.Tools` names which of `Attach`'s own tools it adds (`SubscribeEventsTool`, `UnsubscribeEventsTool`, `ListSubscriptionsTool`). Nil adds all three; an empty list adds none.
-- `AttachOptions.Events.Native` tells `Events` that a call comes from a client that subscribes itself; the SDK also recognises ChatGPT's `_meta["openai/session"]`, its client name or User-Agent, and clients that declare MCP Events, on stateless servers too.
+- `AttachOptions.Events.Native` tells `Events` that a call comes from a client that subscribes itself; the SDK also recognizes ChatGPT's `_meta["openai/session"]`, its client name or User-Agent, and clients that declare MCP Events, on stateless servers too.
 - `Emit` to several recipients in one call: `To(users...)`, `ToSubscription(user, id)` and `ToNative(users...)`, mixable, at most 1,000. `Emitted` gains `Unmatched` and `Ended`.
 - `event.Status(ctx, args, appkit.To(user))`: how many conversations are subscribed to an event with these arguments (a personal event: one user's), how many are connected now, and how. `event.StatusOf(ctx, subs...)` reads up to 1,000 subscriptions by ID (each a `Recipient` with its user and subscription): whether each is live and its conversation connected.
 - A `Reason` on `Subscribe`, shown in the console.
@@ -119,7 +131,7 @@ Kept: `DefineEvent`, `Emit`, `PublishURL`, `End`, `Attach` and its three tools a
 ### Changed
 
 - A wrapped tool's reply carries one Wakeshift block, however many subscriptions it makes, and only when it subscribed (or Wakeshift has something for the conversation).
-- A subscription a failed tool call made is ended: an error, an `isError` result, an output the schema refuses, a JSON-RPC error, a panic or a cancelled request.
+- A subscription a failed tool call made is ended: an error, an `isError` result, an output the schema refuses, a JSON-RPC error, a panic or a canceled request.
 - A client that speaks MCP Events is told which event to subscribe to, or that it has.
 - `session_key` is the one name for the session argument.
 - An argument a tool's input doesn't declare is ignored, not refused, as in the TypeScript and Python SDKs: on a server you `Attach` to, the SDK drops it before the MCP SDK checks the input, for every tool, wrapped or not (`session`, the session argument's old name, included). A schema that allows other properties keeps them.

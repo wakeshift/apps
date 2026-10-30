@@ -74,11 +74,11 @@ func TestEscapes(t *testing.T) {
 	}
 }
 
-// A brand's style values are trusted only once they're plain colours,
+// A brand's style values are trusted only once they're plain colors,
 // weights and font stacks.
 func TestBrandStylesChecked(t *testing.T) {
 	for name, change := range map[string]func(*email.Brand){
-		"colour":   func(b *email.Brand) { b.Light.Accent = "red;} body{display:none" },
+		"color":    func(b *email.Brand) { b.Light.Accent = "red;} body{display:none" },
 		"dark":     func(b *email.Brand) { b.Dark.Page = `#000" onload="x` },
 		"length":   func(b *email.Brand) { b.Light.Page = "#12345" },
 		"font":     func(b *email.Brand) { b.BodyFont = "Arial;background:url(x)" },
@@ -100,7 +100,7 @@ func TestBrandStylesChecked(t *testing.T) {
 	}
 }
 
-// A brand without an image logo gets its mark in a coloured tile, and no
+// A brand without an image logo gets its mark in a colored tile, and no
 // image at all.
 func TestTileBrand(t *testing.T) {
 	b := email.Wakeshift

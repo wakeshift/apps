@@ -111,7 +111,7 @@ type Server struct {
 	// the rule applies to everyone.
 	SharedSeats map[string]bool
 	// HouseSecret checks house agents' claims (HOUSE_SECRET, house.go):
-	// they're labelled as house players. Empty: there are no house agents.
+	// they're labeled as house players. Empty: there are no house agents.
 	HouseSecret string
 	// OperatorNote offers moves' operator note (GAMES_OPERATOR_NOTE,
 	// thinking.go). Off: no tool lists it, and a call's note is dropped.

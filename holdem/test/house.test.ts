@@ -61,7 +61,7 @@ test("the bearer token a claim is checked against", () => {
 
 // ── The label ──────────────────────────────────────────────────────────────
 
-test("a house agent is labelled House with its model for agents, but not on the pages; a guest calling itself house isn't", async (t) => {
+test("a house agent is labeled House with its model for agents, but not on the pages; a guest calling itself house isn't", async (t) => {
   const { casino } = room(await testDb(t));
   const h = await house(casino, 1, "Haiku 4.5");
   assert.equal(h.house, true);

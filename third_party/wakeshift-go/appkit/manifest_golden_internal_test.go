@@ -8,76 +8,80 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // The manifest the three SDKs send, and when (sdk/typescript/test/manifest.json):
-// automatically, with the settings Wakeshift has or the app last published,
-// its listed events then the defined ones, refusing a name in both.
+// an explicit publish replaces it; the automatic send, only from a process
+// that serves the app's tools (Attach), merges the settings the app
+// published and its events into the one Wakeshift has.
 func TestManifestGolden(t *testing.T) {
+	type answer struct {
+		Status int             `json:"status"`
+		Body   json.RawMessage `json:"body"`
+	}
 	var fixture struct {
 		Emit struct {
 			Arguments sampleChatArgs `json:"arguments"`
 			Payload   sampleChat     `json:"payload"`
 		} `json:"emit"`
 		Cases []struct {
-			Name   string          `json:"name"`
-			Define []string        `json:"define"`
-			Stored json.RawMessage `json:"stored"`
+			Name   string   `json:"name"`
+			Define []string `json:"define"`
 			Steps  []struct {
-				Emit    bool      `json:"emit"`
-				Publish *Manifest `json:"publish"`
-				Define  string    `json:"define"`
-				Answer  *struct {
-					Status int             `json:"status"`
-					Body   json.RawMessage `json:"body"`
-				} `json:"answer"`
-				Error string `json:"error"`
+				Attach   bool      `json:"attach"`
+				Emit     bool      `json:"emit"`
+				Status   bool      `json:"status"`
+				Forget   bool      `json:"forget_user"`
+				Publish  *Manifest `json:"publish"`
+				Define   string    `json:"define"`
+				FailNext bool      `json:"fail_next"`
+				Answer   *answer   `json:"answer"`
+				Error    string    `json:"error"`
 			} `json:"steps"`
 			Requests []struct {
 				Method string         `json:"method"`
+				Path   string         `json:"path"`
 				Body   map[string]any `json:"body"`
 			} `json:"requests"`
 		} `json:"cases"`
 	}
 	readSharedFixture(t, "manifest.json", &fixture)
+	unavailable := &answer{Status: 503, Body: json.RawMessage(`{"error": {"code": "unavailable", "message": "try again"}}`)}
 	for _, c := range fixture.Cases {
 		t.Run(c.Name, func(t *testing.T) {
 			type request struct {
 				Method string
+				Path   string
 				Body   any
 			}
 			var (
-				mu     sync.Mutex
-				got    = []request{}
-				answer *struct {
-					Status int             `json:"status"`
-					Body   json.RawMessage `json:"body"`
-				}
+				mu    sync.Mutex
+				got   = []request{}
+				reply *answer
 			)
-			stored := c.Stored
-			if stored == nil {
-				stored = json.RawMessage(`{"description": ""}`)
-			}
 			a, _ := testApp(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				if strings.TrimPrefix(r.URL.Path, "/api/apps/v1") != "/manifest" {
-					io.WriteString(w, `{"matched": 0}`)
+				path := strings.TrimPrefix(r.URL.Path, "/api/apps/v1")
+				if path != "/manifest" && !strings.HasPrefix(path, "/manifest/") {
+					io.WriteString(w, `{"matched": 0, "subscriptions": 0, "connected": 0, "forgotten": false}`)
 					return
 				}
 				var body any
 				b, _ := io.ReadAll(r.Body)
 				json.Unmarshal(b, &body)
 				mu.Lock()
-				got = append(got, request{r.Method, body})
-				reply := answer
-				answer = nil
+				got = append(got, request{r.Method, path, body})
+				next := reply
+				reply = nil
 				mu.Unlock()
 				switch {
 				case r.Method == "GET":
-					w.Write(stored)
-				case reply != nil:
-					w.WriteHeader(reply.Status)
-					w.Write(reply.Body)
+					io.WriteString(w, `{"description": ""}`)
+				case next != nil:
+					w.WriteHeader(next.Status)
+					w.Write(next.Body)
 				default:
 					w.Write(b)
 				}
@@ -96,15 +100,25 @@ func TestManifestGolden(t *testing.T) {
 			for i, s := range c.Steps {
 				var err error
 				switch {
+				case s.Attach:
+					a.Attach(mcp.NewServer(&mcp.Implementation{Name: "sample", Version: "1"}, nil), AttachOptions{})
 				case s.Emit:
 					_, err = chat["chat.message"].Emit(context.Background(), fixture.Emit.Arguments, fixture.Emit.Payload)
+				case s.Status:
+					_, err = chat["chat.message"].Status(context.Background(), fixture.Emit.Arguments)
+				case s.Forget:
+					_, err = a.ForgetUser(context.Background(), "ada")
 				case s.Publish != nil:
 					mu.Lock()
-					answer = s.Answer
+					reply = s.Answer
 					mu.Unlock()
 					err = a.PublishManifest(context.Background(), *s.Publish)
 				case s.Define != "":
 					define(s.Define)
+				case s.FailNext:
+					mu.Lock()
+					reply = unavailable
+					mu.Unlock()
 				}
 				switch {
 				case s.Error == "" && err != nil:
@@ -130,7 +144,7 @@ func TestManifestGolden(t *testing.T) {
 					}
 					body = r.Body
 				}
-				want = append(want, request{r.Method, body})
+				want = append(want, request{r.Method, r.Path, body})
 			}
 			mu.Lock()
 			defer mu.Unlock()
@@ -140,6 +154,33 @@ func TestManifestGolden(t *testing.T) {
 				t.Fatalf("manifest requests:\n%s\nwant:\n%s", gb, wb)
 			}
 		})
+	}
+}
+
+// A call about events from a process with none defined never sends the
+// manifest, even one marked as serving (Attach refuses with none): an
+// empty list would say the app has no events.
+func TestNoEventsNeverSendsTheManifest(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	a, _ := testApp(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.Method+" "+strings.TrimPrefix(r.URL.Path, "/api/apps/v1"))
+		mu.Unlock()
+		io.WriteString(w, `{}`)
+	}))
+	for _, serving := range []bool{false, true} {
+		a.mu.Lock()
+		a.attached = serving
+		a.mu.Unlock()
+		if err := a.eventsCall(context.Background(), "GET", "/api/apps/v1/manifest", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(paths, ","); got != "GET /manifest,GET /manifest" {
+		t.Fatalf("requests: %s", got)
 	}
 }
 

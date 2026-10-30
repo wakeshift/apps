@@ -155,7 +155,7 @@ func (a *App) allVoted(tx *gamekit.Tx, g *game) error {
 
 // finish tallies the votes and announces who won: the civilians, if the
 // secret agent has a majority of the votes; else the secret agent. The
-// game is archived, anonymised, as it finishes.
+// game is archived, anonymized, as it finishes.
 func (a *App) finish(tx *gamekit.Tx, g *game) error {
 	if g.Phase != discussion && g.Phase != voting {
 		return nil

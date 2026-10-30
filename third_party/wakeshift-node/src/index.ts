@@ -7,7 +7,7 @@ export {
   type WakeshiftOptions,
   type AppInfo,
   type Duration,
-  type Recognised,
+  type Recognized,
   type Emitted,
   type Recipient,
   type Via,

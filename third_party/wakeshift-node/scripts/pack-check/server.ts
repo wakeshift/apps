@@ -91,7 +91,7 @@ assert.deepEqual(Object.keys(tools.find((t) => t.name === "ping")!.inputSchema.p
 const pinged = (await player.callTool({ name: "ping", arguments: { table: "oak" } })) as CallToolResult;
 assert.deepEqual(pinged.content, [{ type: "text", text: "pong" }]);
 assert.deepEqual(
-  wrapCalls.filter((p) => p !== "/manifest"),
+  wrapCalls.filter((p) => !p.startsWith("/manifest")),
   ["/event-subscriptions", "/calls/addition", "/calls/addition"],
 );
 assert.deepEqual(wrapBodies.find((b) => b.path === "/event-subscriptions")!.call, { client: "Cursor", user: "u1", tool: "join" });

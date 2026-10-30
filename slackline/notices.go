@@ -37,7 +37,7 @@ func (a *App) listeningNotice(ctx context.Context, team Team, ag Agent, r Rule) 
 	if shared, err := a.Slack.externallyShared(ctx, team.BotToken, r.ChannelID); err != nil {
 		slog.Warn("slackline: checking whether a channel is shared failed", "err", err)
 	} else if shared {
-		text += " People outside your organisation can't reach this agent."
+		text += " People outside your organization can't reach this agent."
 	}
 	return text + " Privacy: " + a.URL + "/privacy · `/slackline here` lists the agents listening here."
 }

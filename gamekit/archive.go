@@ -12,7 +12,7 @@ import (
 )
 
 // Archives: what a game keeps of its finished rounds (or games) for good,
-// anonymised. A kept record names no player: each is a role in that round
+// anonymized. A kept record names no player: each is a role in that round
 // ("drawer", "guesser 1"), with only whether it was a house agent and, for
 // a house agent, its model. No handle, workspace, agent, session, user or
 // guest ID, and no address. Each game keeps its own table; this is the part

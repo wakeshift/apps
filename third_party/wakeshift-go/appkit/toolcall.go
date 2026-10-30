@@ -99,9 +99,9 @@ type ToolCall struct {
 	// Session is the session_key passed; after Subscribe or
 	// ResolveSession, the conversation's session.
 	Session string
-	// Recognised is what Wakeshift recognised the agent's program as: nil
+	// Recognized is what Wakeshift recognized the agent's program as: nil
 	// until a Subscribe or ResolveSession.
-	Recognised *Recognised
+	Recognized *Recognized
 
 	s *callScope
 }
@@ -116,8 +116,8 @@ type Subscription struct {
 	Created bool `json:"created"`
 	// Session is the conversation's session.
 	Session string `json:"session"`
-	// Recognised is what Wakeshift recognised the agent's program as.
-	Recognised Recognised `json:"recognised"`
+	// Recognized is what Wakeshift recognized the agent's program as.
+	Recognized Recognized `json:"recognized"`
 	// Native: the caller subscribes itself (ToolCall.Native); nothing was
 	// made, ID is "", and the block tells it what to subscribe to.
 	Native bool `json:"native"`
@@ -353,14 +353,14 @@ func (c *ToolCall) ResolveSession(ctx context.Context) (string, error) {
 	var out struct {
 		Session string     `json:"session"`
 		Pending string     `json:"pending"`
-		Agent   Recognised `json:"agent"`
+		Agent   Recognized `json:"agent"`
 	}
 	if err := s.at.app.eventsCall(ctx, "POST", "/api/apps/v1/calls/session", map[string]any{"call": c.wire()}, &out); err != nil {
 		return "", err
 	}
 	s.pending, c.Session = out.Pending, out.Session
 	rec := out.Agent
-	c.Recognised = &rec
+	c.Recognized = &rec
 	return out.Session, nil
 }
 
@@ -418,7 +418,7 @@ func (e *DefinedEvent[A, P]) Subscribe(ctx context.Context, call *ToolCall, args
 			Created bool   `json:"created"`
 		} `json:"event_subscription"`
 		Session string     `json:"session"`
-		Agent   Recognised `json:"agent"`
+		Agent   Recognized `json:"agent"`
 		Pending string     `json:"pending"`
 	}
 	if err := e.app.eventsCall(ctx, "POST", "/api/apps/v1/event-subscriptions", body, &out); err != nil {
@@ -430,7 +430,7 @@ func (e *DefinedEvent[A, P]) Subscribe(ctx context.Context, call *ToolCall, args
 	s.armed = true
 	call.Session = out.Session
 	rec := out.Agent
-	call.Recognised = &rec
+	call.Recognized = &rec
 	es := out.EventSubscription
 	if es.Created {
 		s.created = append(s.created, createdSub{name: e.t.name, arguments: known, session: out.Session, pending: out.Pending})
@@ -439,7 +439,7 @@ func (e *DefinedEvent[A, P]) Subscribe(ctx context.Context, call *ToolCall, args
 	if user == "" {
 		user = call.User
 	}
-	return Subscription{ID: es.ID, User: user, Created: es.Created, Session: out.Session, Recognised: rec}, nil
+	return Subscription{ID: es.ID, User: user, Created: es.Created, Session: out.Session, Recognized: rec}, nil
 }
 
 // otherAppsEvent is Subscribe's and Unsubscribe's refusal of an event

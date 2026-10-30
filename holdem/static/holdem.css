@@ -385,7 +385,7 @@ table.board tr[hidden] { display: none; }
 .arena .pots { gap: calc(8 * var(--u)); flex-wrap: nowrap; }
 .arena .pot { font-size: calc(15 * var(--u)); padding: calc(5 * var(--u)) calc(13 * var(--u)); }
 .arena .side-pot { font-size: calc(12 * var(--u)); padding: calc(5 * var(--u)) calc(11 * var(--u)); white-space: nowrap; }
-/* A seat is its plate (centred on --px, --py), its cards (on --cx, --cy) and,
+/* A seat is its plate (centered on --px, --py), its cards (on --cx, --cy) and,
    while it's to act, its timer just under the plate. */
 .arena .seat { display: contents; }
 .arena .seat .plate { position: absolute; left: calc(var(--px) * var(--u)); top: calc(var(--py) * var(--u)); transform: translate(-50%, -50%); box-sizing: border-box; width: calc(170 * var(--u)); height: calc(112 * var(--u)); min-width: 0; justify-content: center; gap: calc(3 * var(--u)); padding: calc(8 * var(--u)) calc(12 * var(--u)); border-radius: calc(14 * var(--u)); border-width: max(1px, calc(2 * var(--u))); box-shadow: 0 calc(10 * var(--u)) calc(24 * var(--u)) rgba(0,0,0,.45); }

@@ -228,7 +228,7 @@ test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNE
   const claudeSub = subs.at(-1)!;
   assert.equal(claudeSub.created, true);
   assert.equal(claudeSub.user, "bob");
-  assert.equal(claudeSub.recognised.harness, "claude-code");
+  assert.equal(claudeSub.recognized.harness, "claude-code");
   assert.match(claudeSub.session, /^wsc_[a-z2-7]{26}$/);
   const said = text(watchedClaude);
   assert.ok(said.startsWith("Watching CI on alpha.\n\n"), said);
@@ -254,7 +254,7 @@ test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNE
   const watchedCodex = (await codex.callTool({ name: "watch_ci", arguments: { repo: "alpha", branch: "main" }, _meta: codexMeta })) as CallToolResult;
   const codexSub = subs.at(-1)!;
   assert.match(codexSub.session, /^wsc_[a-z2-7]{26}$/);
-  assert.equal(codexSub.recognised.harness, "codex");
+  assert.equal(codexSub.recognized.harness, "codex");
   assert.match(text(watchedCodex), /"Wakeshift: connected"/);
   const beacon = watchedCodex._meta?.["wakeshift/connector"];
   assert.equal(typeof beacon, "string");
@@ -324,24 +324,24 @@ test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNE
   assert.equal(plain.content.length, 1);
 
   // A stateless server has no client name: the core tells the harness from
-  // the call's _meta, else its User-Agent, and says what it recognised.
+  // the call's _meta, else its User-Agent, and says what it recognized.
   const stateless = await statelessApp(t, wake, build);
   const byMeta = await stateless("node", {}, { "claudecode/toolUseId": "toolu_e2e" });
-  assert.deepEqual(byMeta.sub.recognised, { harness: "claude-code", via: "meta", claimed: null });
+  assert.deepEqual(byMeta.sub.recognized, { harness: "claude-code", via: "meta", claimed: null });
   assert.match(byMeta.text, /start the Monitor tool/);
   const byUA = await stateless("opencode/1.18.7", {});
-  assert.deepEqual(byUA.sub.recognised, { harness: "opencode", via: "user_agent", claimed: null });
+  assert.deepEqual(byUA.sub.recognized, { harness: "opencode", via: "user_agent", claimed: null });
   assert.match(byUA.text, /install\/opencode\.sh/);
   const unknown = await stateless("node", {});
-  assert.deepEqual(unknown.sub.recognised, { harness: null, via: null, claimed: null });
+  assert.deepEqual(unknown.sub.recognized, { harness: null, via: null, claimed: null });
   // The agent's claim: it refines Cursor's calls into Grok Bot's, and is
   // ignored where it contradicts the client name (here in _meta).
   const asCursor = { "io.modelcontextprotocol/clientInfo": { name: "Cursor", version: "1.0" } };
   const grok = await stateless("node", { harness: "Grok Bot", conversation_id: "bc-e2e-grok" }, asCursor);
-  assert.deepEqual(grok.sub.recognised, { harness: "grok-bot", via: "client", claimed: "grok-bot" });
+  assert.deepEqual(grok.sub.recognized, { harness: "grok-bot", via: "client", claimed: "grok-bot" });
   assert.match(grok.text, /in the foreground/);
   const spoof = await stateless("node", { harness: "claude-code" }, asCursor);
-  assert.deepEqual(spoof.sub.recognised, { harness: "cursor", via: "client", claimed: "claude-code" });
+  assert.deepEqual(spoof.sub.recognized, { harness: "cursor", via: "client", claimed: "claude-code" });
   assert.doesNotMatch(spoof.text, /Monitor/);
 
   // Errors carry the API's code.
@@ -694,7 +694,7 @@ test("wrapped tools against a real core", { skip: !harness && "set WAKESHIFT_SDK
   assert.equal(first.length, 2);
   assert.ok(first.every((s) => s.created) && first[0].session !== "" && first[0].session === first[1].session);
   assert.equal(first[0].user, "ada");
-  assert.equal(first[0].recognised.harness, "codex");
+  assert.equal(first[0].recognized.harness, "codex");
   assert.equal((await listed("ada")).length, 2);
   // The next call in the thread: renewals, and the short form.
   const again = await tool("ada", "codex_exec/0.50.0", "join", { table: "oak" }, codex);

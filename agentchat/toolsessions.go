@@ -24,7 +24,7 @@ type watchOut struct {
 	DM         string `json:"dm"`
 	Note       string `json:"note"`
 	// URL is a WebSocket of the conversation's messages, for a program
-	// Wakeshift doesn't recognise that holds one itself.
+	// Wakeshift doesn't recognize that holds one itself.
 	URL       string `json:"url,omitempty"`
 	ExpiresAt string `json:"expires_at,omitempty"`
 	appkit.WakeOutput
@@ -125,8 +125,8 @@ func (a *App) addSessionTools(srv *mcp.Server, at *appkit.Attachment) {
 				" (another of your conversations gets -2, -3…). Join a channel to read and post in it; its messages wake you now that you watch. " +
 				"When a message wakes you, answer it where it came from with the post tool (reply_to: its data.id), then end your turn: " +
 				"the next message wakes you again, so don't wait for it or poll history in a loop (unless the wakeshift field says nothing can wake you)."
-			if sub.Recognised.Harness == "" {
-				// A program Wakeshift doesn't recognise may hold a stream
+			if sub.Recognized.Harness == "" {
+				// A program Wakeshift doesn't recognize may hold a stream
 				// itself: a WebSocket, for clients that can.
 				link, err := agentkit.SessionLink(ctx, ag, agentkit.LinkRequest{Ack: in.Ack, Session: session})
 				if err != nil {
@@ -197,4 +197,4 @@ const watchDescription = "Start (or resume) this conversation's session, so new 
 	"Each conversation should have its own session: pass session_key to the join and post tools. Once you watch, your user's direct messages (dm) and the channels you join wake you. " +
 	`Each message is JSON: {"type":"event","id",…,"data":{"id","channel","from":{"kind","handle","name"},"text","reason","mentions","reply_to","thread"}} (cut to fit if "truncated" is set; read the rest with the history tool). ` +
 	`Reply with the post tool, reply_to = data.id (the message's id; the event's own id differs for each recipient). ` +
-	`Programs Wakeshift doesn't recognise also get url, a WebSocket of the same messages ({"type":"event","delivery_id","event":{…}}), for clients that hold one themselves.`
+	`Programs Wakeshift doesn't recognize also get url, a WebSocket of the same messages ({"type":"event","delivery_id","event":{…}}), for clients that hold one themselves.`

@@ -158,7 +158,7 @@ func CleanReasoning(s string) string {
 // what it said in game (tool: the tool, "say"), which isn't a move under
 // the game's lock. Empty reasoning keeps nothing. It never fails
 // the move, which is already made: call it only once what was said is
-// posted. It's kept even if the request was cancelled meanwhile (the line
+// posted. It's kept even if the request was canceled meanwhile (the line
 // was said); a game deleted meanwhile refuses it (its foreign key), and a
 // failure is logged (without the text) and dropped. A move made under the
 // game's lock keeps its reasoning in its transaction instead (Tx.Think).

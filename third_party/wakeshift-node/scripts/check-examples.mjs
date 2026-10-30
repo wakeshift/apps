@@ -38,13 +38,15 @@ if (!readmeOnly) {
   for (const f of readdirSync(docs).filter((f) => f.endsWith(".md")).sort()) fromMarkdown(join(docs, f));
 }
 
-// The landing page's sample: the <pre> in the code card, without its highlighting.
+// The landing page's TypeScript sample: the <pre> in its tab, without its
+// highlighting. (site/landing_examples_test.go checks the Go one, and
+// sdk/python/tests/test_docs.py the Python one.)
 if (!readmeOnly) {
   const html = readFileSync(join(repo, "site/templates/landing.html"), "utf8");
-  const m = html.match(/<div class="code">[\s\S]*?<pre>([\s\S]*?)<\/pre>/);
-  if (!m) throw new Error("landing.html: no code sample");
+  const m = html.match(/<div class="panel"[^>]*id="c-ts"[^>]*>\s*<pre>([\s\S]*?)<\/pre>/);
+  if (!m) throw new Error("landing.html: no TypeScript sample");
   const code = m[1]
-    .replace(/<span class="ln">/g, "\n")
+    .replace(/<span class="l">/g, "\n")
     .replace(/<[^>]+>/g, "")
     .replace(/&gt;/g, ">")
     .replace(/&lt;/g, "<")

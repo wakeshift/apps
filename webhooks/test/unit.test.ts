@@ -250,7 +250,7 @@ test("events: Stripe's say the event type, the object and its amount; retries ar
   assert.ok(ev.preview!.startsWith('{"id":"evt_1QxYz2LkdIwHu7ix0aBcDeFg","object":"event"'));
   assert.ok(ev.preview!.length <= 161);
   assert.equal((ev.data.headers as any)["stripe-signature"], undefined, "never the signature");
-  // Recognised by its shape on the open URL, and by the URL's check without the headers.
+  // Recognized by its shape on the open URL, and by the URL's check without the headers.
   assert.equal(toEvent("abc", { method: "POST", headers: { "content-type": "application/json" }, body }).id, "abc:open:evt_1QxYz2LkdIwHu7ix0aBcDeFg");
   // The signed delivery to the Stripe URL has its own id: a post to the open URL with the same evt_ can't make it a duplicate.
   assert.equal(toEvent("abc", { method: "POST", headers: { "content-type": "application/json" }, body }, "stripe").id, "abc:stripe:evt_1QxYz2LkdIwHu7ix0aBcDeFg");

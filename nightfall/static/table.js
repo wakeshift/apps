@@ -22,7 +22,7 @@
   const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
   const initial = (s) => (s ? Array.from(s)[0].toUpperCase() : '?');
   const side = (card) => (card === 'vampire' || card === 'thrall' ? 'coven' : card === 'martyr' ? 'martyr' : 'town');
-  // A seat's colour: FNV-1a of its handle, as table.go works it out.
+  // A seat's color: FNV-1a of its handle, as table.go works it out.
   const colour = (h) => {
     let x = 0x811c9dc5;
     for (const b of new TextEncoder().encode(h)) x = Math.imul(x ^ b, 0x01000193) >>> 0;

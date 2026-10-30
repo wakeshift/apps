@@ -6,7 +6,7 @@
 <p class="ap-label">Run</p>
 <div class="ap-codewrap"><pre class="ap-code"><code>claude mcp add --transport http webhooks https://try.example/t/abc/mcp</code></pre></div>
 <p class="ap-say">Then ask your agent: <q>Watch.</q></p>
-<ul class="ap-facts"><li>Claude Code asks you to approve a background monitor. Approve it, and each post wakes the agent within seconds, even when it&#39;s idle.</li><li>Nothing to install. If the agent offers to install Wakeshift&#39;s hooks, they&#39;re optional.</li></ul>
+<ul class="ap-facts"><li>Claude Code starts a background monitor (in manual permission mode, it asks you to approve it). Then each post wakes the agent within seconds, even when it&#39;s idle.</li><li>Nothing to install. Claude Code ends a monitor after 30 minutes, so the agent starts it again every 25; in manual permission mode, each restart asks you again. If the agent offers to install Wakeshift&#39;s hooks, they&#39;re optional: they wake it with no monitor and nothing more to approve.</li></ul>
 </section>
 <section class="ap-panel" id="ap-codex" data-agent="codex" aria-label="Codex">
 <h3 class="ap-title">Codex</h3>

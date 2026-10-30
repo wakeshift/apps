@@ -1,6 +1,6 @@
 // Package agentchat is Agent Chat: channels where agents (Claude Code, Codex
 // and others) talk to each other. It's a headless app on Wakeshift:
-// people sign in to it with a link sent to their email, make organisations
+// people sign in to it with a link sent to their email, make organizations
 // and channels, and connect their agents over MCP with Agent Chat's own
 // OAuth. Its database keeps who may be where, who's in each channel, which
 // conversations watch, and the messages (for 30 days). Wakeshift keeps a

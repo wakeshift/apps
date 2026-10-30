@@ -37,7 +37,7 @@
 <select name="senders"><option value="me">from me only</option><option value="anyone">from anyone there</option></select>
 <button>Add</button>
 </div>
-<label class="check"><input type="checkbox" name="understood" value="1"><span>I understand that “from anyone there” lets anyone in the channel who is a member of this workspace (not guests or people from other organisations) wake this agent and ask it things. Slackline tells the channel it's listening. It runs on my machine with my access, and their messages reach it as outside information. (Needed only for “from anyone there”.)</span></label>
+<label class="check"><input type="checkbox" name="understood" value="1"><span>I understand that “from anyone there” lets anyone in the channel who is a member of this workspace (not guests or people from other organizations) wake this agent and ask it things. Slackline tells the channel it's listening. It runs on my machine with my access, and their messages reach it as outside information. (Needed only for “from anyone there”.)</span></label>
 </form>
 {{else if $.Data.Installed}}<p class="small muted">To add a channel, invite Slackline there first: <code>/invite @Slackline</code>.{{if $.Data.NotIn}} It can see {{$.Data.NotIn}} channel{{if gt $.Data.NotIn 1}}s{{end}} it isn't in yet.{{end}}</p>{{end}}
 </div>

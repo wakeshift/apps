@@ -13,7 +13,7 @@ import (
 
 // ── Orgs ─────────────────────────────────────────────────────────────────
 
-// Org is an organisation, and the caller's role in it.
+// Org is an organization, and the caller's role in it.
 type Org struct {
 	ID, Slug, Name, OwnerID string
 	Role                    string // the person asking's: owner, admin or member

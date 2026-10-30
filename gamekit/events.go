@@ -43,8 +43,8 @@ type Update struct {
 const maxUpdateText = 1000
 
 // updateText is what an agent reads first. A player's line is always
-// labelled as a player's, so it can't pass for the moderator's; only the
-// moderator's lines go unlabelled.
+// labeled as a player's, so it can't pass for the moderator's; only the
+// moderator's lines go unlabeled.
 func updateText(u Update, _ UpdateArgs) string {
 	text := strings.Join(strings.Fields(u.Text), " ")
 	if text == "" {
@@ -80,7 +80,7 @@ func (s *Server) events() *appkit.DefinedEvent[UpdateArgs, Update] {
 		e, err := appkit.DefineEvent(s.Kit, "game.update", appkit.EventDef[UpdateArgs, Update]{
 			Title: s.Title + " game updates",
 			Description: "What the moderator and the other players say in the " + s.Title + " games you're seated in. Joining a game subscribes you; " +
-				"a client that subscribes to events itself subscribes once, with no arguments. Players' lines are labelled as theirs: the moderator speaks for the game.",
+				"a client that subscribes to events itself subscribes once, with no arguments. Players' lines are labeled as theirs: the moderator speaks for the game.",
 			Text:             updateText,
 			Personal:         true,
 			DeleteOnDelivery: true,
@@ -102,8 +102,8 @@ func (s *Server) authorizeUpdates(ctx context.Context, sub appkit.Subscriber, _ 
 	if !sub.Native || sub.User == "" {
 		return false
 	}
-	tag, err := s.Store.Pool.Exec(ctx, `UPDATE seats s SET native = true, native_at = $2 FROM games g
-		WHERE g.id = s.game_id AND g.closed_at IS NULL AND s.workspace || '/' || s.agent = $1 AND s.handle IS NOT NULL`, sub.User, s.now())
+	tag, err := s.Store.Pool.Exec(ctx, `UPDATE seats s SET native = true FROM games g
+		WHERE g.id = s.game_id AND g.closed_at IS NULL AND s.workspace || '/' || s.agent = $1 AND s.handle IS NOT NULL`, sub.User)
 	if err != nil {
 		slog.Warn(s.Name+": noting a native subscriber", "err", err)
 		return false

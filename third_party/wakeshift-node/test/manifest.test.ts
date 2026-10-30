@@ -1,10 +1,12 @@
 // The manifest the three SDKs send, and when (test/manifest.json, which the
-// Go and Python SDKs test against too): automatically, with the settings
-// Wakeshift has or the app last published, its listed events then the
-// defined ones, refusing a name in both.
+// Go and Python SDKs test against too): an explicit publish replaces it;
+// the automatic send, only from a process that serves the app's tools
+// (attach), merges the settings the app published and its events, its
+// listed events then the defined ones, refusing a name in both.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { Wakeshift, type Manifest } from "../src/index.js";
 
@@ -16,9 +18,18 @@ const fixture = JSON.parse(readFileSync(new URL("../../test/manifest.json", impo
   cases: {
     name: string;
     define: string[];
-    stored?: unknown;
-    steps: { emit?: boolean; publish?: Manifest; define?: string; answer?: { status: number; body: unknown }; error?: string }[];
-    requests: { method: string; body?: any }[];
+    steps: {
+      attach?: boolean;
+      emit?: boolean;
+      status?: boolean;
+      forget_user?: boolean;
+      publish?: Manifest;
+      define?: string;
+      fail_next?: boolean;
+      answer?: { status: number; body: unknown };
+      error?: string;
+    }[];
+    requests: { method: string; path: string; body?: any }[];
   }[];
 };
 
@@ -66,18 +77,19 @@ function sorted(v: any): any {
 
 for (const c of fixture.cases) {
   test(`manifest.json: ${c.name}`, async () => {
-    const got: { method: string; body?: unknown }[] = [];
+    const got: { method: string; path: string; body?: unknown }[] = [];
     let answer: { status: number; body: unknown } | undefined;
+    const unavailable = { status: 503, body: { error: { code: "unavailable", message: "try again" } } };
     const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
       const path = String(url).replace("http://core.test/api/apps/v1", "");
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       let status = 200;
-      let out: unknown = { matched: 0 };
-      if (path === "/manifest") {
-        got.push(method === "GET" ? { method } : { method, body });
-        out = method === "GET" ? (c.stored ?? { description: "" }) : body;
-        if (method === "PUT" && answer) {
+      let out: unknown = { matched: 0, subscriptions: 0, connected: 0, forgotten: false };
+      if (path === "/manifest" || path.startsWith("/manifest/")) {
+        got.push(method === "GET" ? { method, path } : { method, path, body });
+        out = method === "GET" ? { description: "" } : body;
+        if (method !== "GET" && answer) {
           ({ status, body: out } = answer);
           answer = undefined;
         }
@@ -90,9 +102,18 @@ for (const c of fixture.cases) {
     for (const [i, s] of c.steps.entries()) {
       let err: unknown;
       try {
-        if (s.emit) {
+        if (s.attach) {
+          wake.attach(new McpServer({ name: "sample", version: "1.0.0" }));
+        } else if (s.fail_next) {
+          answer = unavailable;
+        } else if (s.emit) {
           const chat = events.get(fixture.emit.event) as any;
           await chat.emit(fixture.emit.arguments, fixture.emit.payload);
+        } else if (s.status) {
+          const chat = events.get(fixture.emit.event) as any;
+          await chat.status(fixture.emit.arguments);
+        } else if (s.forget_user) {
+          await wake.forgetUser("ada");
         } else if (s.publish) {
           answer = s.answer;
           await wake.publishManifest(s.publish);
@@ -110,9 +131,10 @@ for (const c of fixture.cases) {
     }
     const want = c.requests.map((r) =>
       r.body === undefined
-        ? { method: r.method }
+        ? { method: r.method, path: r.path }
         : {
             method: r.method,
+            path: r.path,
             body: { ...r.body, ...(r.body.events ? { events: r.body.events.map((e: unknown) => (typeof e === "string" ? events.get(e)!.manifest : e)) } : {}) },
           },
     );

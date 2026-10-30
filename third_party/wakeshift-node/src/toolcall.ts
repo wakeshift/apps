@@ -26,7 +26,7 @@ import { getObjectShape, isZ4Schema, normalizeObjectSchema, safeParseAsync, type
 import { WakeshiftError } from "./errors.js";
 import { EXTENSION_KEY, dialectOf } from "./spec.js";
 import type { Identity, WakeEvent } from "./events.js";
-import { packCall, type Call, type Duration, type Recognised, type Wakeshift } from "./wakeshift.js";
+import { packCall, type Call, type Duration, type Recognized, type Wakeshift } from "./wakeshift.js";
 
 // Wakeshift's three arguments (wakeshift.ts's SESSION_ARG, HARNESS_ARG and
 // CONVERSATION_ARG, repeated: that module imports this one).
@@ -126,8 +126,8 @@ export interface Subscription {
   created: boolean;
   /** The conversation's session. A secret: don't show, store or log it. */
   session: string;
-  /** What Wakeshift recognised the agent's program as. */
-  recognised: Recognised;
+  /** What Wakeshift recognized the agent's program as. */
+  recognized: Recognized;
   /** The caller subscribes itself (call.native): nothing was made, id is "", and the block tells it what to subscribe to. */
   native: boolean;
 }
@@ -162,8 +162,8 @@ export interface ToolCall {
   readonly nativeConversation: string | null;
   /** The session_key passed; after a subscribe or resolveSession, the conversation's session. */
   readonly session: string | null;
-  /** What Wakeshift recognised the agent's program as: null until a subscribe or resolveSession. */
-  readonly recognised: Recognised | null;
+  /** What Wakeshift recognized the agent's program as: null until a subscribe or resolveSession. */
+  readonly recognized: Recognized | null;
   /** MCP's own extra for the call. */
   readonly extra: ToolCallExtra;
   /**
@@ -351,7 +351,7 @@ class CallScope implements ToolCall {
   native = false;
   nativeConversation: string | null = null;
   session: string | null;
-  recognised: Recognised | null = null;
+  recognized: Recognized | null = null;
   extra: ToolCallExtra;
 
   ended = false;
@@ -424,7 +424,7 @@ class CallScope implements ToolCall {
       const known = event.parseArgs(args);
       if (this.native) {
         this.addNative(event.name, known);
-        return { id: "", user: this.user ?? "", created: false, session: "", recognised: { harness: null, via: null, claimed: null }, native: true };
+        return { id: "", user: this.user ?? "", created: false, session: "", recognized: { harness: null, via: null, claimed: null }, native: true };
       }
       if (event.personal && !this.user) {
         throw new WakeshiftError(400, "bad_arguments", `${event.name} is personal: call.subscribe needs a user (attach's identify), who the subscription belongs to`);
@@ -437,17 +437,17 @@ class CallScope implements ToolCall {
       const out = await this.at.wake.requestApp<{
         event_subscription: { id: string; user?: string; created: boolean };
         session: string;
-        agent?: Partial<Recognised>;
+        agent?: Partial<Recognized>;
         pending?: string;
       }>("POST", "/event-subscriptions", body);
       if (out.pending) this.pending = out.pending;
       this.armed = true;
       this.session = out.session;
-      const rec = recognisedOf(out.agent);
-      this.recognised = rec;
+      const rec = recognizedOf(out.agent);
+      this.recognized = rec;
       const es = out.event_subscription;
       if (es.created) this.created.push({ name: event.name, arguments: known, session: out.session, pending: out.pending ?? this.pending });
-      return { id: es.id, user: es.user ?? this.user ?? "", created: !!es.created, session: out.session, recognised: rec, native: false };
+      return { id: es.id, user: es.user ?? this.user ?? "", created: !!es.created, session: out.session, recognized: rec, native: false };
     });
   }
 
@@ -464,10 +464,10 @@ class CallScope implements ToolCall {
   resolveSession(): Promise<string> {
     return this.request(async () => {
       if (this.pending && this.session) return this.session;
-      const out = await this.at.wake.requestApp<{ session: string; pending: string; agent?: Partial<Recognised> }>("POST", "/calls/session", { call: this.wire() });
+      const out = await this.at.wake.requestApp<{ session: string; pending: string; agent?: Partial<Recognized> }>("POST", "/calls/session", { call: this.wire() });
       this.pending = out.pending;
       this.session = out.session;
-      this.recognised = recognisedOf(out.agent);
+      this.recognized = recognizedOf(out.agent);
       return out.session;
     });
   }
@@ -551,7 +551,7 @@ class CallScope implements ToolCall {
   }
 }
 
-function recognisedOf(a: Partial<Recognised> | undefined): Recognised {
+function recognizedOf(a: Partial<Recognized> | undefined): Recognized {
   return { harness: a?.harness ?? null, via: a?.via ?? null, claimed: a?.claimed ?? null };
 }
 

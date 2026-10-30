@@ -55,11 +55,14 @@ type App struct {
 	eventTypes []*eventType // DefineEvent's, in order
 
 	// The manifest (manifest.go): what the app last gave PublishManifest
-	// (nil for nothing), and whether Wakeshift has the manifest for the
-	// event types defined now (sent at generation sentGen; DefineEvent
-	// moves gen on). sendMu makes one send at a time.
+	// (nil for nothing), whether this process serves the app's tools
+	// (Attach: only then is the manifest sent automatically), and whether
+	// Wakeshift has the manifest for the event types defined now (sent at
+	// generation sentGen; DefineEvent moves gen on). sendMu makes one send
+	// at a time.
 	sendMu       sync.Mutex
 	base         *Manifest
+	attached     bool
 	gen, sentGen uint64
 	sent         bool
 }
