@@ -72,10 +72,32 @@ func TaskResult(app, handle string, lines []string) string {
 }
 
 // TaskEnded is a wait's result once the conversation has nothing left to
-// wait for (its last subscription ended): note says why.
-func TaskEnded(note string) string {
-	return "Wakeshift: this wait has ended for good. " + strings.TrimSpace(note) + " Don't call " + WaitTool + " again unless you subscribe again."
+// wait for (its last subscription ended): note says why. It names the
+// conversation's session key, which stays the same: a conversation that
+// subscribes again without it would start a second session.
+func TaskEnded(note, handle string) string {
+	return "Wakeshift: this wait has ended for good. " + strings.TrimSpace(note) + " Don't call " + WaitTool + " again unless you subscribe again. " +
+		"If you do, pass " + SessionArg + "=" + strconv.Quote(handle) + " to this app's tools as before: it's still this conversation's key."
 }
+
+// KeepSessionNote is said in the result of a tool call that unsubscribed
+// the conversation from something: its session key stays the same, so
+// subscribing again (or anything else) passes it as before.
+func KeepSessionNote(handle string) string {
+	return "This conversation's " + SessionArg + " stays " + strconv.Quote(handle) + " after unsubscribing: keep passing it to this app's tools, " +
+		"including when you subscribe again, so Wakeshift treats it as the same conversation (keep it to this conversation; don't share or log it)."
+}
+
+// KeylessUnsubscribeNote is said in the result of an unsubscribe that
+// ended nothing because the call passed no session key, from a
+// conversation that only its key names (Claude Code's calls carry no
+// conversation ID): Wakeshift couldn't tell which conversation called, so
+// the conversation may still be subscribed. Subscribing again without the
+// key would start a second session, and every message would arrive twice.
+const KeylessUnsubscribeNote = "Wakeshift: nothing was unsubscribed, and this conversation may still be subscribed: this call didn't pass " +
+	"this conversation's " + SessionArg + ", so Wakeshift couldn't tell which conversation it came from. Call this tool again now with " +
+	"the " + SessionArg + " you were given when you subscribed (it's in that call's result). Don't subscribe again until you have: " +
+	"subscribing without the key starts a second session, and every message would then reach this conversation twice."
 
 // TaskHooks is a wait's result once Wakeshift's hooks connect the
 // conversation: they deliver instead. It starts with Connected.

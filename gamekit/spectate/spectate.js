@@ -44,7 +44,7 @@
     let seen = '';
     const render = (s) => {
       const sub = byId('sub');
-      sub.replaceChildren(el('span', 'live-dot'), 'Game ' + s.game + ' · ' + s.status);
+      sub.replaceChildren(el('span', 'live-dot'), (body.dataset.room || 'Game') + ' ' + s.game + ' · ' + s.status);
       sub.firstChild.setAttribute('aria-hidden', 'true');
 
       const res = byId('result');

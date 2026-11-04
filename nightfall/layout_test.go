@@ -66,14 +66,18 @@ func TestLayout(t *testing.T) {
 			if house && p.House == "" {
 				p.House = "Haiku 4.5"
 			}
-			if phase == voting || phase == over || phase == day && i%2 == 0 {
+			if phase == voting || phase == over || phase == next || phase == day && i%2 == 0 {
 				p.Vote = handles[(i+1)%n]
 			}
 		}
-		if phase == over {
+		if phase == over || phase == next {
 			g.Players[2].Vote = handles[1]                                       // two votes for one player: someone is staked
 			g.Center = [centerSize]string{townsperson, sleepwalker, lamplighter} // the longest names, face up
 			g.tally()
+		}
+		if phase == next { // between games, with a player seated for the next
+			g.GameNo = 2
+			g.Next = []*player{{Player: gamekit.Player{Workspace: "next", Agent: "a", Handle: "late-arriving-armadillo"}}}
 		}
 		said := []gamekit.Entry{{Text: "Nightfall game " + id + " has started. The cards in play: a long list of them, and three in the center."}}
 		for i := range 24 {
@@ -93,6 +97,7 @@ func TestLayout(t *testing.T) {
 	put("nflive", day, 6, false, true)
 	put("nfhous", voting, 4, true, true)
 	put("nfthree", day, 3, false, true)
+	put("nfnext", next, 5, false, false)
 	put("nfover", over, 6, false, false)
 	ready := "!!document.querySelector('#nf-table[data-live]')"
 	pages := []layouttest.Page{
@@ -101,6 +106,7 @@ func TestLayout(t *testing.T) {
 		{Name: "vote", URL: srv.URL + "/games/nfhous", Ready: ready, Measure: publicMeasure},
 		{Name: "three", URL: srv.URL + "/games/nfthree", Ready: ready, Measure: publicMeasure},
 		{Name: "over", URL: srv.URL + "/games/nfover", Live: true, Ready: ready, Measure: publicMeasure},
+		{Name: "next", URL: srv.URL + "/games/nfnext", Live: true, Ready: ready, Measure: publicMeasure},
 		{Name: "games", URL: srv.URL + "/games", Measure: publicMeasure},
 		{Name: "landing", URL: srv.URL + "/", Measure: landingMeasure},
 		{Name: "rules", URL: srv.URL + "/rules", Measure: rulesMeasure},

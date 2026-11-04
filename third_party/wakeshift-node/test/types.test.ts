@@ -5,10 +5,13 @@
 import { test } from "node:test";
 import { expectTypeOf } from "expect-type";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { z } from "zod";
 import * as z3 from "zod/v3";
-import { Wakeshift, type Emitted, type Recipient, type Subscription, type ToolCall, type ToolCallExtra } from "../src/index.js";
+import { Wakeshift, type Emitted, type Recipient, type Subscription, type ToolCall, type ToolCallExtra, type Attached } from "../src/index.js";
+
+type V1Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 const seed = Buffer.alloc(32, 9).toString("base64url");
 
@@ -37,9 +40,10 @@ test("wrapped tools' types", () => {
     attached.events("join", async (args, call) => {
       // As MCP's own callbacks get them (ShapeOutput): an optional field is present, maybe undefined.
       expectTypeOf(args).toEqualTypeOf<{ table: string; seats: number | undefined }>();
-      expectTypeOf(call).toEqualTypeOf<ToolCall>();
+      expectTypeOf(call).toEqualTypeOf<ToolCall<V1Extra>>();
       expectTypeOf(call.user).toEqualTypeOf<string | undefined>();
-      expectTypeOf(call.extra).toEqualTypeOf<ToolCallExtra>();
+      // MCP's own extra, as the SDK 1.x types a tool callback's.
+      expectTypeOf(call.extra).toEqualTypeOf<V1Extra>();
       const sub = await call.subscribe(turn, { table: args.table }, { reason: "Playing", ttl: "1h" });
       expectTypeOf(sub).toEqualTypeOf<Subscription>();
       expectTypeOf(await call.unsubscribe(turn, { table: "x" })).toEqualTypeOf<boolean>();
@@ -83,10 +87,19 @@ test("wrapped tools' types", () => {
   // A tool whose inputSchema lacks Wakeshift's arguments doesn't compile.
   server.registerTool(
     "bare",
-    // @ts-expect-error: the input schema must come from attached.inputs (attached.events needs its three keys)
     { inputSchema: { table: z.string() } },
+    // @ts-expect-error: the input schema must come from attached.inputs (attached.events needs its three keys)
     attached.events("bare", () => "x"),
   );
+
+  // Code written against 0.5's types still compiles: a bare Attached or
+  // ToolCall takes this server's, and a 1.x extra is a ToolCallExtra.
+  const register = (a: Attached) => a.inputs({});
+  register(attached);
+  const seat = (c: ToolCall) => c.user;
+  const extraOf = (c: ToolCall<V1Extra>): ToolCallExtra => c.extra;
+  void seat;
+  void extraOf;
 
   // Nor does a handler returning something that isn't a result.
   server.registerTool(

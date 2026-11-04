@@ -193,8 +193,8 @@ var (
 )
 
 // connectedAgents says, for each of the agents, whether any of its
-// conversations is connected to Wakeshift now (its stream, or Wakeshift
-// for Mac for a Codex thread). An agent Wakeshift can't be asked about
+// conversations is connected to Wakeshift now (its stream, or the
+// connector's for a Codex thread). An agent Wakeshift can't be asked about
 // counts as not connected.
 func (a *App) connectedAgents(ctx context.Context, agents []Agent) map[string]bool {
 	out := map[string]bool{}

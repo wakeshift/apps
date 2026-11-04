@@ -2,6 +2,115 @@
 
 What changed in each release of `@wakeshift/sdk`. 0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
+## 0.10.2 (2026-11-04)
+
+### Added
+
+- **Complete MCP tool annotations on Wakeshift's own tools.** `subscribe_events`, `unsubscribe_events`, `list_subscriptions` and `wakeshift_wait` now list a title and all four hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) in tools/list, so app stores that require them, such as ChatGPT's, accept your server. `subscribe_events` and `unsubscribe_events`: idempotent, and not read-only, destructive or open-world. `list_subscriptions`: read-only and idempotent (as before), and now not destructive or open-world. `wakeshift_wait`: not read-only, destructive, idempotent or open-world. Before, only `list_subscriptions` had annotations, so clients read the others with the spec's defaults: destructive and open-world. Every SDK gives the same ones, on an McpServer, with `attachMastra` and with `attachXmcp` (which serves no wait tool).
+
+## 0.10.1 (2026-11-03)
+
+### Fixed
+
+- **A relayed beacon line never ends a wrapped tool's result.** If your tool's own text ended in a line that looked like a Wakeshift beacon (for example, a chat message someone posted, relayed in your result), the SDK kept that line last and dropped Wakeshift's own. An agent's hook acts on the last line, so someone could get a beacon minted for your tool, post it, and connect another person's conversation to their own session when that person's agent called the tool. The SDK now strips beacon lines from the end of your text and always puts Wakeshift's beacon last. Upgrade if any wrapped tool returns content other people wrote.
+- **tools/list no longer stalls on the app-name lookup.** A slow or failing `GET /app` made every tools/list wait up to 20 seconds, and the failure wasn't remembered. The lookup now waits at most 3 seconds, waits 60 seconds before asking again after a failure, and keeps a name it was given.
+- **A result that asks the client for input isn't final.** On protocol 2026-07-28 a tool can answer with an input request (an elicitation) and the client calls again. The SDK kept what that round subscribed and added Wakeshift's block next to the input request, which MCP SDKs refuse; it now rolls the round back and adds nothing.
+
+## 0.10.0 (2026-11-03)
+
+### Changed
+
+- **`wakeshift_wait` is opt-in.** `attach` (and `attachMastra`) no longer serves Claude Code's wait tool unless you turn it on: `wake.attach(server, { tools: { wait: { enabled: true } } })`. While a conversation waits on it, Claude Code keeps a request open to your server for about 20 seconds at a time and sends the next about a second later, for as long as it waits, whether or not anything arrives: on a serverless host, a function invocation per waiting conversation, all the time. This changes behavior for apps on today's defaults: a recent Claude Code in the terminal whose user declines Wakeshift's plugin now waits with a background monitor, as every other Claude Code does, rather than on your server. In manual permission mode that means approving the monitor, and each restart every 25 minutes, instead of one approval of `wakeshift_wait`; and the wait no longer carries on through `claude --continue`. Users who install the plugin see no difference. To keep the wait tool, add `tools: { wait: { enabled: true } }`, on a stateless server, and on a serverless host give the function a timeout of at least 30 seconds. Without it, `server/discover` no longer offers the tasks extension, tools/list no longer lists `wakeshift_wait`, and Wakeshift's `tasks/get` and `tasks/cancel` go on to your MCP SDK.
+- **`tools` takes an object, each tool `{ enabled }`**: `subscribe`, `list` and `unsubscribe` (on unless disabled, as before) and `wait` (off unless enabled). `tools: { subscribe: { enabled: false } }` replaces `tools: ["unsubscribe_events", "list_subscriptions"]`. New types: `AttachTools`, `ToolOptions`, `WaitToolOptions`.
+
+### Deprecated
+
+- **`tools` as a list of names** (`BUILTIN_TOOLS`). It still works in this release, adding the tools it names and never the wait tool, and warns once through `onWarning`.
+
+## 0.9.0 (2026-11-03)
+
+### Added
+
+- **`subscribes`: a tool declares the events it subscribes to.** `attached.events("watch_build", { subscribes: [buildFinished] }, handler)`. tools/list then adds a sentence to the tool's description, written from each event's own description and naming your app as the console has it: "This tool is how Shipyard notifies you in this conversation of this event: A build finished: it passed, failed or was canceled. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it." Several events read "of these events: …; …". Every tool that subscribes gets the sentence without writing it: agents set Wakeshift's part of a result aside as something the user didn't ask for unless the tool's description says the tool notifies through it. `call.subscribe` takes only the declared events (a type error otherwise), and a tool that declares `subscribes: []` has no `call.subscribe`. Mastra's adapter takes the same option; xmcp's does too, with `attached.describe(description, { subscribes })` for the tool file's metadata, since xmcp writes tools/list itself. The Go SDK has `appkit.Subscribes`, the Python SDK `@attached.tool(subscribes=[…])`. Write event descriptions as plain statements of what happened, since agents now read them in your tools' descriptions.
+- **`IdReusedError`: an emit's `id` used for a different emit is refused.** Wakeshift deduplicated emits on `id` alone, so reusing an `id` by accident (a timestamp or a commit SHA two occurrences share) for another event, other arguments, recipients or payload dropped the second emit silently, and it returned the first's `matched`, reading as delivered. Now Wakeshift compares what each emit sends: a retry of the same emit with its `id` still sends nothing new and returns the first's result with `duplicate: true`, and the same `id` on a different emit is refused with `409 id_reused` and sends nothing. `emit` throws `IdReusedError` for it, a `WakeshiftError` with code `id_reused` (`isCode(err, "id_reused")` works too). Recipients compare as a set, so a retry may list them in another order, and `"u1"` and `["u1"]` are the same.
+
+### Deprecated
+
+- **A subscribe the tool doesn't declare.** `call.subscribe` from a tool wrapped without `subscribes` (`attached.events(name, handler)`), or to an event its `subscribes` doesn't list, still works in this release, and warns once per tool through `onWarning`, naming the tool and the fix. From the next release it throws. The two-argument `attached.events(name, handler)` stays, for tools that don't subscribe.
+
+### Changed
+
+- **`notifies` is an override.** Tools that declare `subscribes` get the sentence without it. Use `notifies(description, { when })` only for your own wording: a description that already has its sentence gets no second one.
+
+### Fixed
+
+- **An emit to one user with nothing subscribed lists them in `unmatched`.** It returned `matched: 0` and an empty `unmatched`, so the recipient was in neither; an emit to several listed them correctly. Every recipient is now in `matched`'s count, `unmatched` or `ended`, whether `to` names one or many.
+- **`matched` is described the same everywhere**: the conversations an emit reached, each woken now or as soon as its agent can take it (the README said "woken").
+
+## 0.8.0 (2026-11-03)
+
+### Added
+
+- **`notifies(description)`, for tools that subscribe.** It returns your tool's description with a few sentences after it, the same in every SDK. For an app named Shipyard, with `when` "a build finishes": "This tool is how Shipyard notifies you in this conversation when a build finishes. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it." The app is named as the console has it (tools/list asks Wakeshift for the name once); `app` names it yourself, and with no name it says "this app". `when` is optional. Use it on the tools that call `call.subscribe` (`description: notifies("Watch a build until it finishes.", { when: "a build finishes" })`). In wakebench's realistic tier (a CI app, a user who never mentions Wakeshift), Claude Code set Wakeshift's part of a subscribing tool's result aside as something the user didn't ask for unless the tool's own description said the tool notifies through it. The Go SDK has the same as `appkit.Notifies` (`appkit.NotifyApp`, `appkit.NotifyWhen`).
+
+### Fixed
+
+- **Emitting before any agent connects works.** An emit at startup, or from a webhook, before any agent had connected to your MCP server failed with `404 unknown_event`: the manifest was sent only once `attach` had run, and with `createMcpHandler` that's the first request. Now, when Wakeshift answers an emit with `unknown_event`, the SDK sends your manifest (a merge, `POST /manifest/merge`, so it never removes an event another process sent, and carries only the settings you passed to `publishManifest`) and emits once more. Emits that fail together send it once, and an emit Wakeshift already knows the event for costs nothing extra. A process that only emits now sends its events this way too, when Wakeshift doesn't have them. Calling `publishManifest()` at startup still works, but you no longer need it. One consequence: a running process that still defines an event you removed with `publishManifest` adds it back on its next emit, so stop defining it first.
+- **`unknown_event` says why.** Wakeshift's message now names the event and the likely cause (no manifest sent yet), instead of "no event by that name". The code is unchanged.
+
+## 0.7.3 (2026-11-02)
+
+### Fixed
+
+- **An unsubscribe without the session key says so.** When a wrapped tool's `call.unsubscribe` ends nothing because the call didn't pass the conversation's `session_key` (Claude Code's calls name no conversation, so the key is the only way Wakeshift finds it), Wakeshift's block on that call now tells the agent that nothing ended, to call again with the key it was given when it subscribed, and not to subscribe again until it has. `call.unsubscribe` still returns `false`, and the note follows your tool's own text. Before, the agent saw only your text ("This chat wasn't watching…"), subscribed again without the key, and got every message twice. The built-in `unsubscribe_events` tool's reply carries the same note.
+
+## 0.7.2 (2026-11-02)
+
+### Fixed
+
+- **`@modelcontextprotocol/server` 2.3.0 or later.** The peer dependency was `^2.0.0`, but on 2.0, 2.1 and 2.2 Claude Code's `wakeshift_wait` never completes: those releases answer `tasks/get` and `tasks/cancel` on protocol 2026-07-28 with "Method not found" themselves, before `attach` sees them ([modelcontextprotocol/typescript-sdk#2598](https://github.com/modelcontextprotocol/typescript-sdk/issues/2598), fixed in 2.3.0 by [#2599](https://github.com/modelcontextprotocol/typescript-sdk/pull/2599)). So conversations told to use the wait tool weren't woken. Everything else (wrapped tools, the built-in tools, MCP Events with `events/poll` and webhooks) works on 2.0 and later. The peer range is now `^2.3.0`: upgrade with `npm install @modelcontextprotocol/server@^2.3.0`. `@modelcontextprotocol/sdk` 1.x is unaffected.
+- **`attach` warns on an older 2.x.** Given a server from `@modelcontextprotocol/server` before 2.3.0, `attach` warns once (through `onWarning`), naming the version to upgrade to.
+
+## 0.7.1 (2026-11-01)
+
+### Fixed
+
+- **Subscribing again after unsubscribing keeps the conversation's session.** The reply from the built-in `unsubscribe_events` tool now tells the agent its session key stays the same and to pass it when it subscribes again. Without it, Claude Code often subscribed again without the key, which started a second session and, on the MCP task path, a second `wakeshift_wait`.
+
+### Changed
+
+- The README and docs lead with `@modelcontextprotocol/server` 2.x; 1.x is the alternative. Nothing changes in the code.
+
+## 0.7.0 (2026-10-31)
+
+### Added
+
+- **Mastra.** `@wakeshift/sdk/mastra` serves Wakeshift from a Mastra `MCPServer` (`@mastra/mcp` 2.7 or later): `attachMastra(wake, opts)`, then `attached.inputs` and `attached.events` for the Mastra tools that subscribe, and `attached.serve(new MCPServer({ … }))`. Everything `attach` gives an `McpServer` works there: Wakeshift's block (text and `_meta`) in your wrapped tools' results, the built-in tools, MCP Events, Claude Code's `wakeshift_wait`, and who's calling (`identify` gets the request's `ctx`). Mastra's own MCP Events keep working beside Wakeshift's: `events/list` lists both. See [Mastra](README.md#mastra).
+- **xmcp.** `@wakeshift/sdk/xmcp` brings Wakeshift into an xmcp app through its tool files: `attachXmcp(wake, opts)`, then `attached.inputs` and `attached.events` in the tools that subscribe, and `attached.tool("subscribe_events")` (and the other two) for a tool file each. xmcp offers no way to add MCP methods, so clients that subscribe natively (ChatGPT) and Claude Code's `wakeshift_wait` aren't served there; Claude Code and every other agent are woken their usual ways. See [xmcp](README.md#xmcp).
+- Both are subpath exports, so an app that uses neither loads neither, and `@mastra/mcp` and `xmcp` are optional peer dependencies.
+
+### Changed
+
+- **A smaller package.** It no longer ships source maps (`dist/*.js.map`), which carried the SDK's TypeScript source inline: about half the unpacked size. Stack traces point at the compiled JavaScript in `dist/`, which is readable as it is.
+- **A clearer error from `attach`.** Given something other than an `McpServer`, `attach` says what it got and what it takes, and, for a framework it recognizes (Mastra's `MCPServer`, punkpeye's `fastmcp`, a low-level `Server`, a Cloudflare `McpAgent`), what to do instead (for Mastra, `attachMastra`), with a link to [the frameworks Wakeshift works with](https://wakeshift.ai/docs/frameworks). It says to call `attach` before connecting only when the server is already connected.
+
+## 0.6.0 (2026-10-31)
+
+### Breaking
+
+- Both MCP SDKs are optional peer dependencies: install the one you use. npm no longer installs `@modelcontextprotocol/sdk` for you, so list it in your app's own dependencies if your code imports it (as the install line has always said).
+
+### Added
+
+- **`@modelcontextprotocol/server` 2.x.** `attach` now takes an `McpServer` from the MCP TypeScript SDK 2.x (2.0 or later) as well as from `@modelcontextprotocol/sdk` 1.x, and tells them apart by the server you pass. Everything works the same on both: wrapped tools (Wakeshift's block in text and in `structuredContent`, rollback, `call.subscribe`), the built-in tools, MCP Events (`events/list`, `events/subscribe`, `events/unsubscribe`, `events/poll`), Claude Code's `wakeshift_wait` with `tasks/get` and `tasks/cancel`, and who's calling. 2.x speaks protocol 2026-07-28 itself, so with `createMcpHandler` clients on either revision connect with nothing more to set up. See the [README](README.md).
+- On 2.x, `identify`, `events.native` and a wrapped tool's `call.extra` get 2.x's request context (`ctx`: the token in `ctx.http?.authInfo`), and are typed as it. On 1.x they get `extra`, as before.
+- `attached.inputs` and `attached.output` take a zod object as well as a shape (`attached.inputs(z.object({ table: z.string() }))`), as 2.x's `registerTool` does. Shapes work as before.
+
+### Changed
+
+- The SDK's published types no longer import either MCP SDK, so they load with only one installed. `attached.events` returns a callback typed from your tool's arguments and your MCP SDK's context; `ToolCallExtra` is now the parts of a request's context Wakeshift reads, whichever SDK serves it (a wrapped tool's `call.extra` is still your MCP SDK's own type). If you passed a `ToolCallExtra` where 1.x's `RequestHandlerExtra` is expected, use `call.extra` instead.
+- A JSON-RPC error from `attach`'s own methods (for example `events/subscribe` for an event your app doesn't offer) carries just its message, without the MCP SDK 1.x's `MCP error <code>: ` prefix in front of it.
+
 ## 0.5.2 (2026-10-30)
 
 ### Added
@@ -14,6 +123,8 @@ What changed in each release of `@wakeshift/sdk`. 0.4.0 is the first published r
 - On protocol 2026-07-28, `server/discover` and the lists' results now say how long a client may cache them (`ttlMs`, `cacheScope`), as that revision requires.
 
 ## 0.5.1 (2026-10-30)
+
+Never published to npm. Everything below first shipped in 0.5.2.
 
 ### Added
 

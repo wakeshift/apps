@@ -31,7 +31,7 @@
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import type { AuthInfo } from "@modelcontextprotocol/server";
 import { harnessAgent, isCode, type Wakeshift } from "@wakeshift/sdk";
 import type { Db, Log } from "./db.js";
 import { clientAddress } from "./analytics.js";
@@ -50,9 +50,9 @@ export interface SignedIn {
   expires: Date;
 }
 
-/** The sign-in a tool call came from (extra: the tool callback's second argument). */
-export function signedInOf(extra: { authInfo?: AuthInfo } | undefined): SignedIn | undefined {
-  const s = extra?.authInfo?.extra?.signedIn as SignedIn | undefined;
+/** The sign-in a tool call came from (ctx: the tool callback's second argument). */
+export function signedInOf(ctx: { http?: { authInfo?: AuthInfo } } | undefined): SignedIn | undefined {
+  const s = ctx?.http?.authInfo?.extra?.signedIn as SignedIn | undefined;
   return s && typeof s.user === "string" ? s : undefined;
 }
 
@@ -219,7 +219,7 @@ export class SignIn {
     return createHmac("sha256", this.key("client-secret")).update(clientId).digest("base64url");
   }
 
-  /** Checks a bearer token: on success sets req.auth (extra.authInfo in tool callbacks, read with signedInOf); else answers 401 with where to sign in. */
+  /** Checks a bearer token: on success sets req.auth (ctx.http.authInfo in tool callbacks, read with signedInOf); else answers 401 with where to sign in. */
   authenticate(req: IncomingMessage & { auth?: AuthInfo }, res: ServerResponse): SignedIn | null {
     const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? "");
     const s = m ? this.verify(m[1]!) : null;

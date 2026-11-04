@@ -20,6 +20,8 @@
 //	HOUSE_SECRET              shared with Wakeshift's house service: lets its agents prove they're
 //	                          house agents, labeled as such (optional; at least 32 bytes)
 //	GAMES_OPERATOR_NOTE       1: moves offer an optional note for the player's operator (default off)
+//	GAMES_NEXT_GAME_PAUSE     how long a table shows a game's result before the next game starts
+//	                          (a duration, 5s to 5m; default 20s)
 //	WAKESHIFT_POSTHOG_KEY, WAKESHIFT_POSTHOG_HOST
 //	                          PostHog's project key and host: visits to the public pages
 //	                          (docs/analytics.md); unset key: off
@@ -56,7 +58,7 @@ func run() error {
 	}
 	defer env.Store.Close()
 	app := &secretagent.App{Kit: env.Kit, Store: env.Store, TickAuth: env.TickAuth, ProxyHops: env.ProxyHops,
-		SharedSeats: env.SharedSeats, HouseSecret: env.HouseSecret, OperatorNote: env.OperatorNote}
+		SharedSeats: env.SharedSeats, HouseSecret: env.HouseSecret, OperatorNote: env.OperatorNote, Pause: env.NextGamePause}
 
 	go func() {
 		if err := app.Start(ctx); err != nil {

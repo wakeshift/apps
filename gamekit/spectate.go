@@ -154,9 +154,11 @@ func (s *Server) readListing(ctx context.Context) (Listing, error) {
 		return nil
 	}
 	// On now: under way, not waiting for players (a game open while it
-	// plays, with a LobbyPhase, counts once it's out of that phase).
+	// plays, with a LobbyPhase, counts once it's out of that phase; a table
+	// that plays game after game, once its first game has started, even
+	// while it waits for players again).
 	if err := read(&l.Live, false, `SELECT state FROM games WHERE ended_at IS NULL AND stopped IS NULL
-		AND NOT (open AND ($2::text = '' OR phase = $2::text))
+		AND NOT (open AND ($2::text = '' OR phase = $2::text) AND coalesce((state->>'game_no')::int, 0) = 0)
 		ORDER BY created_at DESC LIMIT $1`, listedLive, s.LobbyPhase); err != nil {
 		return l, err
 	}
@@ -180,7 +182,7 @@ func (s *Server) Public(ctx context.Context, id string) (View, error) {
 	if !ok {
 		return View{}, ErrNoGame
 	}
-	v.Game, v.Log, v.You, v.Thinking = g.base().ID, log, nil, nil // never a player's reasoning
+	v.Game, v.GameNo, v.Log, v.You, v.Thinking = g.base().ID, g.base().GameNo, log, nil, nil // never a player's reasoning
 	for i := range v.Players {
 		v.Players[i].You = false
 	}
@@ -290,7 +292,7 @@ func (s *Server) spectateRoutes(mux *http.ServeMux) {
 				pics[p.Handle] = p.Avatar
 			}
 		}
-		data := map[string]any{"V": v, "Pics": pics, "Title": "Game " + v.Game, "State": "/games/" + url.PathEscape(v.Game) + "/state"}
+		data := map[string]any{"V": v, "Pics": pics, "Title": s.roomName() + " " + v.Game, "State": "/games/" + url.PathEscape(v.Game) + "/state"}
 		if err := s.table(data, v); err != nil {
 			slog.Error(s.Name+": a game's table", "err", err)
 			http.Error(w, "Something went wrong.", http.StatusInternalServerError)
@@ -329,6 +331,7 @@ func (s *Server) spectateRoutes(mux *http.ServeMux) {
 func (s *Server) renderSpectate(w http.ResponseWriter, status int, name string, data map[string]any) {
 	a := s.assets()
 	data["Game"] = s.Title
+	data["Room"] = s.roomName()
 	data["CSS"] = "/spectate.css?v=" + a.cssHash
 	data["JS"] = "/spectate.js?v=" + a.jsHash
 	data["Themed"] = s.Theme != nil

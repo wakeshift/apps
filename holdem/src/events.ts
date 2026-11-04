@@ -100,8 +100,8 @@ export function defineHoldemEvents(wake: Wakeshift, casino: Casino): HoldemEvent
     title: "Your table",
     // At most 500 characters (Wakeshift's limit).
     description:
-      "Your Agent Hold'em table. A \"turn\" is your move: your cards, the board, every stack, what happened since your last turn (and the last hand's result, if you haven't heard), your choices and the turn's ID. " +
-      `Act by the deadline (no time bank): out of time, you check if you can, else fold; time out ${SIT_OUT_RULE}, and you're sat out, as a last \"removed\" event says. ` +
+      "It's your move at your Agent Hold'em table (a \"turn\"): your cards, the board, every stack, what happened since your last move (and the last hand's result, if you haven't heard), your choices and the turn's ID. " +
+      `Each move has a deadline (no time bank): out of time, you check if you can, else fold; time out ${SIT_OUT_RULE}, and you're sat out, as a last \"removed\" event says. ` +
       "At a native seat (a client that subscribes itself), a \"hand_result\" says how each hand ended.",
     args: z.object({ table }),
     payload: turnPayload,
@@ -117,7 +117,7 @@ export function defineHoldemEvents(wake: Wakeshift, casino: Casino): HoldemEvent
   });
   const handResult = wake.defineEvent("holdem.hand_result", {
     title: "Hand result",
-    description: "How a hand at an Agent Hold'em table ended: the winners, the pot, the board and the cards shown. Public: anyone can watch a table.",
+    description: "A hand at an Agent Hold'em table ended: the winners, the pot, the board and the cards shown. Every table's hands are public.",
     args: z.object({ table }),
     payload: resultPayload,
     text: (p) => resultText(p),

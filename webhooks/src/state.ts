@@ -10,7 +10,8 @@
 // days without use); when it was last used and its checked URL until the
 // link expires (7 days without use); a watcher until it unwatches, its
 // subscription ends (7 days) or the link expires; counts until their
-// window ends; MCP sessions until they're idle for as long as a link lives.
+// window ends (the per-minute counts of posts the live view didn't list, an
+// hour); MCP sessions until they're idle for as long as a link lives.
 // When a link expires, Wakeshift is asked to forget its webhook (the app's
 // user there, with the conversations that watched it): forgetExpired, until
 // Wakeshift says it's done.
@@ -34,7 +35,7 @@ const FORGET_CONCURRENCY = 8;
 export interface Activity {
   seq: number;
   at: string;
-  kind: "post" | "refused" | "limited" | "failed" | "watch" | "unwatch";
+  kind: "post" | "refused" | "limited" | "failed" | "watch" | "unwatch" | "skipped" | "rotated";
   method?: string;
   contentType?: string;
   size?: number;
@@ -57,6 +58,14 @@ export interface Activity {
   conversation?: string;
   client?: string;
   harness?: string;
+  /**
+   * A skipped line: how many refused or rate-limited posts in the minute
+   * starting at minute got no line of their own, and the statuses they
+   * were answered with.
+   */
+  count?: number;
+  codes?: number[];
+  minute?: string;
 }
 
 /** A post as the agent can read it in full. Its text and data come from whoever posted. */
@@ -103,6 +112,12 @@ export interface McpSession {
 const MAX_NOTIFY = 7000;
 
 const channelOf = (hook: string) => "try_" + hook;
+// Adds a line to a webhook's live view, keeps its last RING, and notifies
+// the instances listening: $1 hook, $2 at, $3 the line's JSON, $4 the
+// channel, $5 whether the line fits in the notification.
+const ADD_LINE = `WITH ins AS (INSERT INTO activity (hook, at, body) VALUES ($1, $2, $3) RETURNING seq),
+      del AS (DELETE FROM activity WHERE hook = $1 AND seq <= (SELECT seq FROM activity WHERE hook = $1 ORDER BY seq DESC OFFSET ${RING - 1} LIMIT 1))
+ SELECT seq, pg_notify($4, CASE WHEN $5::boolean THEN seq || ' ' || $3 ELSE seq::text END) FROM ins`;
 // Text columns can't hold NUL.
 const clean = (s: string, n: number) => s.replace(/\0/g, "").slice(0, n);
 const hourEnd = (t: number) => Math.floor(t / HOUR) * HOUR + HOUR;
@@ -232,6 +247,27 @@ export class State {
     return r.rowCount ? 0 : secondsUntil(h, at);
   }
 
+  /** The open URL's current generation (links.ts): 0 until the user first gets a new one. */
+  async openGen(id: string): Promise<number> {
+    const r = await this.db.query("SELECT open_gen FROM hooks WHERE hook = $1", [id]);
+    return r.rows[0]?.open_gen ?? 0;
+  }
+
+  /**
+   * Replaces the webhook's open URL: the next generation, from now on the
+   * only one taken. Returns it, or undefined if the link has expired (it's
+   * being forgotten).
+   */
+  async rotateOpen(id: string): Promise<number | undefined> {
+    const r = await this.db.query(
+      `INSERT INTO hooks (hook, last_use, open_gen) SELECT $1, $2, 1 WHERE NOT EXISTS (SELECT 1 FROM forgets WHERE hook = $1)
+       ON CONFLICT (hook) DO UPDATE SET open_gen = hooks.open_gen + 1, last_use = greatest(hooks.last_use, excluded.last_use)
+       RETURNING open_gen`,
+      [id, new Date(this.now())],
+    );
+    return r.rows[0]?.open_gen;
+  }
+
   /** The checked URL the user last picked for the webhook, if there is one. */
   async checked(id: string): Promise<Checked | undefined> {
     const r = await this.db.query("SELECT checked_check, checked_url FROM hooks WHERE hook = $1", [id]);
@@ -258,13 +294,53 @@ export class State {
     if (body.client !== undefined) body.client = body.client.slice(0, 100);
     if (body.harness !== undefined) body.harness = body.harness.slice(0, 40);
     const json = JSON.stringify(body);
-    const r = await this.db.query(
-      `WITH ins AS (INSERT INTO activity (hook, at, body) VALUES ($1, $2, $3) RETURNING seq),
-            del AS (DELETE FROM activity WHERE hook = $1 AND seq <= (SELECT seq FROM activity WHERE hook = $1 ORDER BY seq DESC OFFSET ${RING - 1} LIMIT 1))
-       SELECT seq, pg_notify($4, CASE WHEN $5::boolean THEN seq || ' ' || $3 ELSE seq::text END) FROM ins`,
-      [id, at, json, channelOf(id), Buffer.byteLength(json) <= MAX_NOTIFY],
-    );
+    const r = await this.db.query(ADD_LINE, [id, at, json, channelOf(id), Buffer.byteLength(json) <= MAX_NOTIFY]);
     return { ...body, seq: Number(r.rows[0].seq) };
+  }
+
+  /**
+   * Adds n refused or rate-limited posts that got no line of their own in
+   * the minute starting at minute (answered with codes) to the webhook's
+   * one line for that minute: written the first time, updated in place
+   * (the same seq) after, so every instance's count adds up in one line.
+   * Listeners get the line either way (the page replaces it by seq).
+   */
+  async skipped(id: string, minute: number, n: number, codes: number[]): Promise<Activity> {
+    const c = await this.db.pool.connect();
+    try {
+      await c.query("BEGIN");
+      // The row lock orders instances adding to the same minute.
+      const r = await c.query(
+        `INSERT INTO skipped (hook, minute, n, codes) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (hook, minute) DO UPDATE SET n = skipped.n + excluded.n,
+           codes = ARRAY(SELECT DISTINCT x FROM unnest(skipped.codes || excluded.codes) x ORDER BY x)
+         RETURNING n, codes, seq`,
+        [id, new Date(minute), n, [...new Set(codes)].sort((a, b) => a - b)],
+      );
+      const row = r.rows[0];
+      const at = new Date(minute);
+      const body: Omit<Activity, "seq"> = { kind: "skipped", count: row.n, codes: row.codes, minute: at.toISOString(), at: at.toISOString() };
+      const json = JSON.stringify(body);
+      let seq: number | undefined = row.seq === null ? undefined : Number(row.seq);
+      if (seq !== undefined) {
+        const u = await c.query("UPDATE activity SET body = $3 WHERE seq = $1 AND hook = $2", [seq, id, json]);
+        // Pushed out of the last 50 since: a new line.
+        if (!u.rowCount) seq = undefined;
+        else await c.query("SELECT pg_notify($1, $2)", [channelOf(id), seq + " " + json]);
+      }
+      if (seq === undefined) {
+        const ins = await c.query(ADD_LINE, [id, at, json, channelOf(id), true]);
+        seq = Number(ins.rows[0].seq);
+        await c.query("UPDATE skipped SET seq = $3 WHERE hook = $1 AND minute = $2", [id, at, seq]);
+      }
+      await c.query("COMMIT");
+      return { ...body, seq };
+    } catch (err) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      c.release();
+    }
   }
 
   /** Keeps a post's text and data for the recent_posts tool (the last 10). */
@@ -495,6 +571,7 @@ export class State {
       );
       await c.query("DELETE FROM forgets WHERE done_at < $1", [dayAgo]);
       await c.query("DELETE FROM counters WHERE until <= $1", [now]);
+      await c.query("DELETE FROM skipped WHERE minute < $1", [new Date(t - HOUR)]);
       await c.query("DELETE FROM sessions WHERE last_seen < $1", [new Date(t - sessionIdle)]);
       await c.query("COMMIT");
     } catch (err) {

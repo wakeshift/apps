@@ -2,6 +2,90 @@
 
 What changed in each release of `github.com/wakeshift/wakeshift-go`. v0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
+## v0.9.2 (2026-11-04)
+
+### Added
+
+- **Complete MCP tool annotations on Wakeshift's own tools.** `subscribe_events`, `unsubscribe_events`, `list_subscriptions` and `wakeshift_wait` now list a title and all four hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) in tools/list, so app stores that require them, such as ChatGPT's, accept your server. `subscribe_events` and `unsubscribe_events`: idempotent, and not read-only, destructive or open-world. `list_subscriptions`: read-only and idempotent (as before), and now not destructive or open-world. `wakeshift_wait`: not read-only, destructive, idempotent or open-world. Before, only `list_subscriptions` had annotations, so clients read the others with the spec's defaults: destructive and open-world. Every SDK gives the same ones, on go-sdk servers and on mcp-go servers (`mcpgo.Attach`).
+
+## v0.9.1 (2026-11-03)
+
+### Fixed
+
+- **A relayed beacon line never ends a wrapped tool's result.** If your tool's own text ended in a line that looked like a Wakeshift beacon (for example, a chat message someone posted, relayed in your result), the SDK kept that line last and dropped Wakeshift's own. An agent's hook acts on the last line, so someone could get a beacon minted for your tool, post it, and connect another person's conversation to their own session when that person's agent called the tool. The SDK now strips beacon lines from the end of your text and always puts Wakeshift's beacon last. Upgrade if any wrapped tool returns content other people wrote.
+- **tools/list no longer stalls on the app-name lookup.** A slow or failing `GET /app` made every tools/list wait up to 20 seconds, and the failure wasn't remembered. The lookup now waits at most 3 seconds, waits 60 seconds before asking again after a failure, and keeps a name it was given.
+- **Calls waiting on a failed manifest send share its error.** Concurrent calls each repeated a manifest send that had failed; they now get the first send's error.
+- **A result that asks the client for input isn't final.** On protocol 2026-07-28 a tool can answer with an input request (an elicitation) and the client calls again. On the go-sdk path, `Events` kept what that round subscribed and added Wakeshift's block next to the input request, which MCP SDKs refuse; it now rolls the round back and adds nothing.
+
+## v0.9.0 (2026-11-03)
+
+### Changed
+
+- **`wakeshift_wait` is opt-in.** `Attach` (and `mcpgo.Attach`) no longer has `Wrap` serve Claude Code's wait tool unless you turn it on: `AttachOptions{Tools: appkit.Tools{Wait: appkit.Wait{Enabled: true}}}`. While a conversation waits on it, Claude Code keeps a request open to your server for about 20 seconds at a time and sends the next about a second later, for as long as it waits, whether or not anything arrives: on a serverless host, a function invocation per waiting conversation, all the time. This changes behavior for apps on today's defaults: a recent Claude Code in the terminal whose user declines Wakeshift's plugin now waits with a background monitor, as every other Claude Code does, rather than on your server. In manual permission mode that means approving the monitor, and each restart every 25 minutes, instead of one approval of `wakeshift_wait`; and the wait no longer carries on through `claude --continue`. Users who install the plugin see no difference. To keep the wait tool, set `Tools.Wait.Enabled`, and give the endpoint a write timeout of at least 30 seconds. Without it, `server/discover` no longer offers the tasks extension, tools/list no longer lists `wakeshift_wait`, and Wakeshift's `tasks/get` and `tasks/cancel` go on to your handler.
+
+### Breaking
+
+- **`AttachOptions.Tools` is now an `appkit.Tools` struct, not a list of names** (and `mcpgo.AttachOptions.Tools` the same). Its zero value is the default, so the tools on by default have a `Disabled` field (`Subscribe`, `List`, `Unsubscribe`: `appkit.Tool{Disabled: true}`) and the wait tool, off by default, an `Enabled` one (`Wait: appkit.Wait{Enabled: true}`). The list form is gone. Before and after:
+
+  ```go
+  // before
+  appkit.AttachOptions{Tools: []string{appkit.UnsubscribeEventsTool, appkit.ListSubscriptionsTool}}
+  appkit.AttachOptions{Tools: []string{}}
+  // after
+  appkit.AttachOptions{Tools: appkit.Tools{Subscribe: appkit.Tool{Disabled: true}}}
+  appkit.AttachOptions{Tools: appkit.Tools{Subscribe: appkit.Tool{Disabled: true}, List: appkit.Tool{Disabled: true}, Unsubscribe: appkit.Tool{Disabled: true}}}
+  ```
+
+  An app that set no `Tools` needs no change. The tool name constants (`SubscribeEventsTool` and the others) stay.
+
+## v0.8.0 (2026-11-03)
+
+### Added
+
+- **`appkit.Subscribes(events…)`: declare the events a tool subscribes to.** Pass it to `appkit.Events` (`appkit.Events(attached, handler, appkit.Subscribes(buildFinished))`) or `mcpgo.Events`. tools/list then adds a sentence to the tool's description, built from each event's own description, the same in every SDK: "This tool is how Shipyard notifies you in this conversation of this event: A build finished: it passed, failed or was canceled. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it." For several events it says "of these events: …; …". The app is named as the console has it, and "this app" without a name. You no longer write the sentence with `Notifies`; in wakebench's realistic tier, the sentence built from the event's description did as well as `Notifies` with `NotifyWhen`. go-sdk doesn't tell `Events` the tool's name, so tools/list finds the tool by the schema its input type gives it: give each subscribing tool its own input type, or name it with `appkit.ToolName` (tools that share one but declare differently get no sentence, with a warning, until each has been called). `mcpgo.Events` knows the tool's name, and its tools/list now names the app in `Notifies` sentences too.
+- **`appkit.ErrIDReused`: an emit's ID used for a different emit is refused.** Wakeshift deduplicated emits on the ID alone, so reusing a `WithID` value by accident (a timestamp or a commit SHA two occurrences share) for another event, other arguments, recipients or payload dropped the second emit silently, and it returned the first's `Matched`, reading as delivered. Now Wakeshift compares what each emit sends: a retry of the same emit with its ID still sends nothing new and returns the first's result with `Duplicate` set, and the same ID on a different emit is refused with `409 id_reused` and sends nothing. `Emit` returns an `*appkit.APIError` with code `id_reused` for it, which `errors.Is(err, appkit.ErrIDReused)` matches (`appkit.IsCode(err, "id_reused")` works too). Recipients compare as a set, so a retry may list them in another order.
+
+### Fixed
+
+- **An emit to one user with nothing subscribed lists them in `Unmatched`.** It returned `Matched: 0` and no `Unmatched`, so the recipient was in neither; an emit to several listed them correctly. Every recipient is now in `Matched`'s count, `Unmatched` or `Ended`, whether the emit names one or many.
+
+### Deprecated
+
+- **A `Subscribe` the tool doesn't declare.** From a tool wrapped without `Subscribes`, or for an event its `Subscribes` doesn't list, `Subscribe` still works but logs a warning, once per tool, naming the tool and the fix (`appkit.Events(attached, handler, appkit.Subscribes(…))`). From the next release it returns an error.
+
+### Changed
+
+- **`appkit.Notifies` is an optional override.** Use it only to word the sentence yourself: a tool whose description already has one gets no second sentence from `Subscribes`. Tools that subscribe still declare their events with `Subscribes`.
+
+## v0.7.0 (2026-11-03)
+
+### Added
+
+- **`appkit.Notifies(description)`, for tools that subscribe.** It returns your tool's description with a few sentences after it, the same in every SDK. For an app named Shipyard, with `NotifyWhen("a build finishes")`: "This tool is how Shipyard notifies you in this conversation when a build finishes. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it." The app is named as the console has it (tools/list asks Wakeshift for the name once); `appkit.NotifyApp` names it yourself, and with no name it says "this app". `NotifyWhen` is optional. Use it on the tools that call `Subscribe` (`Description: appkit.Notifies("Watch a build until it finishes.", appkit.NotifyWhen("a build finishes"))`). In wakebench's realistic tier (a CI app, a user who never mentions Wakeshift), Claude Code set Wakeshift's part of a subscribing tool's result aside as something the user didn't ask for unless the tool's own description said the tool notifies through it. The TypeScript and Python SDKs have the same as `notifies`.
+
+### Fixed
+
+- **Emitting before any agent connects works.** An `Emit` at startup, or from a webhook, before any agent had connected to your MCP server failed with `404 unknown_event`: the manifest was sent only once `Attach` had run and a call needed it. Now, when Wakeshift answers an emit with `unknown_event`, `Emit` sends your manifest (a merge, `POST /manifest/merge`, so it never removes an event another process sent, and carries only the settings you passed to `PublishManifest`) and emits once more. Emits that fail together send it once, and an emit Wakeshift already knows the event for costs nothing extra. A process that only emits now sends its events this way too, when Wakeshift doesn't have them. Calling `PublishManifest` at startup still works, but you no longer need it. One consequence: a running process that still defines an event you removed with `PublishManifest` adds it back on its next emit, so stop defining it first.
+- **`unknown_event` says why.** Wakeshift's message now names the event and the likely cause (no manifest sent yet), instead of "no event by that name". The code is unchanged.
+
+## v0.6.2 (2026-11-02)
+
+### Fixed
+
+- **An unsubscribe without the session key says so.** When a wrapped tool's `DefinedEvent.Unsubscribe` ends nothing because the call didn't pass the conversation's `session_key` (Claude Code's calls name no conversation, so the key is the only way Wakeshift finds it), Wakeshift's block on that call now tells the agent that nothing ended, to call again with the key it was given when it subscribed, and not to subscribe again until it has. `Unsubscribe` still returns `false`, and the note follows your tool's own text. Before, the agent saw only your text ("This chat wasn't watching…"), subscribed again without the key, and got every message twice. The built-in `unsubscribe_events` tool's reply carries the same note.
+
+## v0.6.1 (2026-11-01)
+
+### Fixed
+
+- **Subscribing again after unsubscribing keeps the conversation's session.** The reply from the built-in `unsubscribe_events` tool now tells the agent its session key stays the same and to pass it when it subscribes again. Without it, Claude Code often subscribed again without the key, which started a second session and, on the MCP task path, a second `wakeshift_wait`.
+
+## v0.6.0 (2026-10-31)
+
+### Added
+
+- **mcp-go servers.** A server built with [mcp-go](https://github.com/mark3labs/mcp-go) (v1.5 or later) attaches with the new package `appkit/mcpgo`: `mcpgo.Attach(wake, srv, opts)` adds `subscribe_events`, `unsubscribe_events` and `list_subscriptions` to your `*server.MCPServer`, and `mcpgo.Events(attached, tool, handler)` wraps a tool for `srv.AddTools`, so its handler subscribes the calling conversation with `event.Subscribe` and its reply gets Wakeshift's block, as `appkit.Events` does. `attached.Wrap` goes in front of `server.NewStreamableHTTPServer(srv)`. Defining events and emitting are the same `appkit` calls. `Events` adds `session_key`, `harness` and `conversation_id` to the tool's input schema, and the `wakeshift` field to an object output schema. `AttachOptions.Identify` runs for every request, with the token `appkit.RequireBearer` verified or `nil`, so an app that authenticates another way reads who it is from `ctx`. mcp-go speaks protocol 2026-07-28, so Claude Code connects on it, and one that takes MCP tasks gets `wakeshift_wait`. An app on the official SDK doesn't build mcp-go, and nothing changes for it.
+
 ## v0.5.2 (2026-10-30)
 
 ### Added
@@ -13,6 +97,8 @@ What changed in each release of `github.com/wakeshift/wakeshift-go`. v0.4.0 is t
 - **Agents that see only `structuredContent` are told how they're woken.** Some hosts, Claude Code among them, show the model a tool's `structuredContent` and not its text. A wrapped tool with a typed output that didn't embed `appkit.WakeOutput` left Wakeshift's instructions out of it, so an agent could say it was watching and never be woken. Now every structured result of a wrapped tool carries them in its `wakeshift` field, and `tools/list` adds that optional field to the tool's output schema (go-sdk's inferred schemas refuse fields they don't name, and clients that check results against the schema would refuse the result). Embedding `appkit.WakeOutput` still declares the field in your type; it's no longer required. Nothing to change in your code.
 
 ## v0.5.1 (2026-10-30)
+
+Never published: v0.5.1 wasn't tagged, so Go can't fetch it. Everything below first shipped in v0.5.2.
 
 ### Added
 

@@ -349,8 +349,13 @@ export class LiveHub {
         // link stopped working: show the table as it is now first, so the
         // page never freezes on a moment that's gone (a seat and stack that
         // no longer exist), then load the page again for wherever the player
-        // is now, or say the link ended.
-        c.res.write(`event: snap\ndata: ${shared}\n\n`);
+        // is now, or say the link ended. The table is read again, after the
+        // link was: the leave may have landed after this poll's read (then
+        // that view still seats the player), but never after this one. (A leave
+        // after the link was read changes the version: the next poll ends here.)
+        // A failed read still ends the stream (the page loads again anyway).
+        const now = await this.o.casino.spectate(table).catch(() => undefined);
+        if (now) this.send(c, snapshot(now));
         c.res.end(s === "moved" ? MOVED : `event: gone\ndata: ${JSON.stringify({ message: WATCH_GONE })}\n\n`);
       }
     } catch (err) {

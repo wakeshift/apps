@@ -5,11 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { MCP, McpServer, rawRpc, statelessHttp } from "./mcp.js";
 import { z } from "zod";
 import { Wakeshift } from "../src/index.js";
 import { TASKS_EXTENSION, TASK_HOLD_SECONDS, WAIT_TOOL, WAIT_TOOL_DEFINITION, takesTasks } from "../src/tasks.js";
@@ -37,48 +33,66 @@ function fakeCore(reply: (path: string, body: any) => any = () => ({})) {
 }
 
 // app is the golden file's app: one event, identify naming u1, and a
-// wrapped tool, join, that subscribes nothing.
-function app(wake: Wakeshift, define = true) {
+// wrapped tool, join, that subscribes nothing. The wait tool is on unless
+// wait is false (attach's default is off).
+function app(wake: Wakeshift, define = true, wait = true) {
   if (define) wake.defineEvent("chat.message", { description: "A new message", args: z.object({ channel: z.string() }), payload: z.object({ text: z.string() }), text: (m) => m.text });
   const server = new McpServer({ name: "chat", version: "1.0.0" });
-  const attached = wake.attach(server, { identify: () => ({ user: "u1" }) });
+  const attached = wake.attach(server, { identify: () => ({ user: "u1" }), ...(wait ? { tools: { wait: { enabled: true } } } : {}) });
   server.registerTool("join", { description: "Join", inputSchema: attached.inputs({}) }, attached.events("join", async () => "joined"));
   return server;
 }
 
-async function rawRpc(server: McpServer) {
-  const [a, b] = InMemoryTransport.createLinkedPair();
-  const waiting = new Map<number, (m: any) => void>();
-  b.onmessage = (m: any) => waiting.get(m.id)?.(m);
-  await server.connect(a);
-  await b.start();
-  let n = 0;
-  return (method: string, params: any = {}) =>
-    new Promise<any>((resolve) => {
-      const id = ++n;
-      waiting.set(id, resolve);
-      b.send({ jsonrpc: "2.0", id, method, params } as any);
-    });
+// withoutServerInfo is a result without the server's own name in _meta,
+// which the MCP SDK 2.x adds to every 2026-07-28 result (as that revision
+// asks servers to).
+function withoutServerInfo(r: any): any {
+  if (!r?._meta || !("io.modelcontextprotocol/serverInfo" in r._meta)) return r;
+  const { "io.modelcontextprotocol/serverInfo": _info, ...meta } = r._meta;
+  const { _meta: _all, ...rest } = r;
+  return Object.keys(meta).length > 0 ? { ...rest, _meta: meta } : rest;
+}
+
+// appMaker makes the app's server, the event defined once: called once
+// (MCP SDK 1.x, test/mcp.ts's rawRpc) or per request (2.x, as it serves).
+function appMaker(wake: Wakeshift, wait = true): () => McpServer {
+  let first = true;
+  return () => {
+    const server = app(wake, first, wait);
+    first = false;
+    return server;
+  };
 }
 
 test("the wait tool and the wire format are every SDK's (test/mcp-tasks-wire.json)", async () => {
   assert.equal(golden.extension, TASKS_EXTENSION);
   assert.equal(golden.hold_seconds, TASK_HOLD_SECONDS);
   assert.deepEqual(golden.wait_tool, JSON.parse(JSON.stringify(WAIT_TOOL_DEFINITION)));
+  // Its annotations are the ones every SDK gives it (test/tool-annotations.json).
+  const annotations = JSON.parse(readFileSync(new URL("../../test/tool-annotations.json", import.meta.url), "utf8"));
+  assert.deepEqual(golden.wait_tool.annotations, annotations[WAIT_TOOL]);
 
   const answers = new Map<string, any>();
   const { wake, reqs } = fakeCore((path) => answers.get(path));
-  const rpc = await rawRpc(app(wake));
+  const rpc = await rawRpc(appMaker(wake));
 
   const d = (await rpc("server/discover", { _meta: golden.lists[0].meta })).result;
   assert.deepEqual(d.capabilities.extensions[TASKS_EXTENSION], {}, "server/discover offers the tasks extension");
   assert.equal(d.ttlMs, 0);
-  assert.equal(d.cacheScope, "public");
+  // 1.x: discover.ts says public; 2.x: its own default (private) unless the app sets a cache hint.
+  assert.equal(d.cacheScope, MCP === 1 ? "public" : "private");
   const listed = (await rpc("tools/list", { _meta: golden.lists[0].meta })).result;
   assert.equal(listed.ttlMs, 0);
   assert.equal(listed.cacheScope, "private");
   for (const l of golden.lists) {
-    const tools = (await rpc("tools/list", { _meta: l.meta })).result.tools.map((t: any) => t.name);
+    const res = await rpc("tools/list", { _meta: l.meta });
+    if (MCP === 2 && res.error) {
+      // 2.x refuses an envelope naming a revision before 2026-07-28 itself (UnsupportedProtocolVersion): no wait tool either.
+      assert.equal(res.error.code, -32022, `tools/list: ${l.name}`);
+      assert.equal(l.wait_tool, false, `tools/list: ${l.name}`);
+      continue;
+    }
+    const tools = res.result.tools.map((t: any) => t.name);
     assert.equal(tools.includes(WAIT_TOOL), l.wait_tool, `tools/list: ${l.name}`);
     if (l.wait_tool) assert.deepEqual(JSON.parse(JSON.stringify((await rpc("tools/list", { _meta: l.meta })).result.tools.find((t: any) => t.name === WAIT_TOOL))), golden.wait_tool);
   }
@@ -97,9 +111,35 @@ test("the wait tool and the wire format are every SDK's (test/mcp-tasks-wire.jso
       assert.equal(res.error?.code, c.error.code, `${c.name}: the error`);
       assert.ok(String(res.error?.message).includes(c.error.message), `${c.name}: ${res.error?.message}`);
     } else if (c.result) {
-      assert.deepEqual(res.result, c.result, `${c.name}: the result`);
+      assert.deepEqual(withoutServerInfo(res.result), c.result, `${c.name}: the result`);
     }
   }
+});
+
+// Off by default: nothing of the task path, and no call says its client
+// takes tasks, so Wakeshift gives Claude Code its plugin, or the Monitor.
+test("without wait, attach serves no wait tool, offers no tasks extension, takes no task request and never sets call.tasks", async () => {
+  const { wake, reqs } = fakeCore((path) => (path === "/calls/session" ? { session: { handle: "wsc_1" }, addition: { text: "x" } } : {}));
+  const rpc = await rawRpc(appMaker(wake, false));
+  const meta = golden.lists[0].meta;
+  const d = (await rpc("server/discover", { _meta: meta })).result;
+  assert.equal(d.capabilities?.extensions?.[TASKS_EXTENSION], undefined, "server/discover doesn't offer the tasks extension");
+  const tools = (await rpc("tools/list", { _meta: meta })).result.tools.map((t: any) => t.name);
+  assert.ok(!tools.includes(WAIT_TOOL), tools.join(", "));
+  const called = await rpc("tools/call", { name: WAIT_TOOL, arguments: { session_key: "wsc_k" }, _meta: meta });
+  assert.ok(called.error || called.result?.isError, "a call to wakeshift_wait isn't answered as the wait");
+  for (const m of ["tasks/get", "tasks/cancel"]) {
+    const res = await rpc(m, { taskId: "wkt1_x", _meta: meta });
+    assert.ok(res.error, `${m}: ${JSON.stringify(res)}`);
+  }
+  assert.ok(!reqs.some((r) => r.path.startsWith("/calls/task")), reqs.map((r) => r.path).join(", "));
+  reqs.length = 0;
+  await rpc("tools/call", { name: "join", arguments: {}, _meta: meta });
+  await rpc("tools/call", { name: "list_subscriptions", arguments: {}, _meta: meta });
+  await rpc("tools/call", { name: "subscribe_events", arguments: { event: "chat.message", arguments: { channel: "c" } }, _meta: meta });
+  const calls = reqs.map((r) => r.body?.call).filter(Boolean);
+  assert.ok(calls.length > 0, reqs.map((r) => r.path).join(", "));
+  for (const c of calls) assert.equal(c.tasks, undefined, JSON.stringify(c));
 });
 
 test("takesTasks: 2026-07-28 with the tasks extension in the request's own capabilities", () => {
@@ -120,7 +160,7 @@ test("tasks/get is held by Wakeshift: it gets a longer timeout, and Wakeshift's 
     if (path === "/calls/task/get") throw new Error("boom");
     return {};
   });
-  const rpc = await rawRpc(app(wake));
+  const rpc = await rawRpc(appMaker(wake));
   const res = await rpc("tasks/get", { taskId: "wkt1_x", _meta: golden.lists[0].meta });
   assert.equal(res.error?.code, -32603);
   assert.ok(calls >= 1);
@@ -134,22 +174,18 @@ test("a stateless HTTP server serves the wait tool and tasks/get", async () => {
       ? { result: { resultType: "task", taskId: "wkt1_y", status: "working", createdAt: "x", lastUpdatedAt: "x", ttlMs: null, pollIntervalMs: 1000 } }
       : { result: { resultType: "complete", taskId: "wkt1_y", status: "working", createdAt: "x", lastUpdatedAt: "x", ttlMs: null, pollIntervalMs: 1000 } },
   );
-  let first = true;
-  const http = createServer(async (req, res) => {
-    const server = app(wake, first);
-    first = false;
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    await server.connect(transport);
-    const chunks: Buffer[] = [];
-    for await (const c of req) chunks.push(c as Buffer);
-    await transport.handleRequest(req, res, JSON.parse(Buffer.concat(chunks).toString()));
-  });
-  await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
-  const url = `http://127.0.0.1:${(http.address() as AddressInfo).port}/mcp`;
-  const post = async (method: string, params: any) => {
+  const { url, http } = await statelessHttp(appMaker(wake));
+  // The headers Claude Code sends on 2026-07-28 (SEP-2243's Mcp-Method and Mcp-Name).
+  const post = async (method: string, params: any, name?: string) => {
     const r = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2026-07-28" },
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": method,
+        ...(name ? { "mcp-name": name } : {}),
+      },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
     });
     return r.json() as Promise<any>;
@@ -158,10 +194,10 @@ test("a stateless HTTP server serves the wait tool and tasks/get", async () => {
     const meta = golden.lists[0].meta;
     const list = await post("tools/list", { _meta: meta });
     assert.ok(list.result.tools.some((t: any) => t.name === WAIT_TOOL), JSON.stringify(list));
-    const started = await post("tools/call", { name: WAIT_TOOL, arguments: { session_key: "wsc_k" }, _meta: meta });
+    const started = await post("tools/call", { name: WAIT_TOOL, arguments: { session_key: "wsc_k" }, _meta: meta }, WAIT_TOOL);
     assert.equal(started.result.resultType, "task");
     assert.equal(started.result.taskId, "wkt1_y");
-    const got = await post("tasks/get", { taskId: "wkt1_y", _meta: meta });
+    const got = await post("tasks/get", { taskId: "wkt1_y", _meta: meta }, "wkt1_y");
     assert.equal(got.result.status, "working");
     assert.equal(reqs.find((r) => r.path === "/calls/task/get")?.body.hold_seconds, TASK_HOLD_SECONDS);
   } finally {
@@ -173,10 +209,12 @@ test("a stateless HTTP server serves the wait tool and tasks/get", async () => {
 test("tools registered after attach: the wait tool and the lists' cache fields are still there", async () => {
   const { wake } = fakeCore();
   wake.defineEvent("chat.message", { description: "x", args: z.object({ channel: z.string() }), payload: z.object({ t: z.string() }), text: () => "x" });
-  const server = new McpServer({ name: "chat", version: "1.0.0" });
-  const attached = wake.attach(server, { tools: [] });
-  server.registerTool("join", { description: "Join", inputSchema: attached.inputs({}) }, attached.events("join", async () => "joined"));
-  const rpc = await rawRpc(server);
+  const rpc = await rawRpc(() => {
+    const server = new McpServer({ name: "chat", version: "1.0.0" });
+    const attached = wake.attach(server, { tools: { subscribe: { enabled: false }, list: { enabled: false }, unsubscribe: { enabled: false }, wait: { enabled: true } } });
+    server.registerTool("join", { description: "Join", inputSchema: attached.inputs({}) }, attached.events("join", async () => "joined"));
+    return server;
+  });
   const list = (await rpc("tools/list", { _meta: golden.lists[0].meta })).result;
   assert.deepEqual(list.tools.map((t: any) => t.name).sort(), ["join", WAIT_TOOL]);
   assert.equal(list.resultType, "complete");
@@ -186,7 +224,7 @@ test("tools registered after attach: the wait tool and the lists' cache fields a
 
 test("tasks/get and tasks/cancel for an ID that isn't Wakeshift's never reach Wakeshift", async () => {
   const { wake, reqs } = fakeCore();
-  const rpc = await rawRpc(app(wake));
+  const rpc = await rawRpc(appMaker(wake));
   for (const m of ["tasks/get", "tasks/cancel"]) {
     const res = await rpc(m, { taskId: "app-own-task", _meta: golden.lists[0].meta });
     assert.equal(res.error?.code, -32601, m);

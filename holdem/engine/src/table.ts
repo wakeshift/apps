@@ -204,17 +204,18 @@ function liveHandPlayer(s: TableState, player: string): HandPlayer | undefined {
 const NAME = /^[A-Za-z0-9._:@-]{1,64}$/;
 const RESERVED = new Set(["__proto__", "constructor", "prototype", "hasOwnProperty", "toString", "valueOf"]);
 
-/** Seats a player with a buy-in. Allowed during a hand: they're dealt in from the next one. */
+/**
+ * Seats a player with a buy-in. Allowed during a hand: they're dealt in from
+ * the next one. That includes a player who folded and left the hand in
+ * progress: a name is a player, so the hand's records under it are theirs.
+ */
 export function sit(state: TableState, seat: number, player: string, buyIn: number): TableState {
   const s = clone(state);
   if (!isInt(seat) || seat < 0 || seat >= s.seats.length) throw new EngineError("bad_seat", `seat ${seat} doesn't exist`);
   if (s.seats[seat]) throw new EngineError("seat_taken", `seat ${seat} is taken`);
   if (typeof player !== "string" || !NAME.test(player) || RESERVED.has(player))
     throw new EngineError("bad_name", "a player's name is 1 to 64 letters, digits and . _ : @ -");
-  // Names identify players in the hand's records, so a name stays taken
-  // until the hand ends, also by someone who folded and left.
-  const inHand = handActive(s) && s.hand!.players.some((p) => p.player === player);
-  if (seatOf(s, player) >= 0 || inHand) throw new EngineError("already_seated", `${player} is already at this table`);
+  if (seatOf(s, player) >= 0 || liveHandPlayer(s, player)) throw new EngineError("already_seated", `${player} is already at this table`);
   if (!isInt(buyIn) || buyIn < s.config.minBuyIn || buyIn > s.config.maxBuyIn)
     throw new EngineError("bad_amount", `the buy-in is ${s.config.minBuyIn} to ${s.config.maxBuyIn}`);
   s.seats[seat] = { player, stack: buyIn, sittingOut: false };
@@ -455,23 +456,23 @@ function doAct(state: TableState, player: string, action: Action, timedOut: bool
       p.folded = true;
       break;
     case "check":
-      if (!legal.check) refuse(`${player} can't check: ${legal.toCall} to call`);
+      if (!legal.check) refuse(`there's no checking: ${legal.toCall} to call`);
       break;
     case "call":
-      if (legal.call === null) refuse(`${player} has nothing to call`);
+      if (legal.call === null) refuse("there's nothing to call");
       put(p, legal.call!);
       break;
     case "bet":
     case "raise": {
       const range = action.type === "bet" ? legal.bet : legal.raise;
-      if (!range) refuse(`${player} can't ${action.type} now`);
+      if (!range) refuse(`there's no ${action.type === "bet" ? "betting" : "raising"} now`);
       if (!isInt(amount) || amount < range!.min || amount > range!.max)
-        refuse(`a ${action.type} is to between ${range!.min} and ${range!.max}`);
+        refuse(`${action.type} to an amount from ${range!.min} to ${range!.max}`);
       put(p, amount! - p.committed);
       break;
     }
     case "allin":
-      if (legal.allIn === null) refuse(`${player} can't go all in now: call or fold`);
+      if (legal.allIn === null) refuse("there's no going all in now: call or fold");
       put(p, p.stack);
       break;
     default:

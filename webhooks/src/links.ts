@@ -6,13 +6,19 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes, timingSafeEq
 // secret, each for its own purpose:
 //
 //   code    (the link: /l/<code>, /t/<code>/mcp)  version | hook | created | mac("link")
-//   token   (a webhook URL: /in/<token>)          version | hook | created | check [| sealed] | mac("in")
+//   token   (a webhook URL: /in/<token>)          version | hook | created | check [| sealed | gen] | mac("in")
 //   secret  (GitHub's and the bearer check's)     mac("secret/<check>", hook)
 //
 // The webhook token is a different capability from the code: anyone with a
 // webhook URL can post to the webhook, but can't watch it or see its page.
 // Each signature check has its own token, so the URL that requires a
 // signature can't be turned into the open one.
+//
+// The open URL can be replaced from the webhook's page: its token then
+// carries the webhook's open-URL generation (gen, 4 bytes; generation 0,
+// the first, has none), and the server accepts only the current one, which
+// it keeps per webhook (state.ts). Nothing else changes: the code, the
+// webhook ID (the SDK user, so its subscriptions) and the checked URLs.
 //
 // Stripe and Linear make the signing secret themselves, and the user pastes
 // it into the page. It's sealed into that check's token (AES-256-GCM with a
@@ -25,6 +31,7 @@ const MAC_BYTES = 16;
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const HEAD_BYTES = 1 + HOOK_BYTES + 4;
+const GEN_BYTES = 4;
 
 /** How a webhook URL checks who's posting. */
 export type Check = "open" | "github" | "bearer" | "stripe" | "linear";
@@ -47,6 +54,8 @@ export interface Link {
 
 export interface Webhook extends Link {
   check: Check;
+  /** The open URL's generation (0 for the first, and for every other check). */
+  gen: number;
   /** Stripe's or Linear's signing secret, unsealed from the token. */
   secret?: string;
 }
@@ -83,11 +92,18 @@ export class Links {
 
   /**
    * The webhook token for a link and a signature check. Stripe's and
-   * Linear's take the secret the user pasted from the service.
+   * Linear's take the secret the user pasted from the service; the open
+   * URL's, its generation (gen).
    */
-  token(l: Link, check: Check, pasted?: string): string {
+  token(l: Link, check: Check, pasted?: string, gen = 0): string {
     const head = Buffer.concat([this.head(l), Buffer.from([checks.indexOf(check)])]);
     let body = head;
+    if (gen !== 0) {
+      if (check !== "open" || !Number.isInteger(gen) || gen < 0 || gen > 0xffffffff) throw new Error("only the open URL has a generation");
+      const g = Buffer.alloc(GEN_BYTES);
+      g.writeUInt32BE(gen);
+      body = Buffer.concat([head, g]);
+    }
     if (isPasted(check)) {
       if (!pasted || Buffer.byteLength(pasted) > MAX_PASTED) throw new Error("this check needs the secret the user pasted");
       const nonce = randomBytes(NONCE_BYTES);
@@ -108,7 +124,11 @@ export class Links {
     const head = body.subarray(0, headLen);
     const check = checks[head[headLen - 1]];
     if (!check) return undefined;
-    const w: Webhook = { ...readHead(head), check };
+    const w: Webhook = { ...readHead(head), check, gen: 0 };
+    if (check === "open" && body.length === headLen + GEN_BYTES) {
+      w.gen = body.readUInt32BE(headLen);
+      return w.gen === 0 ? undefined : w;
+    }
     if (!isPasted(check)) return body.length === headLen ? w : undefined;
     const rest = body.subarray(headLen);
     if (rest.length <= NONCE_BYTES + TAG_BYTES) return undefined;

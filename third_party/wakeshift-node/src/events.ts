@@ -7,12 +7,9 @@
 // subscribe with the subscribe_events tool attach adds.
 // https://wakeshift.ai/docs/events has the guide.
 
-import { z } from "zod";
-import { McpError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
-import { objectFromShape, safeParse, type AnySchema, type SchemaInput, type SchemaOutput, type ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import { RpcError, type CallToolResult, type McpServerLike, type ToolCallExtra } from "./mcp.js";
+import { isSchema, objectFromShape, safeParse, toJsonSchema, type AnySchema, type SchemaInput, type SchemaOutput, type ZodRawShapeCompat } from "./zod.js";
+import { capabilitiesError, hostOf, type Host } from "./host.js";
 import { WakeshiftError } from "./errors.js";
 import {
   DELIVERY,
@@ -29,10 +26,10 @@ import {
   type Codes,
   type Dialect,
 } from "./spec.js";
-import { toolCallOf, type Emitted, type PublishUrl, type Recipient, type ToolExtra, type Via, type Wakeshift } from "./wakeshift.js";
-import { Attached, toolArgs, type EventsOptions, type ToolCallExtra } from "./toolcall.js";
+import { toolCallOf, userAgentOf, type Emitted, type PublishUrl, type Recipient, type Via, type Wakeshift } from "./wakeshift.js";
+import { Attached, wakeInputsFor, type EventsOptions } from "./toolcall.js";
 import { serveStateless } from "./discover.js";
-import { serveTasks } from "./tasks.js";
+import { serveTasks, TOOL_ANNOTATIONS } from "./tasks.js";
 
 /** Who is subscribing: what authorize decides on. */
 export interface Subscriber {
@@ -86,7 +83,12 @@ export interface EventOptions<A extends AnySchema, P extends AnySchema> {
 }
 
 export interface EmitOptions {
-  /** Makes retries emit once for a day (at most 200 characters). A retry must name the same recipients: Wakeshift uses the first's. */
+  /**
+   * Makes retries emit once for a day (at most 200 characters): a retry of
+   * the same emit (arguments, recipients and payload) returns the first's
+   * result with `duplicate: true`. The id on a different emit throws
+   * IdReusedError (`id_reused`) and sends nothing: give each occurrence its own.
+   */
   id?: string;
   /**
    * A personal event's recipients (at most 1,000), one or a list, mixed: a
@@ -117,7 +119,7 @@ const argNameRE = /^[a-z][a-z0-9_]{0,63}$/;
 // jsonSchemaOf is a zod schema as JSON Schema, without $schema (Wakeshift
 // reads it as 2020-12).
 function jsonSchemaOf(s: AnySchema): Record<string, any> {
-  const out = toJsonSchemaCompat(s as any) as Record<string, any>;
+  const out = toJsonSchema(s) as Record<string, any>;
   delete out.$schema;
   normalize(out);
   return out;
@@ -150,10 +152,6 @@ function canonical(v: unknown): string {
   return JSON.stringify(sortKeys(v) ?? {});
 }
 
-function isSchema(v: unknown): v is AnySchema {
-  return !!v && typeof v === "object" && ("_def" in (v as object) || "_zod" in (v as object));
-}
-
 // detailOf is an error's message for an agent: Wakeshift's own words.
 function detailOf(err: unknown): string {
   return err instanceof WakeshiftError ? err.detail : String((err as Error)?.message ?? err);
@@ -165,9 +163,9 @@ function issues(err: unknown): string {
   return list.map((i) => (i.path?.length ? i.path.join(".") + ": " : "") + i.message).join("; ");
 }
 
-/** One of the app's event types (wake.defineEvent). */
-export class WakeEvent<A extends AnySchema = AnySchema, P extends AnySchema = AnySchema> {
-  readonly name: string;
+/** One of the app's event types (wake.defineEvent). N is its name, as defineEvent was given it. */
+export class WakeEvent<A extends AnySchema = AnySchema, P extends AnySchema = AnySchema, N extends string = string> {
+  readonly name: N;
   readonly description: string;
   readonly title?: string;
   readonly personal: boolean;
@@ -180,7 +178,7 @@ export class WakeEvent<A extends AnySchema = AnySchema, P extends AnySchema = An
   /** Use wake.defineEvent rather than this constructor. */
   constructor(
     private readonly wake: Wakeshift,
-    name: string,
+    name: N,
     opts: EventOptions<A, P>,
   ) {
     if (!nameRE.test(name) || name.length > 64) throw new Error(`wakeshift: event name ${JSON.stringify(name)}: lowercase dot-separated words (chat.message), at most 64 characters`);
@@ -443,45 +441,123 @@ export interface Identity {
   client?: string;
 }
 
-export interface AttachOptions {
+/**
+ * attach's options. C is the request context your MCP SDK's handlers get:
+ * @modelcontextprotocol/server 2.x's ServerContext (`ctx`), or
+ * @modelcontextprotocol/sdk 1.x's RequestHandlerExtra (`extra`).
+ */
+export interface AttachOptions<C = any> {
   /**
    * Who is behind a request. The app passes identify, returning { user }:
    * its own ID for the person, from its own sign-in (and, on a stateless
    * server, the client's name as `client`). Without it, requests have no
-   * user, so personal events and list_subscriptions refuse.
+   * user, so personal events and list_subscriptions refuse. It gets the
+   * request's context as your MCP SDK passes it to handlers: 2.x's ctx
+   * (the token in ctx.http?.authInfo), 1.x's extra (extra.authInfo).
    */
-  identify?: (extra: ToolExtra & { authInfo?: AuthInfo }) => Identity | undefined;
+  identify?(extra: C): Identity | undefined;
   /**
-   * Which of attach's own tools it adds (BUILTIN_TOOLS): subscribe_events,
-   * unsubscribe_events and list_subscriptions. Default: all three; `[]`
-   * adds none. Leave out unsubscribe_events or list_subscriptions only if
-   * your own tools let a person see and stop their subscriptions.
+   * Which of attach's own tools it adds, each `{ enabled }` (AttachTools):
+   * `subscribe` (subscribe_events), `list` (list_subscriptions) and
+   * `unsubscribe` (unsubscribe_events), on unless disabled, and `wait`
+   * (wakeshift_wait, Claude Code's wait tool), off unless enabled:
+   * `tools: { wait: { enabled: true } }`. Disable `list` or `unsubscribe`
+   * only if your own tools let a person see and stop their subscriptions.
+   *
+   * Deprecated: a list of names (BUILTIN_TOOLS) still works for now, adding
+   * only the tools it names, and never the wait tool.
    */
-  tools?: readonly BuiltinTool[];
+  tools?: AttachTools | readonly BuiltinTool[];
   /** The event features' options: events.native overrides native detection for wrapped tools (attached.events). */
-  events?: EventsOptions;
+  events?: EventsOptions<C>;
 }
 
-/** The tools attach adds, unless AttachOptions.tools names fewer. */
+/** The tools attach adds by default (deprecated as AttachOptions.tools' list form). */
 export const BUILTIN_TOOLS = ["subscribe_events", "unsubscribe_events", "list_subscriptions"] as const;
-/** One of attach's own tools. */
+/** One of attach's own tools, by name (AttachOptions.tools' deprecated list form). */
 export type BuiltinTool = (typeof BUILTIN_TOOLS)[number];
 
-// What a client says about itself on initialize, or a request's _meta;
-// else the name identify gave (identified).
-function clientInfoName(server: McpServer, meta: Record<string, unknown> | undefined, identified?: string): string {
-  const fromInit = server.server.getClientVersion()?.name;
+/** One of attach's own tools' options (AttachTools). */
+export interface ToolOptions {
+  /** Whether attach adds it. Default: on, except the wait tool. */
+  enabled?: boolean;
+}
+
+/**
+ * The wait tool's options (AttachTools.wait): Wakeshift's wait tool,
+ * wakeshift_wait, Claude Code's wake path with nothing installed, where
+ * its client takes MCP tasks (protocol 2026-07-28, on a stateless server).
+ * Off by default: Claude Code is then woken by its plugin or, after a no, a
+ * background Monitor, as every other server's is. On, a waiting
+ * conversation's Claude Code holds a request to this server (tasks/get,
+ * about 20 seconds) and sends the next about a second later, for as long as
+ * it waits: on a serverless host, give the function a timeout of at least
+ * 30 seconds, and expect one held invocation per waiting conversation.
+ */
+export interface WaitToolOptions extends ToolOptions {}
+
+/** Which of attach's own tools it adds (AttachOptions.tools). */
+export interface AttachTools {
+  /** wakeshift_wait, Claude Code's wait tool: off unless enabled. */
+  wait?: WaitToolOptions;
+  /** subscribe_events, for clients that don't speak MCP Events: on unless disabled. */
+  subscribe?: ToolOptions;
+  /** list_subscriptions: on unless disabled. */
+  list?: ToolOptions;
+  /** unsubscribe_events: on unless disabled. */
+  unsubscribe?: ToolOptions;
+}
+
+/** @internal Which of attach's own tools to add, from AttachOptions.tools. */
+export interface ToolChoice {
+  builtin: Set<BuiltinTool>;
+  wait: boolean;
+}
+
+const TOOL_KEYS = { subscribe: "subscribe_events", list: "list_subscriptions", unsubscribe: "unsubscribe_events" } as const;
+
+/**
+ * @internal AttachOptions.tools as the tools to add: each `{ enabled }` of
+ * the object form, or the names of the deprecated list form (never the
+ * wait tool). Throws on a key, name or value it doesn't know.
+ */
+export function toolChoice(tools: AttachOptions<any>["tools"], what = "attach"): ToolChoice {
+  if (tools === undefined) return { builtin: new Set(BUILTIN_TOOLS), wait: false };
+  if (Array.isArray(tools)) {
+    for (const t of tools) {
+      if (!(BUILTIN_TOOLS as readonly string[]).includes(t)) throw new Error(`wakeshift: ${what}'s tools names "${t}": its own tools are ${BUILTIN_TOOLS.join(", ")}`);
+    }
+    return { builtin: new Set(tools as readonly BuiltinTool[]), wait: false };
+  }
+  if (!tools || typeof tools !== "object") throw new Error(`wakeshift: ${what}'s tools is { wait, subscribe, list, unsubscribe }, each { enabled }`);
+  const o = tools as AttachTools;
+  for (const [k, v] of Object.entries(o)) {
+    if (k !== "wait" && !(k in TOOL_KEYS)) throw new Error(`wakeshift: ${what}'s tools has "${k}": its own tools are wait, subscribe, list and unsubscribe`);
+    if (v === undefined) continue;
+    if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error(`wakeshift: ${what}'s tools.${k} is an object, { enabled }`);
+    for (const [ok, ov] of Object.entries(v)) {
+      if (ok !== "enabled") throw new Error(`wakeshift: ${what}'s tools.${k} has "${ok}": its options are { enabled }`);
+      if (ov !== undefined && typeof ov !== "boolean") throw new Error(`wakeshift: ${what}'s tools.${k}.enabled is true or false`);
+    }
+  }
+  const builtin = new Set<BuiltinTool>();
+  for (const [k, name] of Object.entries(TOOL_KEYS)) if (o[k as keyof typeof TOOL_KEYS]?.enabled !== false) builtin.add(name);
+  return { builtin, wait: o.wait?.enabled === true };
+}
+
+/** @internal The warning for AttachOptions.tools' deprecated list form. */
+export function toolsListWarning(what = "attach"): string {
+  return `wakeshift: ${what}'s tools as a list of names is deprecated: pass { subscribe, list, unsubscribe }, each { enabled } (and wait: { enabled: true } for Claude Code's wait tool)`;
+}
+
+// What a client says about itself on initialize (2.x: or the request's
+// envelope), or a request's _meta; else the name identify gave (identified).
+function clientInfoName(host: Host, meta: Record<string, unknown> | undefined, identified?: string): string {
+  const fromInit = host.clientName();
   if (fromInit) return fromInit;
   const info = meta?.["io.modelcontextprotocol/clientInfo"] as { name?: unknown } | undefined;
   if (typeof info?.name === "string" && info.name) return info.name;
   return identified ?? "";
-}
-
-function header(extra: ToolExtra | undefined, name: string): string {
-  const h = extra?.requestInfo?.headers;
-  if (!h) return "";
-  const v = h[name] ?? h[name.toLowerCase()];
-  return (Array.isArray(v) ? v[0] : v) ?? "";
 }
 
 /** A client that speaks MCP Events: it declared the extension, or it's one known to (ChatGPT). */
@@ -518,6 +594,10 @@ export const EVENT_TOOL_TEXT = {
   no_such_id: "No subscription of yours has the id {id}: it may have ended already.",
   none: "You have no subscriptions to this app's events.",
   not_subscribed: "This conversation wasn't subscribed to {event} {arguments}.",
+  notifies: "This tool is how {app} notifies you in this conversation{when}. {App} delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it.",
+  notifies_event: " of this event: {events}",
+  notifies_events: " of these events: {events}",
+  notifies_events_separator: "; ",
   personal_no_user: "{event} is personal, and this app couldn't tell who you are: sign in to it first.",
   polled: "polled by an MCP client",
   refused: "You may not subscribe to {event} with these arguments.",
@@ -538,88 +618,203 @@ export function fill(key: keyof typeof EVENT_TOOL_TEXT, vars: Record<string, str
 }
 
 export const SUBSCRIBE_TOOL_DESCRIPTION = EVENT_TOOL_TEXT.subscribe_description;
+
+/** @internal notifies' sentence, naming app ("this app" if none), with when ("a build finishes") if given. */
+export function notifiesSentence(app: string, when?: string): string {
+  const w = when?.trim().replace(/[.\s]+$/, "");
+  const App = app.charAt(0).toUpperCase() + app.slice(1);
+  return EVENT_TOOL_TEXT.notifies.replace(/\{when\}/g, w ? ` when ${w}` : "").replace(/\{App\}/g, App).replace(/\{app\}/g, app);
+}
+
+/**
+ * @internal The sentence tools/list adds to a tool that declares the events
+ * it subscribes to (attached.events' subscribes): notifies' sentence with
+ * the events' own descriptions where when goes, "of this event: <d>" or
+ * "of these events: <d1>; <d2>". Each description is on one line, without
+ * its trailing period: the sentence adds one. test/subscribes.json pins it.
+ */
+export function subscribesSentence(app: string, descriptions: readonly string[]): string {
+  const ds = eventDescriptions(descriptions);
+  if (ds.length === 0) return "";
+  const of = fill(ds.length === 1 ? "notifies_event" : "notifies_events", { events: ds.join(EVENT_TOOL_TEXT.notifies_events_separator) });
+  const App = app.charAt(0).toUpperCase() + app.slice(1);
+  return EVENT_TOOL_TEXT.notifies.replace(/\{when\}/g, () => of).replace(/\{App\}/g, () => App).replace(/\{app\}/g, () => app);
+}
+
+// eventDescriptions is the declared events' descriptions as the sentence
+// quotes them: each on one line, its trailing periods trimmed, each once.
+function eventDescriptions(descriptions: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const d of descriptions) {
+    const c = (d ?? "").replace(/\s+/g, " ").trim().replace(/[.\s]+$/, "");
+    if (c && !out.includes(c)) out.push(c);
+  }
+  return out;
+}
+
+// NOTIFIES_TAIL is the part of every notifies sentence after the app's
+// name, whatever its app and events: a description that has it already
+// says how the app notifies (notifies() wrote it).
+const NOTIFIES_TAIL = EVENT_TOOL_TEXT.notifies.slice(EVENT_TOOL_TEXT.notifies.indexOf("{App}") + "{App}".length);
+
+/**
+ * @internal A tool's description as tools/list gives it for a tool that
+ * declares the events it subscribes to: the subscribes sentence after the
+ * tool's own description. A description that already has a notifies
+ * sentence (notifies(), for custom wording), or no events, leaves it as it
+ * was. app is the app's name ("this app" until tools/list names it).
+ */
+export function withSubscribes(description: string, descriptions: readonly string[], app: string = UNNAMED_APP): string {
+  const d = (description ?? "").trim();
+  if (d.includes(NOTIFIES_TAIL)) return description;
+  const n = subscribesSentence(app.trim() || UNNAMED_APP, descriptions);
+  if (!n) return description;
+  return d ? `${d} ${n}` : n;
+}
+
+/** @internal The parts of notifies' sentence that name the app, for "this app": tools/list names it. */
+export function unnamedNotifiesParts(): [string, string] {
+  const s = notifiesSentence(UNNAMED_APP);
+  const mid = s.indexOf(" notifies you in this conversation");
+  const second = s.indexOf(". This app delivers");
+  return [s.slice(0, mid + " notifies you".length), s.slice(second, second + ". This app delivers".length)];
+}
+
+/** What notifies' sentence calls an app it isn't told the name of, until tools/list names it. */
+export const UNNAMED_APP = "this app";
+
+/** notifies' options. */
+export interface NotifiesOptions {
+  /** The app's name; default: as the console has it (GET /app), filled in by tools/list. */
+  app?: string;
+  /** When the tool notifies, e.g. "a build finishes": the sentence says "… notifies you in this conversation when a build finishes." */
+  when?: string;
+}
+
+/**
+ * A tool's description, for a tool that subscribes the calling conversation
+ * (call.subscribe), with sentences after it saying that the tool is how the
+ * app notifies the agent (when, if given), that the app delivers its
+ * notifications through Wakeshift, and what the result may ask
+ * (EVENT_TOOL_TEXT.notifies, the same in every SDK). The app is named in
+ * tools/list as the console has it (its name from GET /app); app overrides
+ * that, and with neither the sentence says "this app". Agents set
+ * Wakeshift's part of the result aside as unrequested unless the tool's own
+ * description says so (wakebench's realistic tier, November 2026). Use it
+ * only for tools that subscribe: the sentence says so.
+ *
+ *   server.registerTool("watch_build", { description: notifies("Watch a build until it finishes.", { when: "a build finishes" }), … }, attached.events(…))
+ */
+export function notifies(description: string, opts: NotifiesOptions = {}): string {
+  const d = (description ?? "").trim();
+  const n = notifiesSentence(opts.app?.trim() || UNNAMED_APP, opts.when);
+  if (d.includes(n)) return d;
+  return d ? `${d} ${n}` : n;
+}
 export const UNSUBSCRIBE_TOOL_DESCRIPTION = EVENT_TOOL_TEXT.unsubscribe_description;
 export const LIST_TOOL_DESCRIPTION = EVENT_TOOL_TEXT.list_description;
 
 const MAX_LISTED_EVENTS = 20;
 
 /** @internal The events part of Wakeshift.attach. */
-export function attachEvents(wake: Wakeshift, server: McpServer, events: WakeEvent[], opts: AttachOptions = {}): Attached {
-  if (events.length === 0) throw new Error("wakeshift: attach needs at least one event (wake.defineEvent) defined first");
-  for (const t of opts.tools ?? []) {
-    if (!(BUILTIN_TOOLS as readonly string[]).includes(t)) throw new Error(`wakeshift: attach's tools names "${t}": its own tools are ${BUILTIN_TOOLS.join(", ")}`);
-  }
-  const tools = new Set<BuiltinTool>(opts.tools ?? BUILTIN_TOOLS);
-  const identityOf = (extra: ToolExtra & { authInfo?: AuthInfo }): Identity | undefined => opts.identify?.(extra) ?? undefined;
+export function attachEvents<C>(wake: Wakeshift, server: McpServerLike, events: WakeEvent[], opts: AttachOptions<C> = {}): Attached<C> {
+  checkAttach(events, opts);
+  return attachHost(wake, hostOf(server), events, opts);
+}
+
+/** @internal What attach refuses before it touches a server: no events, or tools it doesn't know. */
+export function checkAttach(events: WakeEvent[], opts: AttachOptions<any>, what = "attach"): void {
+  if (events.length === 0) throw new Error(`wakeshift: ${what} needs at least one event (wake.defineEvent) defined first`);
+  toolChoice(opts.tools, what);
+}
+
+/** @internal attach on a Host: an McpServer's, or a framework adapter's (mastra.ts, xmcp.ts). */
+export function attachHost<C>(wake: Wakeshift, host: Host, events: WakeEvent[], opts: AttachOptions<C> = {}): Attached<C> {
+  const choice = toolChoice(opts.tools);
+  if (Array.isArray(opts.tools)) wake.warnOnce("tools-list", toolsListWarning());
+  const tools = choice.builtin;
+  // The wait tool, only if the app turns it on and the MCP SDK's request
+  // handlers can be reached (tasks.ts): otherwise no call says it takes tasks.
+  const wait = choice.wait && !!host.handlers();
+  // raw is the MCP SDK's own request context (1.x's extra, 2.x's ctx): what identify gets.
+  const identityOf = (raw: unknown): Identity | undefined => opts.identify?.(raw as C) ?? undefined;
   // Who's calling: the user, and the client's name (the request's, else identify's).
-  const callerOf = (extra: (ToolExtra & { authInfo?: AuthInfo }) | undefined): { user: string | undefined; client: string } => {
-    const id = extra ? identityOf(extra) : undefined;
-    return { user: id?.user, client: clientInfoName(server, extra?._meta, id?.client) };
+  const callerOf = (raw: unknown): { user: string | undefined; client: string } => {
+    const id = raw ? identityOf(raw) : undefined;
+    return { user: id?.user, client: clientInfoName(host, raw ? host.req(raw).meta : undefined, id?.client) };
   };
-  const attached = new Attached({
+  const attached = new Attached<C>({
     wake,
-    server,
-    identify: (extra: ToolCallExtra) => identityOf(extra as ToolExtra & { authInfo?: AuthInfo }),
-    clientOf: (meta, identified) => clientInfoName(server, meta, identified),
+    host,
+    identify: (raw) => identityOf(raw),
+    clientOf: (meta, identified) => clientInfoName(host, meta, identified),
     events: opts.events ?? {},
     warnOnce: (key, message) => wake.warnOnce(key, message),
+    wait,
   });
   const byName = new Map(events.map((e) => [e.name, e]));
-  const low = server.server;
   try {
-    low.registerCapabilities({ [TOP_LEVEL_KEY]: { listChanged: false }, extensions: { [EXTENSION_KEY]: { listChanged: false } } } as any);
+    host.registerCapabilities({ [TOP_LEVEL_KEY]: { listChanged: false }, extensions: { [EXTENSION_KEY]: { listChanged: false } } });
   } catch (err) {
-    throw new Error("wakeshift: call attach before connecting the server to a transport", { cause: err });
+    throw capabilitiesError(host, err);
   }
-  // Clients that speak only protocol 2026-07-28 (OpenClaw), on a stateless
-  // transport: server/discover and resultType (discover.ts).
-  serveStateless(server, { bridgedOnly: ["subscribe_events"] });
+  if (!host.handlers() && !host.framework) {
+    // An MCP SDK release that keeps its request handlers elsewhere: the native
+    // events and the built-in tools still work, but not what wraps the SDK's own methods.
+    wake.warnOnce(
+      "handlers",
+      `wakeshift: this MCP SDK keeps its request handlers where Wakeshift can't reach them, so ${choice.wait ? "wakeshift_wait, " : ""}the 2026-07-28 tools/list changes and wrapped tools' output schemas are off: check for a newer @wakeshift/sdk`,
+    );
+  }
+  // Clients that speak only protocol 2026-07-28 (OpenClaw): on the MCP SDK
+  // 1.x, on a stateless transport, server/discover and resultType
+  // (discover.ts); on 2.x, its own.
+  serveStateless(host, { bridgedOnly: ["subscribe_events"] });
   // Clients that take MCP tasks there (Claude Code): Wakeshift's wait tool,
-  // answered with a task (tasks.ts).
-  serveTasks(wake, server, (extra) => callerOf(extra));
+  // answered with a task (tasks.ts), if the app turns it on (wait).
+  if (wait) serveTasks(wake, host, callerOf);
   // tools/list: a wrapped tool's output schema names wakeshift, which its
   // structured results carry (toolcall.ts).
   attached.amendToolsList();
 
   // ── Native: events/list, events/subscribe, events/unsubscribe ─────────
-  const method = (m: string) => z.object({ method: z.literal(m), params: z.any().optional() });
-  low.setRequestHandler(method("events/list") as any, async () => ({ resultType: RESULT_TYPE, events: events.map((e) => e.definition()) }));
-  low.setRequestHandler(method("events/stream") as any, async (_req: any, extra: any) => {
-    const codes = codesFor(dialectOf(clientInfoName(server, undefined), header(extra, "user-agent")));
-    throw new McpError(codes.unsupported, "push delivery isn't offered: use a webhook (events/subscribe) or poll (events/poll)", { feature: "deliveryMode", value: "stream" });
+  host.setMethod("events/list", async () => ({ resultType: RESULT_TYPE, events: events.map((e) => e.definition()) }));
+  host.setMethod("events/stream", async (_params, raw) => {
+    const codes = codesFor(dialectOf(clientInfoName(host, undefined), userAgentOf(host.req(raw))));
+    throw new RpcError(codes.unsupported, "push delivery isn't offered: use a webhook (events/subscribe) or poll (events/poll)", { feature: "deliveryMode", value: "stream" });
   });
   type NativeMethod = "subscribe" | "unsubscribe" | "poll";
-  const native = async (req: any, extra: any, m: NativeMethod): Promise<Record<string, unknown>> => {
+  const native = async (p: Record<string, any>, raw: unknown, m: NativeMethod): Promise<Record<string, unknown>> => {
     const unsubscribe = m === "unsubscribe";
-    const p = (req.params ?? {}) as Record<string, any>;
-    const meta = (p._meta ?? {}) as Record<string, unknown>;
-    const id = identityOf(extra);
-    const client = clientInfoName(server, meta, id?.client);
-    const ua = header(extra, "user-agent");
+    const req = host.req(raw);
+    const meta = (req.meta ?? {}) as Record<string, unknown>;
+    const id = identityOf(raw);
+    const client = clientInfoName(host, meta, id?.client);
+    const ua = userAgentOf(req);
     const dialect = dialectOf(client, ua);
     const codes = codesFor(dialect);
-    const nameHeader = header(extra, NAME_HEADER);
+    const nameHeader = req.header(NAME_HEADER);
     if (nameHeader && headerValue(nameHeader) !== p.name) {
-      throw new McpError(HEADER_MISMATCH, "Header mismatch: Mcp-Name doesn't match params.name");
+      throw new RpcError(HEADER_MISMATCH, "Header mismatch: Mcp-Name doesn't match params.name");
     }
     const ev = byName.get(p.name);
-    if (!ev) throw new McpError(codes.notFound, fill("native_unknown_event", { event: JSON.stringify(p.name) }), { kind: "event" });
+    if (!ev) throw new RpcError(codes.notFound, fill("native_unknown_event", { event: JSON.stringify(p.name) }), { kind: "event" });
     if (m === "subscribe" && p.delivery?.mode !== "webhook") {
-      throw new McpError(codes.unsupported, 'delivery.mode must be "webhook": the only delivery offered', { feature: "deliveryMode", value: p.delivery?.mode });
+      throw new RpcError(codes.unsupported, 'delivery.mode must be "webhook": the only delivery offered', { feature: "deliveryMode", value: p.delivery?.mode });
     }
     let args: any;
     try {
       args = ev.parseArgs(p.arguments ?? {});
     } catch (err) {
-      throw new McpError(INVALID_PARAMS, err instanceof WakeshiftError ? err.detail : (err as Error).message);
+      throw new RpcError(INVALID_PARAMS, err instanceof WakeshiftError ? err.detail : (err as Error).message);
     }
     const user = id?.user;
-    if (!user) throw new McpError(codes.forbidden, fill("native_no_user"));
+    if (!user) throw new RpcError(codes.forbidden, fill("native_no_user"));
     const call = { user, client, meta, ...(ua ? { user_agent: ua } : {}) };
     // A poll has no subscribe step (each poll can start the subscription),
     // so every poll asks authorize: access is checked again each time.
     if (!unsubscribe && !(await ev.allows({ user, client, native: true }, args))) {
-      throw new McpError(codes.forbidden, fill("native_refused", { event: ev.name }));
+      throw new RpcError(codes.forbidden, fill("native_refused", { event: ev.name }));
     }
     if (m === "poll") {
       const body: Record<string, unknown> = { call, name: ev.name, arguments: args };
@@ -637,7 +832,7 @@ export function attachEvents(wake: Wakeshift, server: McpServer, events: WakeEve
       if (unsubscribe) {
         const out = await wake.requestApp<{ ended: boolean }>("POST", "/events/unsubscribe", body);
         if (!out.ended && dialect !== "chatgpt") {
-          throw new McpError(codes.notFound, "no subscription matches that event, arguments and delivery URL", { kind: "subscription" });
+          throw new RpcError(codes.notFound, "no subscription matches that event, arguments and delivery URL", { kind: "subscription" });
         }
         return { resultType: RESULT_TYPE };
       }
@@ -663,11 +858,14 @@ export function attachEvents(wake: Wakeshift, server: McpServer, events: WakeEve
       throw rpcErrorOf(err, codes);
     }
   };
-  low.setRequestHandler(method("events/subscribe") as any, (req: any, extra: any) => native(req, extra, "subscribe"));
-  low.setRequestHandler(method("events/unsubscribe") as any, (req: any, extra: any) => native(req, extra, "unsubscribe"));
-  low.setRequestHandler(method("events/poll") as any, (req: any, extra: any) => native(req, extra, "poll"));
+  host.setMethod("events/subscribe", (p, raw) => native(p, raw, "subscribe"));
+  host.setMethod("events/unsubscribe", (p, raw) => native(p, raw, "unsubscribe"));
+  host.setMethod("events/poll", (p, raw) => native(p, raw, "poll"));
 
   // ── Bridged: subscribe_events, unsubscribe_events, list_subscriptions ─
+  // Written in the zod the MCP SDK takes (2.x: zod 4 only).
+  const z = host.zod;
+  const toolArgs = wakeInputsFor(host);
   const names = events.map((e) => e.name) as [string, ...string[]];
   const listed = events
     .slice(0, MAX_LISTED_EVENTS)
@@ -681,31 +879,33 @@ export function attachEvents(wake: Wakeshift, server: McpServer, events: WakeEve
   const result = (text: string, addition?: ToolAddition): CallToolResult => withAddition(text, addition ?? {});
   const fail = (text: string): CallToolResult => ({ isError: true, content: [{ type: "text", text }] });
   // register adds one of the tools, if the app wants it (attach's tools).
-  const register = (name: BuiltinTool, config: any, cb: any): RegisteredTool | undefined => (tools.has(name) ? server.registerTool(name, config, cb) : undefined);
+  const register = (name: BuiltinTool, config: Parameters<Host["registerTool"]>[1], cb: (input: any, raw: unknown) => Promise<CallToolResult>) =>
+    tools.has(name) ? host.registerTool(name, config, cb) : undefined;
   const subscribeTool = register(
     "subscribe_events",
     {
       description: `${EVENT_TOOL_TEXT.subscribe_description}${EVENT_TOOL_TEXT.events_heading}${listed}${more}`,
       inputSchema: { event: z.enum(names).describe(EVENT_TOOL_TEXT.event_argument), arguments: argsInput, ...toolArgs },
+      annotations: { ...TOOL_ANNOTATIONS.subscribe_events },
     },
-    async (input: any, extra: any) => {
-      const { event, arguments: raw, ...rest } = input as { event: string; arguments?: Record<string, unknown> };
+    async (input, raw) => {
+      const { event, arguments: rawArgs, ...rest } = input as { event: string; arguments?: Record<string, unknown> };
       const ev = byName.get(event);
       if (!ev) return fail(fill("unknown_event", { event }));
       let args: any;
       try {
-        args = ev.parseArgs(raw ?? {});
+        args = ev.parseArgs(rawArgs ?? {});
       } catch (err) {
         return fail(err instanceof WakeshiftError ? err.detail : (err as Error).message);
       }
-      const { user, client } = callerOf(extra);
+      const { user, client } = callerOf(raw);
       if (ev.personal && !user) return fail(fill("personal_no_user", { event: ev.name }));
       if (!(await ev.allows({ user, client, native: false }, args))) {
         return fail(fill("refused", { event: ev.name }));
       }
       try {
         const out = await wake.requestApp<{ event_subscription: { id: string; created: boolean }; addition: ToolAddition; agent?: unknown }>("POST", "/event-subscriptions", {
-          call: toolCallOf(extra, client, user, rest, "subscribe_events"),
+          call: toolCallOf(host.req(raw), client, user, rest, "subscribe_events", wait),
           name: ev.name,
           arguments: args,
         });
@@ -727,10 +927,11 @@ export function attachEvents(wake: Wakeshift, server: McpServer, events: WakeEve
         id: z.string().optional().describe(EVENT_TOOL_TEXT.id_argument),
         ...toolArgs,
       },
+      annotations: { ...TOOL_ANNOTATIONS.unsubscribe_events },
     },
-    async (input: any, extra: any) => {
-      const { event, arguments: raw, id, ...rest } = input as { event?: string; arguments?: Record<string, unknown>; id?: string };
-      const { user, client } = callerOf(extra);
+    async (input, raw) => {
+      const { event, arguments: rawArgs, id, ...rest } = input as { event?: string; arguments?: Record<string, unknown>; id?: string };
+      const { user, client } = callerOf(raw);
       try {
         if (id) {
           if (!user) return fail(fill("end_no_user"));
@@ -739,54 +940,55 @@ export function attachEvents(wake: Wakeshift, server: McpServer, events: WakeEve
         }
         const ev = event ? byName.get(event) : undefined;
         if (!ev) return fail(fill("need"));
-        const args = ev.parseArgs(raw ?? {});
-        const out = await wake.requestApp<{ ended: boolean }>("POST", "/event-subscriptions/unsubscribe", {
-          call: toolCallOf(extra, client, user, rest, "unsubscribe_events"),
+        const args = ev.parseArgs(rawArgs ?? {});
+        const out = await wake.requestApp<{ ended: boolean; addition?: ToolAddition }>("POST", "/event-subscriptions/unsubscribe", {
+          call: toolCallOf(host.req(raw), client, user, rest, "unsubscribe_events", wait),
           name: ev.name,
           arguments: args,
         });
-        return result(fill(out.ended ? "unsubscribed" : "not_subscribed", { event: ev.name, arguments: canonical(args) }));
+        // addition: the conversation's session key stays the same.
+        return result(fill(out.ended ? "unsubscribed" : "not_subscribed", { event: ev.name, arguments: canonical(args) }), out.addition);
       } catch (err) {
         return fail(err instanceof ArgsError ? err.detail : fill("unsubscribe_failed", { detail: detailOf(err) }));
       }
     },
   );
-  // list_subscriptions only reads: marked so (readOnlyHint), clients that
-  // approve read-only tools without asking (Codex, by default) don't ask; and
-  // idempotent, as in every SDK (test/events-list.json).
-  register("list_subscriptions", { description: EVENT_TOOL_TEXT.list_description, inputSchema: { ...toolArgs }, annotations: { readOnlyHint: true, idempotentHint: true } }, async (_input: any, extra: any) => {
-    const user = identityOf(extra)?.user;
-    if (!user) return fail(fill("list_no_user"));
-    try {
-      const out = await wake.requestApp<{
-        subscriptions: { id: string; event: string; arguments: unknown; destination: string; webhook_host?: string; created_at: string }[];
-      }>("POST", "/event-subscriptions/list", { user });
-      if (out.subscriptions.length === 0) return result(fill("none"));
-      const lines = out.subscriptions.map((s) => {
-        const where =
-          s.destination === "webhook"
-            ? fill("webhook", { host: s.webhook_host || EVENT_TOOL_TEXT.a_webhook })
-            : s.destination === "poll"
-              ? fill("polled")
-              : fill("conversation");
-        return fill("item", { id: s.id, event: s.event, arguments: JSON.stringify(s.arguments), destination: where, since: s.created_at.slice(0, 10) });
-      });
-      return result(fill("list", { lines: lines.join("\n") }));
-    } catch (err) {
-      return fail(fill("list_failed", { detail: detailOf(err) }));
-    }
-  });
+  // Annotated as in every SDK (TOOL_ANNOTATIONS, test/tool-annotations.json).
+  register(
+    "list_subscriptions",
+    { description: EVENT_TOOL_TEXT.list_description, inputSchema: { ...toolArgs }, annotations: { ...TOOL_ANNOTATIONS.list_subscriptions } },
+    async (_input, raw) => {
+      const user = identityOf(raw)?.user;
+      if (!user) return fail(fill("list_no_user"));
+      try {
+        const out = await wake.requestApp<{
+          subscriptions: { id: string; event: string; arguments: unknown; destination: string; webhook_host?: string; created_at: string }[];
+        }>("POST", "/event-subscriptions/list", { user });
+        if (out.subscriptions.length === 0) return result(fill("none"));
+        const lines = out.subscriptions.map((s) => {
+          const where =
+            s.destination === "webhook"
+              ? fill("webhook", { host: s.webhook_host || EVENT_TOOL_TEXT.a_webhook })
+              : s.destination === "poll"
+                ? fill("polled")
+                : fill("conversation");
+          return fill("item", { id: s.id, event: s.event, arguments: JSON.stringify(s.arguments), destination: where, since: s.created_at.slice(0, 10) });
+        });
+        return result(fill("list", { lines: lines.join("\n") }));
+      } catch (err) {
+        return fail(fill("list_failed", { detail: detailOf(err) }));
+      }
+    },
+  );
 
   // Per-connection negotiation: a client that speaks MCP Events subscribes
   // natively, so it isn't offered subscribe_events (a server made per
   // request never sees initialize, and keeps offering it).
-  const prev = low.oninitialized;
-  low.oninitialized = () => {
+  host.onInitialized(() => {
     // Set both ways: a server reconnected to another client decides again.
-    if (speaksEvents(low.getClientCapabilities() as Record<string, unknown> | undefined, low.getClientVersion()?.name ?? "")) subscribeTool?.disable();
+    if (speaksEvents(host.clientCapabilities(), host.clientName() ?? "")) subscribeTool?.disable();
     else subscribeTool?.enable();
-    prev?.();
-  };
+  });
 
   return attached;
 }
@@ -831,29 +1033,29 @@ export function pollResult(out: CorePoll): Record<string, unknown> {
 // client's dialect's codes. A conversation that isn't the caller's is
 // Forbidden, whether it exists or not.
 /** @internal */
-export function rpcErrorOf(err: unknown, codes: Codes): McpError {
-  if (err instanceof McpError) return err;
-  if (!(err instanceof WakeshiftError) || err.code === "unreachable") return new McpError(INTERNAL_ERROR, "Wakeshift couldn't be reached");
+export function rpcErrorOf(err: unknown, codes: Codes): RpcError {
+  if (err instanceof RpcError) return err;
+  if (!(err instanceof WakeshiftError) || err.code === "unreachable") return new RpcError(INTERNAL_ERROR, "Wakeshift couldn't be reached");
   switch (err.code) {
     case "callback_failed":
-      return new McpError(codes.callbackEndpoint, err.detail, { reason: err.reason ?? "" });
+      return new RpcError(codes.callbackEndpoint, err.detail, { reason: err.reason ?? "" });
     case "unknown_event":
-      return new McpError(codes.notFound, err.detail, { kind: "event" });
+      return new RpcError(codes.notFound, err.detail, { kind: "event" });
     case "unsupported":
-      return new McpError(codes.unsupported, err.detail, { feature: "deliveryMode" });
+      return new RpcError(codes.unsupported, err.detail, { feature: "deliveryMode" });
     case "subscription_limit":
-      return new McpError(codes.resourceExhausted, err.detail, { limit: "subscriptions" });
+      return new RpcError(codes.resourceExhausted, err.detail, { limit: "subscriptions" });
     case "subscription_stopped":
-      return new McpError(codes.forbidden, err.detail, { reason: "stopped" });
+      return new RpcError(codes.forbidden, err.detail, { reason: "stopped" });
     case "bad_request":
     case "bad_arguments":
-      return new McpError(INVALID_PARAMS, err.detail);
+      return new RpcError(INVALID_PARAMS, err.detail);
     case "unknown_session":
     case "other_client":
     case "unknown_conversation":
-      return new McpError(codes.forbidden, "another client of yours holds that subscription");
+      return new RpcError(codes.forbidden, "another client of yours holds that subscription");
   }
-  return new McpError(INTERNAL_ERROR, "Wakeshift refused the subscription: " + err.detail);
+  return new RpcError(INTERNAL_ERROR, "Wakeshift refused the subscription: " + err.detail);
 }
 
 export type { Dialect };

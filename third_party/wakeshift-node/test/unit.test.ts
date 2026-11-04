@@ -1,14 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createPublicKey, verify } from "node:crypto";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer } from "./mcp.js";
+import { Client } from "./mcp.js";
+import { InMemoryTransport } from "./mcp.js";
+import type { CallToolResult } from "./mcp.js";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPServerTransport } from "./mcp.js";
+import { StreamableHTTPClientTransport } from "./mcp.js";
 import { z } from "zod";
 import { CONVERSATION_ARG, HARNESS_ARG, SESSION_ARG, Wakeshift, WakeshiftError, isCode, parseKey, signAssertion, type Subscription } from "../src/index.js";
 import { packCall, toolCallOf } from "../src/wakeshift.js";
@@ -204,7 +204,7 @@ test("a call packs only what's there: strings, trimmed claims, no empty fields",
   assert.deepEqual(packCall({ clientName: "x", meta: {}, harness: "", conversation: "  ", tool: "" }), { client: "x" });
   // attach's own tools read Wakeshift's arguments from theirs: strings only, not empty ones.
   const extra = { _meta: { "claudecode/toolUseId": "toolu_1" }, requestInfo: { headers: { "user-agent": "opencode/1.18.7" } } };
-  assert.deepEqual(toolCallOf(extra, "", "ada", { session_key: "wsc_x", harness: "cursor", conversation_id: "c1" }, "subscribe_events"), {
+  assert.deepEqual(toolCallOf(extra, "", "ada", { session_key: "wsc_x", harness: "cursor", conversation_id: "c1" }, "subscribe_events", false), {
     client: "",
     user: "ada",
     meta: extra._meta,
@@ -214,7 +214,7 @@ test("a call packs only what's there: strings, trimmed claims, no empty fields",
     conversation: "c1",
     tool: "subscribe_events",
   });
-  assert.deepEqual(toolCallOf(undefined, "x", undefined, { session_key: 7, harness: "", conversation_id: "  " }, "list_subscriptions"), { client: "x", tool: "list_subscriptions" });
+  assert.deepEqual(toolCallOf(undefined, "x", undefined, { session_key: 7, harness: "", conversation_id: "  " }, "list_subscriptions", false), { client: "x", tool: "list_subscriptions" });
 });
 
 test("Wakeshift's arguments: session_key, harness and conversation_id, optional strings the agent is told how to fill", () => {
@@ -304,7 +304,7 @@ test("a stateless server forwards the User-Agent, and what the core recognized r
       server.registerTool(
         "watch",
         { inputSchema: attached.inputs({ repo: z.string() }) },
-        attached.events("watch", async ({ repo }, call) => {
+        attached.events("watch", { subscribes: [build] }, async ({ repo }, call) => {
           subs.push(await call.subscribe(build, { repo }));
           return "Watching.";
         }),

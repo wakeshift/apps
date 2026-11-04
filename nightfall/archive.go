@@ -19,7 +19,12 @@ const sayMax = 1000
 // kept: no handle (one in what's said or seen becomes the player's label),
 // and nothing of its workspace, agent or session.
 type archived struct {
-	Game    string           `json:"game"`   // "nightfall"
+	Game string `json:"game"` // "nightfall"
+	// Table is the table's random ID in the archive (gamekit's ArchiveRoom),
+	// the same for its games while it plays, and GameNo the game's number
+	// there.
+	Table   string           `json:"table"`
+	GameNo  int              `json:"game_no"`
 	Cards   []string         `json:"cards"`  // the cards in play
 	Center  []string         `json:"center"` // the center at the end, after the night's swaps
 	Players []archivedPlayer `json:"players"`
@@ -59,7 +64,12 @@ type archivedLine struct {
 // archive keeps the finished game, anonymized, once it's tallied. Called
 // under its lock, in the move that finishes it.
 func archive(tx *gamekit.Tx, g *game) error {
-	said, err := tx.Said(g.ID)
+	// What was said in this game: a table plays game after game.
+	said, err := tx.SaidSince(g.ID, g.Started)
+	if err != nil {
+		return err
+	}
+	table, err := tx.ArchiveRoom(g.ID)
 	if err != nil {
 		return err
 	}
@@ -74,7 +84,7 @@ func archive(tx *gamekit.Tx, g *game) error {
 			start = said[0].At
 		}
 	}
-	rec := archived{Game: "nightfall", Cards: slices.Clone(g.Roles), Players: []archivedPlayer{}, Talk: []archivedLine{}, Winners: []string{},
+	rec := archived{Game: "nightfall", Table: table, GameNo: g.GameNo, Cards: slices.Clone(g.Roles), Players: []archivedPlayer{}, Talk: []archivedLine{}, Winners: []string{},
 		LengthMs: gamekit.Offset(start, tx.Now)}
 	if !g.DayAt.IsZero() {
 		rec.DayOffsetMs = gamekit.Offset(start, g.DayAt)

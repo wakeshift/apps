@@ -18,12 +18,14 @@ export {
   type ScopeEvent,
 } from "./wakeshift.js";
 export { harnessAgent } from "./harness.js";
-export { WakeshiftError, isCode } from "./errors.js";
+export { IdReusedError, WakeshiftError, isCode } from "./errors.js";
 export { parseKey, signAssertion, type AppKey } from "./key.js";
 export {
   WakeEvent,
   ArgsError,
   EVENT_TOOL_TEXT,
+  notifies,
+  type NotifiesOptions,
   SUBSCRIBE_TOOL_DESCRIPTION,
   UNSUBSCRIBE_TOOL_DESCRIPTION,
   LIST_TOOL_DESCRIPTION,
@@ -36,11 +38,19 @@ export {
   MAX_STATUS_SUBSCRIPTIONS,
   type EventTypeManifest,
   type AttachOptions,
+  type AttachTools,
+  type ToolOptions,
+  type WaitToolOptions,
   type Identity,
   type Subscriber,
 } from "./events.js";
 export {
   CallEnded,
+  type AnyWakeEvent,
+  type EventArgs,
+  type ToolCallBase,
+  type ToolCallSubscribe,
+  type ToolEventsOptions,
   type Attached,
   type AppArgs,
   type EventsOptions,
@@ -48,10 +58,17 @@ export {
   type ToolCall,
   type ToolCallExtra,
   type ToolSubscribeOptions,
+  type WakeArgs,
   type WakeInputs,
+  type WakeInputsV3,
+  type WakeInputsV4,
   type WakeKey,
   type WakeOutputShape,
+  type WakeOutputV3,
+  type WakeOutputV4,
   type WakeShape,
+  type WrappedCallback,
   type WrappedResult,
 } from "./toolcall.js";
+export type { AuthInfo, CallToolResult, ContentBlock, HostContext, McpServerLike } from "./mcp.js";
 export { EXTENSION_KEY, TEXT_META, REVISION as EVENTS_REVISION } from "./spec.js";

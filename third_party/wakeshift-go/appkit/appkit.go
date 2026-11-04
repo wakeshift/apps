@@ -9,7 +9,9 @@
 //     (Workspace, AddAgent); RequireBearer checks the tokens MCP clients
 //     send;
 //   - defines events (DefineEvent) and attaches them to its MCP server
-//     (Attach), so an agent that subscribes wakes when the app emits one;
+//     (Attach, for the official Go SDK; package appkit/mcpgo for one built
+//     with mark3labs/mcp-go), so an agent that subscribes wakes when the
+//     app emits one;
 //   - subscribes the conversation calling one of its own tools, from a tool
 //     wrapped by Events (DefinedEvent.Subscribe), and emits to the
 //     conversations it stored (Emit with ToSubscription);
@@ -58,13 +60,28 @@ type App struct {
 	// (nil for nothing), whether this process serves the app's tools
 	// (Attach: only then is the manifest sent automatically), and whether
 	// Wakeshift has the manifest for the event types defined now (sent at
-	// generation sentGen; DefineEvent moves gen on). sendMu makes one send
-	// at a time.
+	// generation sentGen; DefineEvent moves gen on), and how many manifests
+	// Wakeshift has taken from this process. sendMu makes one send at a
+	// time.
 	sendMu       sync.Mutex
 	base         *Manifest
 	attached     bool
 	gen, sentGen uint64
 	sent         bool
+	sends        uint64
+	// ensureManifest's sends that finished (failed), and the last one's
+	// error: a call that waited for a send that failed fails with it,
+	// rather than sending again.
+	ensures   uint64
+	ensureErr error
+
+	// The app's name, as the console has it (GET /app), once Wakeshift has
+	// said it (nameKnown, even if it's ""): what Notifies' sentence names
+	// in tools/list; and when asking last failed or went unanswered.
+	nameMu     sync.Mutex
+	name       string
+	nameKnown  bool
+	nameFailed time.Time
 }
 
 // APIError is an error response from Wakeshift, or a mistake the SDK
@@ -97,6 +114,16 @@ func (e *APIError) Error() string {
 
 // Unwrap is the transport's error, for an unreachable core.
 func (e *APIError) Unwrap() error { return e.err }
+
+// ErrIDReused is what errors.Is matches for an Emit whose ID was used
+// within the last day for a different emit (another event, arguments,
+// recipients or payload): an *APIError with Status 409 and Code id_reused.
+// Nothing was sent. A retry of the same emit isn't refused: it returns the
+// first emit's result, with Emitted.Duplicate set.
+var ErrIDReused = errors.New("wakeshift: id_reused")
+
+// Is matches ErrIDReused for Wakeshift's id_reused.
+func (e *APIError) Is(target error) bool { return target == ErrIDReused && e.Code == "id_reused" }
 
 // unreachable is the APIError for a request with ctx through client that
 // got no answer. It names the core it went to: a wrong or missing

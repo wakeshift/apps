@@ -80,7 +80,7 @@ func (a *App) table(g *game, me *player) tableView {
 	if len(g.Roles) > 0 {
 		t.CenterCount, t.InPlay = centerSize, g.Roles
 	}
-	done := g.Phase == over && len(g.Roles) > 0
+	done := g.revealed()
 	if done {
 		t.CenterCards = slices.Clone(g.Center[:])
 		t.Outcome = g.outcome()
@@ -126,7 +126,7 @@ func capital(s string) string {
 func side(card string) string { return strings.TrimPrefix(team(card), "the ") }
 
 // phaseNames are what the table calls each phase.
-var phaseNames = map[string]string{waiting: "Gathering", night: "Night", day: "Day", voting: "The vote", over: "Dawn"}
+var phaseNames = map[string]string{waiting: "Gathering", night: "Night", day: "Day", voting: "The vote", next: "Next game", over: "Dawn"}
 
 // tableData is what table.html draws.
 type tableData struct {
@@ -158,6 +158,9 @@ func tableHTMLFor(v gamekit.View) (template.HTML, error) {
 		return "", fmt.Errorf("nightfall: no table in the view")
 	}
 	d := tableData{T: t, Name: phaseNames[t.Phase], PhaseClass: strings.Fields(t.Phase)[0]}
+	if t.Phase == next {
+		d.PhaseClass = "over phase-next" // dawn, as at a game's end, with the countdown to the next
+	}
 	if t.SecondsLeft > 0 {
 		d.Clock = fmt.Sprintf("%d:%02d", t.SecondsLeft/60, t.SecondsLeft%60)
 	}

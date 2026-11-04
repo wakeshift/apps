@@ -5,16 +5,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { MCP, McpServer, headerOf, rawRpc } from "./mcp.js";
+import { Client } from "./mcp.js";
+import { InMemoryTransport } from "./mcp.js";
+import type { CallToolResult } from "./mcp.js";
 import { z } from "zod";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createHmac, randomBytes } from "node:crypto";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPServerTransport } from "./mcp.js";
+import { StreamableHTTPClientTransport } from "./mcp.js";
+import { createMcpHandler as createMcpHandlerV2, McpServer as McpServerV2 } from "@modelcontextprotocol/server";
 import { Wakeshift, isCode, type AgentScope, type Manifest, type Subscription } from "../src/index.js";
 
 const harness = process.env.WAKESHIFT_SDK_HARNESS;
@@ -165,6 +166,42 @@ async function statelessApp(t: { after(fn: () => void): void }, wake: Wakeshift,
   };
   return call;
 }
+
+// First in this file, while the harness's app has no manifest: an app that
+// serves through createMcpHandler (a server per request, so attach runs only
+// once a request comes in) emits at startup, before any agent has
+// connected. The emit's unknown_event sends the manifest (a merge), and the
+// emit goes again and succeeds.
+test("an emit at startup, before any request, against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async () => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const sent: string[] = [];
+  const recorded = (async (url: string | URL | Request, init?: RequestInit) => {
+    const resp = await fetch(url, init);
+    sent.push(`${init?.method ?? "GET"} ${String(url).replace(core + "/api/apps/v1", "")} ${resp.status}`);
+    return resp;
+  }) as typeof fetch;
+  const wake = new Wakeshift({ key, core, fetch: recorded });
+  const boot = wake.defineEvent("app.booted", {
+    description: "The app started.",
+    args: z.object({}),
+    payload: z.object({ version: z.string() }),
+    text: (p) => `Started ${p.version}`,
+  });
+  // As an app serves: attach runs in the factory, once per request; none
+  // comes in during this test.
+  createMcpHandlerV2(() => {
+    const server = new McpServerV2({ name: "ci-bot", version: "1.0" });
+    wake.attach(server as never);
+    return server;
+  });
+  const out = await boot.emit({}, { version: "1.2.3" });
+  assert.equal(out.matched, 0);
+  assert.deepEqual(sent, ["POST /events/emit 404", "POST /manifest/merge 200", "POST /events/emit 200"]);
+  // From now on Wakeshift knows the event: the next emit is one request.
+  await boot.emit({}, { version: "1.2.4" });
+  assert.equal(sent.length, 4);
+  assert.equal(sent[3], "POST /events/emit 200");
+});
 
 test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
   const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
@@ -355,6 +392,14 @@ test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNE
   const stale = (await cursor.callTool({ name: "watch_ci", arguments: { repo: "stale", session_key: "wsc_AAAAAAAAAAAAAAAAAAAAAA" } })) as CallToolResult;
   assert.notEqual(subs.at(-1)!.session, "wsc_AAAAAAAAAAAAAAAAAAAAAA");
   assert.match(text(stale), /session_key you passed isn't known/);
+
+  // Unsubscribing without the session key (Claude Code's calls name no
+  // conversation): nothing ends, and the block says to call again with it.
+  const keyless = (await claude.callTool({ name: "unwatch_ci", arguments: { repo: "alpha" } })) as CallToolResult;
+  assert.match(text(keyless), /^Stopped watching alpha \(false\)\./);
+  assert.match(text(keyless), /nothing was unsubscribed, and this conversation may still be subscribed/);
+  assert.ok(!text(keyless).includes(claudeSub.session));
+  assert.equal((await status("bob", claudeSub)).live, true);
 
   // Ending one subscription by its ID, outside a tool.
   await claude.callTool({ name: "watch_ci", arguments: { repo: "beta", session_key: claudeSub.session } });
@@ -601,7 +646,8 @@ test("events against a real core: defined, served, emitted, bridged and native",
     { method: "events/subscribe", params: { name: "game.turn", arguments: { table: "t1" }, delivery: { mode: "webhook", url: hook.url, secret: hook.secret }, ttlMs: 3600000 } } as any,
     z.any() as any,
   )) as any;
-  assert.equal(nativeSub.resultType, "complete");
+  // The MCP SDK 2.x client drops resultType from a result on older revisions (the server sent it).
+  if (MCP === 1) assert.equal(nativeSub.resultType, "complete");
   assert.match(nativeSub.id, /^sub_/);
   await turn.emit({ table: "t1" }, { hole: ["Qh", "Qs"], toCall: 0 }, { to: "p3" });
   await eventually("p3's webhook", async () => (hook.got.length === 1 ? true : undefined), 15000);
@@ -644,7 +690,7 @@ test("wrapped tools against a real core", { skip: !harness && "set WAKESHIFT_SDK
   // A stateless server, one per request, as such apps run; X-User is who's calling.
   const http = createServer(async (req, res) => {
     const server = new McpServer({ name: "cards", version: "1" });
-    const attached = wake.attach(server, { identify: (extra) => ({ user: String(extra.requestInfo?.headers?.["x-user"] ?? "") || undefined }) });
+    const attached = wake.attach(server, { identify: (extra) => ({ user: headerOf(extra, "x-user") || undefined }) });
     server.registerTool(
       "join",
       { description: "Join a table (and the lobby)", inputSchema: attached.inputs({ table: z.string() }) },
@@ -740,4 +786,112 @@ test("wrapped tools against a real core", { skip: !harness && "set WAKESHIFT_SDK
   got = await turn.emit({ table: "oak" }, { toCall: "10" }, { to, id: "ts-hand-2" });
   assert.equal(got.duplicate, true);
   assert.equal(got.ended.length, 1);
+});
+
+// Polling and the wait task against a real core, on protocol 2026-07-28
+// (2.x: createMcpHandler, a server per request), as clients that poll
+// reach an app: MCP Events' events/poll (the first poll subscribes, a
+// later one returns the emit), and Claude Code's wakeshift_wait, answered
+// with a task that tasks/get follows until the emit completes it. On
+// @modelcontextprotocol/server before 2.3.0, tasks/get on this revision
+// never reaches attach (the MCP SDK answers -32601 itself), so this test
+// pins the peer range's floor: CI runs it against the floor too.
+test("polling and the wait task against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async () => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core });
+  const build = ciBuild(wake);
+  const send = await rawRpc(() => {
+    const server = new McpServer({ name: "ci-bot", version: "1.0" });
+    const attached = wake.attach(server, { identify: () => ({ user: "poller" }), tools: { wait: { enabled: true } } });
+    server.registerTool(
+      "watch",
+      { inputSchema: attached.inputs({ repo: z.string() }) },
+      attached.events("watch", async ({ repo }, call) => {
+        await call.subscribe(build, { repo });
+        return `Watching ${repo}.`;
+      }),
+    );
+    return server;
+  });
+  // One 2026-07-28 request from a client with these capabilities (test/mcp.ts's rawRpc adds its headers).
+  const rpc = (method: string, params: Record<string, unknown>, client: string, caps: Record<string, unknown>): Promise<any> =>
+    send(method, {
+      ...params,
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { name: client, version: "1.0" },
+        "io.modelcontextprotocol/clientCapabilities": caps,
+      },
+    });
+
+  // events/poll: the first poll subscribes from now; the emit is a later poll's.
+  const events = { extensions: { "io.modelcontextprotocol/events": {} } };
+  const poll = (cursor: string | null) => rpc("events/poll", { name: "ci.build", arguments: { repo: "polled" }, cursor }, "a-poller", events);
+  const first = await poll(null);
+  assert.ok(first.result, JSON.stringify(first));
+  assert.deepEqual(first.result.events, []);
+  assert.equal((await build.emit({ repo: "polled" }, { branch: "main", text: "polled build" })).matched, 1);
+  const polled = await eventually("the polled event", async () => {
+    const r = await poll(first.result.cursor);
+    assert.ok(r.result, JSON.stringify(r));
+    return r.result.events.length > 0 ? r.result : undefined;
+  });
+  assert.equal(polled.events[0].name, "ci.build");
+  assert.deepEqual(polled.events[0].data, { branch: "main", text: "polled build" });
+
+  // The wait task: a wrapped tool subscribes the conversation and says to
+  // call wakeshift_wait; its task completes with the emit.
+  const tasks = { extensions: { "io.modelcontextprotocol/tasks": {} } };
+  const listed = await rpc("tools/list", {}, "claude-code", tasks);
+  assert.ok(listed.result?.tools.some((x: any) => x.name === "wakeshift_wait"), JSON.stringify(listed));
+  const watched = await rpc("tools/call", { name: "watch", arguments: { repo: "tasked" } }, "claude-code", tasks);
+  assert.ok(watched.result, JSON.stringify(watched));
+  const said = text(watched.result);
+  const session = said.match(/session_key="(wsc_[a-z2-7]+)"/)?.[1];
+  assert.ok(session && said.includes("wakeshift_wait"), said);
+  const started = await rpc("tools/call", { name: "wakeshift_wait", arguments: { session_key: session } }, "claude-code", tasks);
+  assert.equal(started.result?.resultType, "task", JSON.stringify(started));
+  const taskId = started.result.taskId as string;
+  assert.match(taskId, /^wkt1_/);
+  const held = rpc("tasks/get", { taskId }, "claude-code", tasks);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal((await build.emit({ repo: "tasked" }, { branch: "main", text: "tasked build" })).matched, 1);
+  let got = await held;
+  for (let i = 0; got.result?.status === "working" && i < 3; i++) got = await rpc("tasks/get", { taskId }, "claude-code", tasks);
+  assert.equal(got.result?.status, "completed", `tasks/get: ${JSON.stringify(got)}`);
+  assert.match(JSON.stringify(got.result), /tasked build/);
+
+  // Without wait (attach's default), the same Claude Code, whose requests
+  // take tasks, sees no wait tool, and Wakeshift tells it about the plugin,
+  // with the Monitor as the fallback: nothing names wakeshift_wait.
+  const sendOff = await rawRpc(() => {
+    const server = new McpServer({ name: "ci-bot", version: "1.0" });
+    const attached = wake.attach(server, { identify: () => ({ user: "no-wait" }) });
+    server.registerTool(
+      "watch",
+      { inputSchema: attached.inputs({ repo: z.string() }) },
+      attached.events("watch", async ({ repo }, call) => {
+        await call.subscribe(build, { repo });
+        return `Watching ${repo}.`;
+      }),
+    );
+    return server;
+  });
+  const rpcOff = (method: string, params: Record<string, unknown>): Promise<any> =>
+    sendOff(method, {
+      ...params,
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { name: "claude-code", version: "1.0" },
+        "io.modelcontextprotocol/clientCapabilities": tasks,
+      },
+    });
+  const offList = await rpcOff("tools/list", {});
+  assert.ok(offList.result && !offList.result.tools.some((x: any) => x.name === "wakeshift_wait"), JSON.stringify(offList));
+  const offWatched = await rpcOff("tools/call", { name: "watch", arguments: { repo: "untasked" } });
+  assert.ok(offWatched.result, JSON.stringify(offWatched));
+  const offSaid = text(offWatched.result);
+  assert.ok(!offSaid.includes("wakeshift_wait"), offSaid);
+  assert.match(offSaid, /Monitor/, offSaid);
+  assert.match(offSaid, /Notify me in every session/, offSaid);
 });

@@ -2,6 +2,7 @@ package secretagent
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,6 +24,33 @@ func TestCodewordsDontRepeat(t *testing.T) {
 	}
 	if len(codewords) < 300 {
 		t.Fatalf("only %d codewords", len(codewords))
+	}
+}
+
+// The codeword is never a word in a player's handle: a civilian couldn't
+// name that player (say refuses the codeword). Some handles are codewords.
+func TestCodewordNotAHandle(t *testing.T) {
+	handles := []string{"walrus", "Otter-2", "puffin"}
+	words := []string{"walrus", "otter", "puffin"}
+	var ps []*player
+	for i, h := range handles {
+		if !slices.Contains(codewords, words[i]) {
+			t.Fatalf("%q isn't a codeword: the test proves nothing", words[i])
+		}
+		ps = append(ps, &player{Player: gamekit.Player{Workspace: "w", Agent: words[i], Handle: h}})
+	}
+	// Every other word was had recently, so only the handles' words are fresh.
+	var had []string
+	for _, w := range codewords {
+		if !slices.Contains(words, w) {
+			had = append(had, w)
+		}
+	}
+	for range 200 {
+		recent := map[string][]string{ps[0].Key(): slices.Clone(had)}
+		if w := pickCodeword(recent, ps); slices.Contains(words, w) {
+			t.Fatalf("picked %q, in a player's handle", w)
+		}
 	}
 }
 

@@ -16,8 +16,8 @@ export const AGENTS: PickerAgent[] = [
     ],
     "signIn": "If it doesn't open a browser to sign in, type /mcp in Claude Code, choose {name}, then Authenticate.",
     "wakes": [
-      "Claude Code starts a background monitor (in manual permission mode, it asks you to approve it). Then {each} wakes the agent within seconds, even when it's idle.",
-      "Nothing to install. Claude Code ends a monitor after 30 minutes, so the agent starts it again every 25; in manual permission mode, each restart asks you again. If the agent offers to install Wakeshift's hooks, they're optional: they wake it with no monitor and nothing more to approve."
+      "The agent first asks whether to install Wakeshift's plugin for Claude Code. Say yes, then type /reload-plugins and send any message so it connects. Then {each} wakes the agent within seconds, even when it's idle, with nothing more to approve.",
+      "If you say no, Claude Code starts a background monitor instead (in manual permission mode, it asks you to approve it), with nothing installed. Claude Code ends a monitor after 30 minutes, so the agent starts it again every 25; in manual permission mode, each restart asks you again."
     ]
   },
   {
@@ -33,7 +33,7 @@ export const AGENTS: PickerAgent[] = [
     ],
     "signIn": "If it asks you to sign in, run codex mcp login {name}.",
     "wakes": [
-      "The first time, the agent offers a one-time install of Wakeshift's connector for Codex. Say yes, then restart Codex with codex resume --last, choose Trust all and continue, and send any message so it connects.",
+      "The first time, the agent offers to install Wakeshift's plugin for Codex with Codex's own plugin command. Say yes, then restart Codex with codex resume --last, choose Trust all and continue, and send any message so it connects.",
       "After that, {each} wakes the agent within seconds, even when it's idle."
     ]
   },
@@ -76,7 +76,7 @@ export const AGENTS: PickerAgent[] = [
       }
     ],
     "wakes": [
-      "The agent starts a background command that waits (Cursor may ask you to allow it). {Each} wakes the agent within seconds, even when it's idle. Nothing to install.",
+      "The agent starts a background command that waits (Cursor may ask you to allow it). {Each} wakes the agent within seconds, even when it's idle. Nothing to install. The agent also asks once whether to install Wakeshift's package for Cursor, which is optional.",
       "Cursor's cloud agents aren't woken: they see what's new on their next tool call."
     ]
   },
@@ -108,7 +108,7 @@ export const AGENTS: PickerAgent[] = [
       }
     ],
     "wakes": [
-      "The agent starts a background command that waits (agy may ask you to allow it). {Each} wakes the agent within seconds, even when it's idle. Nothing to install."
+      "The agent starts a background command that waits (agy may ask you to allow it). {Each} wakes the agent within seconds, even when it's idle. Nothing to install. The agent also asks once whether to install Wakeshift's plugin for Antigravity, which is optional."
     ]
   },
   {
@@ -157,7 +157,7 @@ export const AGENTS: PickerAgent[] = [
       }
     ],
     "wakes": [
-      "The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once). Hermes loads plugins only when a chat starts or is resumed, so then resume the chat (exit and run hermes chat --continue) or start a new one, and send any message.",
+      "The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once). If the install says the running gateway loaded the plugin, just send any message. Otherwise Hermes loads it when a chat starts or is resumed, so resume the chat (exit and run hermes chat --continue, or restart the gateway) or start a new one, and send any message.",
       "After that, {each} wakes the agent within a second, even when it's idle, as long as Hermes runs."
     ]
   },
@@ -193,7 +193,7 @@ export const AGENTS: PickerAgent[] = [
       }
     ],
     "wakes": [
-      "The agent starts a background command that waits. {Each} wakes the agent within seconds, even when it's idle. Nothing to install.",
+      "The agent starts a background command that waits. {Each} wakes the agent within seconds, even when it's idle. Nothing to install. The agent also asks once whether to install Wakeshift's plugin for Copilot CLI, which is optional.",
       "Copilot asks you to approve that command each time the agent goes back to waiting, so each wake needs one \"Yes\". To skip that, run copilot with --allow-all-tools, which approves every tool, not just this one."
     ]
   },

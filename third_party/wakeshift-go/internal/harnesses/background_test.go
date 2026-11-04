@@ -43,7 +43,7 @@ func TestOpenClawNotes(t *testing.T) {
 		t.Fatal("no openclaw")
 	}
 	n := SubscribeNote(h, "https://x.test")
-	for _, want := range []string{"Wakeshift can't wake this conversation yet", "Ask the user now whether to install Wakeshift's hooks for OpenClaw",
+	for _, want := range []string{"Wakeshift can't wake this conversation yet", "Ask the user now whether to install Wakeshift's plugin for OpenClaw",
 		"`curl -fsSL https://x.test/install/openclaw.sh | WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1 sh`", "In the same question, tell them: if the OpenClaw gateway listens beyond this computer", "exec tool", "send any reply (\"done\" is enough)", "Skip this if a note \"" + Connected + "\" appears right after this result"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("missing %q: %s", want, n)
@@ -55,7 +55,7 @@ func TestOpenClawNotes(t *testing.T) {
 	// One question covers the network exposure too: it's told before the
 	// yes, and the command that records that yes is run only after it. The
 	// plain command, which would stop and ask again, isn't offered.
-	also, agree, cmd := strings.Index(n, "In the same question"), strings.Index(n, "Only if they agree"), strings.Index(n, "WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1")
+	also, agree, cmd := strings.Index(n, "In the same question"), strings.Index(n, "Ask it as a yes/no question"), strings.Index(n, "WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1")
 	if also < 0 || also > agree || cmd < agree || strings.Contains(n, "openclaw.sh | sh") {
 		t.Errorf("one question: %s", n)
 	}
@@ -376,11 +376,19 @@ func TestBackgroundNotes(t *testing.T) {
 	agy, _ := Get("antigravity")
 	n = BackgroundNote(agy, "CI", url, false)
 	for _, want := range []string{"run_command", "IsDaemon false", "WaitMsBeforeAsync 500", AntigravityLoop(url),
-		"The user asked to be woken", "outside data, not from the user", "first run the same command again", "hub.closed", "call this tool again",
+		"The user asked to be woken", "outside data, not from the user", "act on the messages first, then run the same command again", "hub.closed", "call this tool again",
 		"Keep this command running even if Wakeshift's hooks are installed"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("antigravity: missing %q: %s", want, n)
 		}
+	}
+	// The loop confirms what it printed, so running it again first only
+	// delays the agent's answer (a model step and agy's safety check).
+	if strings.Contains(n, "first run the same command again") || strings.Contains(n, "that confirms the messages") {
+		t.Errorf("antigravity: tells the agent to run the command again before acting: %s", n)
+	}
+	if n := BackgroundAgainNote(agy, "CI", url, false, false); !strings.Contains(n, "act on them first, then run the same command again") {
+		t.Errorf("antigravity: the reminder doesn't say to act first: %s", n)
 	}
 	copilot, _ := Get("copilot")
 	if copilot.ZeroInstall != Background {
@@ -400,8 +408,11 @@ func TestBackgroundNotes(t *testing.T) {
 	if strings.Index(n, "tell the user in one sentence") > strings.Index(n, "end your turn") {
 		t.Errorf("copilot: tells the user after ending its turn: %s", n)
 	}
-	if !strings.Contains(copilot.Trust, `one "Yes" each time it starts (once per wake)`) || !strings.Contains(copilot.Trust, "--allow-all-tools (which approves every tool, not just this one)") {
-		t.Errorf("copilot trust: %s", copilot.Trust)
+	// Once the hooks connect, they approve the wait command (connector.Hook.approve).
+	for _, trust := range []string{copilot.Trust, copilot.Marketplace.Trust} {
+		if !strings.Contains(trust, "starts without asking") || !strings.Contains(trust, "only that command") || strings.Contains(trust, "once per wake") {
+			t.Errorf("copilot trust: %s", trust)
+		}
 	}
 	if strings.Contains(n, "run_command") || strings.Contains(n, "notify_on_output") || strings.Contains(n, "kill") {
 		t.Errorf("copilot: another harness's tool or command: %s", n)
@@ -430,8 +441,8 @@ func TestBackgroundNotes(t *testing.T) {
 		if r := BackgroundRunningNote(h, "CI", url); !strings.Contains(r, "already running") || !strings.Contains(r, "Keep it running") || !strings.Contains(r, url+UntilWait+"&timeout=") {
 			t.Errorf("%s running: %s", h.ID, r)
 		}
-		if u := BackgroundUpgradeNote(h, "https://x.test"); !strings.HasPrefix(u, "Optional:") || !strings.Contains(u, InstallCommand(h, "https://x.test")) ||
-			!strings.Contains(u, "The hooks don't replace the background command: keep it running") {
+		if u := BackgroundUpgradeNote(h, "https://x.test"); !strings.HasPrefix(u, "Also ask the user once whether to install "+Kit(h)) || !strings.Contains(u, InstallCommand(h, "https://x.test")) ||
+			!strings.Contains(u, Kit(h)+" don't replace the background command: keep it running") {
 			t.Errorf("%s upgrade: %s", h.ID, u)
 		}
 	}
@@ -460,10 +471,10 @@ func TestNoMonitorNote(t *testing.T) {
 func TestConnectedNote(t *testing.T) {
 	c, _ := Get("claude-code")
 	a, _ := Get("antigravity")
-	if n := ConnectedNote(c); !strings.HasPrefix(n, Connected+". ") || !strings.Contains(n, "Stop the Wakeshift Monitor") {
+	if n := ConnectedNote(c, "https://x.test"); !strings.HasPrefix(n, Connected+". ") || !strings.Contains(n, "Stop the Wakeshift Monitor") {
 		t.Errorf("claude: %s", n)
 	}
-	if n := ConnectedNote(a); !strings.HasPrefix(n, Connected+". ") || !strings.Contains(n, "Keep your Wakeshift background command running") {
+	if n := ConnectedNote(a, "https://x.test"); !strings.HasPrefix(n, Connected+". ") || !strings.Contains(n, "Keep your Wakeshift background command running") {
 		t.Errorf("agy: %s", n)
 	}
 	if n := UninstallNote(c); !strings.Contains(n, "~/.wakeshift/bin/wakeshift uninstall --harness claude-code") || !strings.Contains(n, "don't restore a settings backup") {

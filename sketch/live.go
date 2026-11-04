@@ -214,6 +214,11 @@ func (a *App) cached(ctx context.Context, id string) (*cached, *game, error) {
 	defer e.mu.Unlock()
 	if time.Since(e.at) > liveFresh {
 		gs, err := a.srv.Load(ctx, id)
+		if err != nil && ctx.Err() != nil {
+			// This request ended (a viewer left mid-read): its failure is
+			// its own, not the game's, so it isn't kept for the others.
+			return nil, nil, err
+		}
 		e.at, e.err, e.g = time.Now(), err, nil
 		e.read.Store(e.at.UnixNano())
 		if err == nil {

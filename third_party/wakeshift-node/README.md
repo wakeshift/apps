@@ -2,13 +2,15 @@
 
 Let agents subscribe to things in your app. You define the events your app offers, serve them on your MCP server, and emit them when they happen; Wakeshift wakes every subscribed agent, whether it's Claude Code, Codex, ChatGPT or another. Your events follow MCP Events: clients that speak it subscribe natively, and Wakeshift bridges every other agent. You don't deal with harnesses.
 
-Node 22 or later. The package is ESM-only: load it with `import`, from an ES module (`"type": "module"`, or a `.mjs` or `.mts` file). It has no CommonJS build, so `require("@wakeshift/sdk")` works only where Node can require ES modules. Peer dependencies: `@modelcontextprotocol/sdk` (1.23 or later: the first that takes zod 4) and `zod` (3.25 or later, or 4). Import `z` from `"zod"`, not `"zod/v4"`: the SDK's schemas are built from `"zod"`, and the MCP SDK refuses a schema that mixes the two.
+Node 22 or later. The package is ESM-only: load it with `import`, from an ES module (`"type": "module"`, or a `.mjs` or `.mts` file). It has no CommonJS build, so `require("@wakeshift/sdk")` works only where Node can require ES modules. It works with either MCP TypeScript SDK: `@modelcontextprotocol/server` 2.x (2.3 or later), which this page uses, or `@modelcontextprotocol/sdk` 1.x (1.23 or later: the first that takes zod 4; [below](#using-modelcontextprotocolsdk-1x)). Its peer dependencies are the one you use and `zod`: 4.2 or later with 2.x, 3.25 or later with 1.x. Import `z` from `"zod"`, not `"zod/v4"`: the SDK's schemas are built from `"zod"`, and the MCP SDK refuses a schema that mixes the two.
 
 ## Install
 
 ```sh
-npm install @wakeshift/sdk @modelcontextprotocol/sdk zod
+npm install @wakeshift/sdk @modelcontextprotocol/server @modelcontextprotocol/node zod
 ```
+
+`@modelcontextprotocol/node` serves your MCP server on Node's `http`. On `@modelcontextprotocol/sdk` 1.x, install `@wakeshift/sdk @modelcontextprotocol/sdk zod` instead ([below](#using-modelcontextprotocolsdk-1x)).
 
 Install the package, not a checkout of this repository (a `file:` dependency): a `file:` dependency links the directory along with its `node_modules`, so the SDK can load its own development copy of zod instead of yours, and the MCP SDK then fails with "Mixed Zod versions detected in object shape". To try a change of your own, `npm pack` and install the tarball it writes.
 
@@ -17,7 +19,9 @@ Install the package, not a checkout of this repository (a `file:` dependency): a
 You have an MCP server and a GitHub webhook handler. Register an app in the Wakeshift console (Build), and put its key in `WAKESHIFT_KEY` (`wst_` and 50 characters). The SDK talks to `https://app.wakeshift.ai` unless `WAKESHIFT_CORE` names another address. Load them however you load environment variables, for example `node --env-file=.env server.ts` (Node 22.18 or later runs a `.ts` file directly).
 
 ```ts
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { createServer } from "node:http"
+import { McpServer, createMcpHandler } from "@modelcontextprotocol/server"
+import { toNodeHandler } from "@modelcontextprotocol/node"
 import { z } from "zod"
 import { Wakeshift } from "@wakeshift/sdk"
 
@@ -31,10 +35,15 @@ const ciFinished = wake.defineEvent("ci.finished", {
   text: (run, { owner, repo }) => `CI ${run.conclusion} on ${owner}/${repo} ${run.branch}: ${run.name}`,
 })
 
-// One McpServer per MCP session; serve the events before connecting it.
-const server = new McpServer({ name: "ci-bot", version: "1.0.0" })
-// myUser: your own sign-in's ID for the person behind the request.
-wake.attach(server, { identify: (extra) => ({ user: myUser(extra) }) })
+// createMcpHandler makes a server for each request: attach in the function that makes it.
+const mcp = createMcpHandler(() => {
+  const server = new McpServer({ name: "ci-bot", version: "1.0.0" })
+  // myUser: your own sign-in's ID for the person behind the request.
+  wake.attach(server, { identify: (ctx) => ({ user: myUser(ctx.http?.authInfo) }) })
+  return server
+})
+
+createServer(toNodeHandler(mcp)).listen(3000)
 ```
 
 ```ts
@@ -54,14 +63,15 @@ That's all. An agent subscribes with the `subscribe_events` tool `attach` adds (
 
 - `owner` and `repo` are required, so they route occurrences; their values are lowercase IDs (`a-z 0-9 . _ -`). The optional `branch` filters on the payload's `branch`.
 - `attach` adds `subscribe_events`, `unsubscribe_events` and `list_subscriptions`, and touches no tool of yours you don't wrap (below).
-- Native subscriptions (ChatGPT) and personal events need a signed-in user: your app signs its users in and passes `identify` to `attach`.
+- Native subscriptions (ChatGPT) and personal events need a signed-in user: your app signs its users in and passes `identify` to `attach`. `identify` gets the request's context, `ctx`: the verified token is `ctx.http?.authInfo` (`toNodeHandler` passes on the `req.auth` your auth middleware sets), and the HTTP request is `ctx.http?.req`.
+- `createMcpHandler` answers clients on MCP protocol 2026-07-28 and on older revisions, so every client connects with nothing more to set up. Wakeshift lists its tools for each request's client, so `tools/list` is cached by that client only, whatever cache hint you set for it.
 
 ## Events
 
 Events follow MCP Events (SEP-3415): you define the event types your app offers, serve them, and emit occurrences. Clients that speak MCP Events, such as ChatGPT, subscribe natively; every other agent subscribes with the `subscribe_events` tool `attach` adds, and Wakeshift wakes it its own way. You write no subscribe tool and handle no harnesses.
 
 ```ts
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { McpServer } from "@modelcontextprotocol/server"
 import { z } from "zod"
 import { Wakeshift } from "@wakeshift/sdk"
 
@@ -84,10 +94,10 @@ const turn = wake.defineEvent("game.turn", {
   personal: true,
 })
 
-// One server per connection; attach once, before connecting it.
+// In the function that makes each server (createMcpHandler's, above), attach first.
 const server = new McpServer({ name: "chat", version: "1.0.0" })
 // myUser: your own sign-in's ID for the person behind the request.
-const attached = wake.attach(server, { identify: (extra) => ({ user: myUser(extra) }) })
+const attached = wake.attach(server, { identify: (ctx) => ({ user: myUser(ctx.http?.authInfo) }) })
 
 // When something happens:
 await message.emit({ channel: "eng" }, { from: "ada", text: "shipped it" })
@@ -95,8 +105,9 @@ await turn.emit({ table: "juniper" }, { hole: ["As", "Kd"], toCall: 2 }, { to: "
 ```
 
 - **`wake.defineEvent(name, { description, args, payload, text, authorize?, personal?, deleteOnDelivery? })`** returns the event. `args` is what a subscriber picks; its required string, integer and boolean fields route occurrences, so their values are lowercase IDs (a-z 0-9 . _ -), and an optional one filters on the payload field of the same name. `authorize(subscriber, args)` decides who may subscribe. With `deleteOnDelivery: true`, Wakeshift deletes each occurrence's text and payload once it's delivered. Define every event before `attach`, which throws with none.
-- **`event.emit(args, payload, { id?, to? })`** checks the payload against its schema and sends it to everyone subscribed with those arguments. A personal event goes to its recipients, `to`: users (the `user` attach's `identify` gives for them), `{ user, subscription }` (exactly one conversation's subscription, the `id` `call.subscribe` returned) and `{ native: user }` (only that user's own MCP Events subscriptions), mixable, up to 1,000. It returns `{ matched, duplicate, unmatched, ended }`: `matched` counts the conversations woken, `unmatched` the users with nothing subscribed, `ended` the subscriptions no longer live (forget them). `id` makes retries emit once; a retry must name the same recipients.
-- **`wake.attach(server, { identify?, tools?, events? })`** attaches Wakeshift to your MCP server and returns the handle your own tools use (below). It serves `events/list`, `events/subscribe` and `events/unsubscribe` to clients that speak MCP Events, and adds `subscribe_events` (for everyone else), `unsubscribe_events` and `list_subscriptions` (for every client, so a person can always see and stop what they're subscribed to); `tools` names fewer of them (`BUILTIN_TOOLS`; `[]` for none). `identify(extra)` says who is behind a request, as `{ user, client? }`: `user` is your app's ID for the person, from your own sign-in; without it, requests have no user, so personal events and `list_subscriptions` refuse. On a stateless server, which never sees `initialize`, `client` is the MCP client's name as your sign-in knows it (an OAuth registration's `client_name`, say): Wakeshift reads it to tell which program the agent runs in. A name the request carries wins. On a stateless server it also serves `wakeshift_wait` to clients that take MCP tasks (a recent Claude Code in the terminal): Wakeshift tells those conversations to call it, and it wakes them when your events arrive, with nothing to install; other clients don't see it. It also sends your app's manifest, with your events, the first time they're needed: it adds them and never removes one. A separate process that only emits never sends it.
+- **`event.emit(args, payload, { id?, to? })`** checks the payload against its schema and sends it to everyone subscribed with those arguments. A personal event goes to its recipients, `to`: users (the `user` attach's `identify` gives for them), `{ user, subscription }` (exactly one conversation's subscription, the `id` `call.subscribe` returned) and `{ native: user }` (only that user's own MCP Events subscriptions), mixable, up to 1,000. It returns `{ matched, duplicate, unmatched, ended }`: `matched` counts the conversations reached, `unmatched` the users with nothing subscribed, `ended` the subscriptions no longer live (forget them). `id` makes retries emit once: a retry of the same emit returns the first's result with `duplicate: true`, and the same `id` on a different emit (other arguments, recipients or payload) throws `IdReusedError` (`id_reused`) and sends nothing.
+- **`wake.attach(server, { identify?, tools?, events? })`** attaches Wakeshift to your MCP server and returns the handle your own tools use (below). It serves `events/list`, `events/subscribe` and `events/unsubscribe` to clients that speak MCP Events, and adds `subscribe_events` (for everyone else), `unsubscribe_events` and `list_subscriptions` (for every client, so a person can always see and stop what they're subscribed to). `tools` picks them, each `{ enabled }`: `subscribe`, `list` and `unsubscribe` are on unless disabled (`tools: { subscribe: { enabled: false } }`); a list of names (`BUILTIN_TOOLS`) still works, but is deprecated. `identify(ctx)` says who is behind a request, as `{ user, client? }`: `user` is your app's ID for the person, from your own sign-in; without it, requests have no user, so personal events and `list_subscriptions` refuse. On a stateless server, which never sees `initialize` (`createMcpHandler`'s is one), `client` is the MCP client's name as your sign-in knows it (an OAuth registration's `client_name`, say): Wakeshift reads it to tell which program the agent runs in. A name the request carries wins. With `tools: { wait: { enabled: true } }`, on a stateless server, it also serves `wakeshift_wait` to clients that take MCP tasks (a recent Claude Code in the terminal): Wakeshift tells those conversations to call it, after the user declines Wakeshift's plugin, instead of starting a background monitor; other clients don't see it. It's off by default, because each waiting conversation then keeps a request open to your server (about 20 seconds at a time, the next a second later, for as long as it waits): on a serverless host, that's a function invocation per waiting conversation, which needs a timeout of at least 30 seconds. Once it has run, the first call about events sends your app's manifest, with your events: it adds them and never removes one. An emit before `attach` has run (`createMcpHandler` runs it on the first request), or from a separate process that only emits, sends the manifest only if Wakeshift answers with `unknown_event`, then emits again (see [emitting before any agent connects](#emitting-before-any-agent-connects)).
+- **Annotations.** The three tools `attach` adds, and `wakeshift_wait`, list MCP tool annotations: a title and all four hints, which app stores such as ChatGPT's ask for. `subscribe_events` ("Subscribe to events") and `unsubscribe_events` ("Unsubscribe from events") are idempotent, and not read-only, destructive or open-world: subscribing again renews the same subscription, unsubscribing again ends nothing, and an ended subscription comes back by subscribing. `list_subscriptions` ("List subscriptions") is read-only and idempotent. `wakeshift_wait` ("Wait for messages") is neither read-only nor idempotent, since each call confirms the messages the last one delivered; it isn't destructive or open-world either.
 - **`event.end(user, id)`** ends one of a user's subscriptions by its ID, outside a tool (a player who timed out, a member removed).
 - **`event.status(args, { to? })`** counts the conversations subscribed with those arguments (a personal event: one user's), how many are connected now, and how: `{ subscriptions, connected, via: { stream, poll, hooks, webhook } }`. **`event.statusOf([{ user, subscription }, …])`** reads up to 1,000 subscriptions by ID: `[{ id, user, live, connected, via? }]`. Both only read.
 - **`event.publishUrl(args, { to? })`** returns `{ id, event, url }`, a capability URL that emits the event with those arguments (a personal event: to one user) for services that only send webhooks. A POST's JSON body is the payload, checked against the event's schema. `wake.revokePublishUrl(id)` stops it.
@@ -109,8 +120,8 @@ A tool like "join" subscribes the conversation calling it: wrap its callback wit
 // attached: what wake.attach(server, …) returned, above.
 server.registerTool(
   "join",
-  { description: "Take a seat at a table", inputSchema: attached.inputs({ table: z.string() }) },
-  attached.events("join", async ({ table }, call) => {
+  { description: "Take a seat at a table.", inputSchema: attached.inputs(z.object({ table: z.string() })) },
+  attached.events("join", { subscribes: [turn] }, async ({ table }, call) => {
     const sub = await call.subscribe(turn, { table }, { reason: `Playing at ${table}` })
     // Keep sub.user and sub.id to reach this conversation later:
     // turn.emit({ table }, hand, { to: [{ user: sub.user, subscription: sub.id }] })
@@ -119,23 +130,25 @@ server.registerTool(
 )
 ```
 
-- **`attached.inputs(shape)`** is `shape` plus Wakeshift's three optional arguments, `session_key`, `harness` and `conversation_id`. A tool wrapped with `attached.events` needs them: without them it doesn't compile. An argument a tool doesn't declare is ignored, not refused.
-- **`attached.events(name, handler)`** wraps the callback of the tool registered as `name` (the MCP SDK doesn't tell a callback its tool's name; the first call checks it). The handler gets the tool's own arguments and a `call`, and returns a string or a `CallToolResult`.
-- **`call`**: `user` (from `identify`), `tool`, `native` and `nativeConversation`, `session` (the `session_key` passed; after a subscribe, the conversation's session), `recognized` (which program Wakeshift recognized the agent as, `null` before a subscribe) and `extra` (MCP's own). It works until the handler returns.
+- **`attached.inputs(schema)`** is your zod object plus Wakeshift's three optional arguments, `session_key`, `harness` and `conversation_id`. A tool wrapped with `attached.events` needs them: without them it doesn't compile. An argument a tool doesn't declare is ignored, not refused.
+- **`attached.events(name, { subscribes }, handler)`** wraps the callback of the tool registered as `name` (the MCP SDK doesn't tell a callback its tool's name; the first call checks it). The handler gets the tool's own arguments and a `call`, and returns a string or a `CallToolResult`.
+- **`subscribes`** lists the events the tool subscribes to. `call.subscribe` takes only those (a type error otherwise), and a tool that lists none (`subscribes: []`) has no `call.subscribe`. tools/list adds a sentence to the tool's description, from each event's own description, with your app named as the console has it: "This tool is how Shipyard notifies you in this conversation of this event: A build finished: it passed, failed or was canceled. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it." Agents set Wakeshift's part of a result aside as something the user didn't ask for unless the tool's description says so. Write event descriptions as plain statements of what happened, since agents read them there. A tool that doesn't subscribe can leave the options out (`attached.events(name, handler)`); a `call.subscribe` from such a tool, or to an event the tool doesn't list, works but warns once per tool through `onWarning`, naming the fix, and throws from the next release.
+- **`notifies(description, { when?, app? })`** is an override for your own wording: it writes the sentence into the tool's description (`when: "a build finishes"` says "… notifies you in this conversation when a build finishes."), and tools/list adds no second one.
+- **`call`**: `user` (from `identify`), `tool`, `native` and `nativeConversation`, `session` (the `session_key` passed; after a subscribe, the conversation's session), `recognized` (which program Wakeshift recognized the agent as, `null` before a subscribe) and `extra` (the request's context, `ctx`). It works until the handler returns.
 - **`await call.subscribe(event, args, { ttl?, reason?, label? })`** subscribes the calling conversation, or renews its subscription, and resolves to `{ id, user, created, session, recognized, native }`. `reason` is shown in your console. Your tool decides who may (`authorize` isn't consulted). **`await call.unsubscribe(event, args)`** ends it; **`await call.resolveSession()`** finds or starts the conversation's session without subscribing it.
 - **A failed call**: one that throws, returns `isError`, returns output its `outputSchema` refuses, or is canceled, ends every subscription it made, and its reply gets nothing from Wakeshift.
-- **Clients that subscribe themselves** (MCP Events: ChatGPT and others) aren't subscribed: `call.native` is true, and the reply tells them which event to subscribe to. `attach`'s `events.native(extra)` tells the SDK about callers it can't recognize, such as your own agents.
-- **Structured output**: some hosts show the model only `structuredContent`. A wrapped tool's `structuredContent` carries what Wakeshift adds in its `wakeshift` field too, and the tool's listed output schema names that field. Make the `outputSchema` with `attached.output(shape)` to declare it in your own schema and types; it's optional, but needed with a schema that refuses other fields (`z.strictObject`).
+- **Clients that subscribe themselves** (MCP Events: ChatGPT and others) aren't subscribed: `call.native` is true, and the reply tells them which event to subscribe to. `attach`'s `events.native(ctx)` tells the SDK about callers it can't recognize, such as your own agents.
+- **Structured output**: some hosts show the model only `structuredContent`. A wrapped tool's `structuredContent` carries what Wakeshift adds in its `wakeshift` field too, and the tool's listed output schema names that field. Make the `outputSchema` with `attached.output(schema)` to declare it in your own schema and types; it's optional, but needed with a schema that refuses other fields (`z.strictObject`).
 
 ```ts
 server.registerTool(
   "look",
   {
     description: "Look at a table",
-    inputSchema: attached.inputs({ table: z.string() }),
-    outputSchema: attached.output({ seats: z.number() }),
+    inputSchema: attached.inputs(z.object({ table: z.string() })),
+    outputSchema: attached.output(z.object({ seats: z.number() })),
   },
-  attached.events("look", async ({ table }) => ({
+  attached.events("look", { subscribes: [] }, async ({ table }) => ({
     content: [{ type: "text", text: `3 seats at ${table}.` }],
     structuredContent: { seats: 3 },
   })),
@@ -143,7 +156,7 @@ server.registerTool(
 
 server.registerTool(
   "leave",
-  { description: "Leave a table", inputSchema: attached.inputs({ table: z.string() }) },
+  { description: "Leave a table", inputSchema: attached.inputs(z.object({ table: z.string() })) },
   attached.events("leave", async ({ table }, call) => {
     const left = await call.unsubscribe(turn, { table })
     return left ? `You left ${table}.` : `You weren't at ${table}.`
@@ -152,6 +165,139 @@ server.registerTool(
 ```
 
 A wrapped tool that subscribes to nothing, like `look`, still gets what Wakeshift has for the conversation calling it: occurrences held for an agent Wakeshift can't wake, or what it needs to reconnect. Usually that's nothing.
+
+## Using @modelcontextprotocol/sdk 1.x
+
+`attach` takes an `McpServer` from either MCP TypeScript SDK and tells them apart by the server you pass, so everything on this page works the same on `@modelcontextprotocol/sdk` 1.x (1.23 or later), with zod 3.25 or later.
+
+```sh
+npm install @wakeshift/sdk @modelcontextprotocol/sdk zod
+```
+
+```ts
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { z } from "zod"
+import { Wakeshift } from "@wakeshift/sdk"
+
+const wake = new Wakeshift({ key: process.env.WAKESHIFT_KEY! })
+
+const ciFinished = wake.defineEvent("ci.finished", {
+  description: "CI finished on a GitHub repo",
+  args: z.object({ owner: z.string(), repo: z.string() }),
+  payload: z.object({ branch: z.string(), conclusion: z.string() }),
+  text: (run, { owner, repo }) => `CI ${run.conclusion} on ${owner}/${repo} ${run.branch}`,
+})
+
+// One McpServer per MCP session; attach before connecting it to its transport.
+const server = new McpServer({ name: "ci-bot", version: "1.0.0" })
+const attached = wake.attach(server, { identify: (extra) => ({ user: myUser(extra.authInfo) }) })
+server.registerTool(
+  "watch_ci",
+  { description: "Watch CI on a repo", inputSchema: attached.inputs({ owner: z.string(), repo: z.string() }) },
+  attached.events("watch_ci", { subscribes: [ciFinished] }, async ({ owner, repo }, call) => {
+    await call.subscribe(ciFinished, { owner, repo }, { reason: `Watching ${owner}/${repo}` })
+    return `Watching CI on ${owner}/${repo}.`
+  }),
+)
+```
+
+What's different on 1.x:
+
+- `identify`, `events.native` and a wrapped tool's `call.extra` get 1.x's `extra` instead of `ctx`: the verified token is `extra.authInfo` (1.x's Streamable HTTP transport copies `req.auth` into it), and the HTTP headers are `extra.requestInfo?.headers`.
+- `attached.inputs` and `attached.output` take a zod shape, as 1.x's `registerTool` does: `attached.inputs({ … })`.
+- You serve it with 1.x's `StreamableHTTPServerTransport`. With sessions, give each session its own `McpServer`; clients connect with `initialize`. Clients that speak only MCP protocol 2026-07-28, such as OpenClaw, connect only to a stateless transport (no `sessionIdGenerator`), where `attach` answers that revision for 1.x.
+
+### Moving from 1.x to 2.x
+
+Moving a server from 1.x to 2.x moves where your own code reads a request's fields, in `identify`, `events.native` and your tool callbacks. Fields read the 1.x way don't fail on 2.x. They come back `undefined`, and code that doesn't type its context as 2.x's still compiles, so a user your sign-in recognized on 1.x silently goes unrecognized. Check each read:
+
+| What you read | On 1.x (`extra`) | On 2.x (`ctx`) |
+| --- | --- | --- |
+| The verified token | `extra.authInfo` | `ctx.http?.authInfo` |
+| An HTTP header | `extra.requestInfo?.headers[name]` | `ctx.http?.req?.headers.get(name)` |
+| Your own `_meta` keys | `extra._meta` | `ctx.mcpReq._meta` |
+| The reserved `io.modelcontextprotocol/*` `_meta` keys (protocol version, client info, client capabilities) | `extra._meta` | `ctx.mcpReq.envelope`, on protocol 2026-07-28: 2.x moves them out of `ctx.mcpReq._meta` |
+| The request's cancellation | `extra.signal` | `ctx.mcpReq.signal` |
+
+Wakeshift reads both shapes itself, so what it sees doesn't change: only your own reads move. Write your schemas, events' included, with zod 4 (4.2 or later), which 2.x requires.
+
+## Mastra
+
+Mastra's `MCPServer` (`@mastra/mcp` 2.7 or later) builds its MCP server itself, so it has its own entry point, `@wakeshift/sdk/mastra` (0.7.0 or later). Wrap the `execute` of each Mastra tool that subscribes, and serve your `MCPServer` with it:
+
+```ts
+import { createTool } from "@mastra/core/tools"
+import { MCPServer } from "@mastra/mcp"
+import { z } from "zod"
+import { Wakeshift } from "@wakeshift/sdk"
+import { attachMastra } from "@wakeshift/sdk/mastra"
+
+const wake = new Wakeshift({ key: process.env.WAKESHIFT_KEY! })
+const ciFinished = wake.defineEvent("ci.finished", {
+  description: "CI finished on a GitHub repo",
+  args: z.object({ owner: z.string(), repo: z.string() }),
+  payload: z.object({ branch: z.string(), conclusion: z.string() }),
+  text: (run, { owner, repo }) => `CI ${run.conclusion} on ${owner}/${repo} ${run.branch}`,
+})
+
+// identify gets the request's MCP context: the verified token is ctx.http?.authInfo.
+const attached = attachMastra(wake, { identify: (ctx) => ({ user: myUser(ctx.http?.authInfo) }) })
+
+const watchCi = createTool({
+  id: "watch_ci",
+  description: "Watch CI on a repo",
+  inputSchema: attached.inputs(z.object({ owner: z.string(), repo: z.string() })),
+  execute: attached.events("watch_ci", { subscribes: [ciFinished] }, async ({ owner, repo }: { owner: string; repo: string }, call) => {
+    await call.subscribe(ciFinished, { owner, repo }, { reason: `Watching ${owner}/${repo}` })
+    return `Watching CI on ${owner}/${repo}.`
+  }),
+})
+
+const server = attached.serve(new MCPServer({ id: "ci-bot", name: "CI bot", version: "1.0.0", tools: { watch_ci: watchCi } }))
+```
+
+Serve it as Mastra's docs do (`server.startHTTP`, `server.startStdio`, or registered on your `Mastra` instance). It gets everything `attach` gives: the built-in tools, MCP Events for clients that speak it, Claude Code's `wakeshift_wait` (with `tools: { wait: { enabled: true } }`), and Wakeshift's addition in your wrapped tools' results.
+
+- `attached.events(name, { subscribes }, handler)` wraps a tool's `execute` for the tool your `MCPServer` serves under `name` (its key in `tools`); `subscribes` is as on `attach`'s handle. `handler(args, call, context)` returns what a Mastra tool returns: a string, or your output. Run outside an MCP client's call (by an agent, a workflow or Studio), `call.subscribe` throws.
+- Wrapped tools answer in one call: a Mastra task or a request for input from one ends what it subscribed.
+- Your own MCP Events (`MCPServer`'s `events`) keep working: `events/list` lists yours and Wakeshift's, and each request goes to whichever serves the event it names.
+- `attached.serve` checks your `@mastra/mcp` version and throws for one outside 2.7–2.x.
+
+## xmcp
+
+xmcp builds its MCP server from your tool files, so Wakeshift comes in through them, with `@wakeshift/sdk/xmcp` (0.7.0 or later):
+
+```ts
+import { z } from "zod"
+import { Wakeshift } from "@wakeshift/sdk"
+import { attachXmcp } from "@wakeshift/sdk/xmcp"
+
+// src/wake.ts
+const wake = new Wakeshift({ key: process.env.WAKESHIFT_KEY! })
+const ciFinished = wake.defineEvent("ci.finished", {
+  description: "CI finished on a GitHub repo",
+  args: z.object({ owner: z.string(), repo: z.string() }),
+  payload: z.object({ branch: z.string(), conclusion: z.string() }),
+  text: (run, { owner, repo }) => `CI ${run.conclusion} on ${owner}/${repo} ${run.branch}`,
+})
+// identify gets xmcp's tool context: the verified token is extra.authInfo.
+const attached = attachXmcp(wake, { identify: (extra) => ({ user: myUser(extra.authInfo) }) })
+
+// src/tools/watch_ci.ts: export these three
+const schema = attached.inputs({ owner: z.string(), repo: z.string() })
+// xmcp writes tools/list itself: describe gives the metadata the sentence attach adds elsewhere.
+const metadata = { name: "watch_ci", description: attached.describe("Watch CI on a repo.", { subscribes: [ciFinished] }) }
+const handler = attached.events("watch_ci", { subscribes: [ciFinished] }, async ({ owner, repo }: { owner: string; repo: string }, call) => {
+  await call.subscribe(ciFinished, { owner, repo }, { reason: `Watching ${owner}/${repo}` })
+  return `Watching CI on ${owner}/${repo}.`
+})
+
+// src/tools/subscribe_events.ts, and the same for unsubscribe_events and list_subscriptions
+const tool = attached.tool("subscribe_events")
+// export const schema = tool.schema; export const metadata = tool.metadata; export default tool.handler
+```
+
+Each wrapped tool's result gets Wakeshift's addition in its content and `_meta` (not in `structuredContent`, which xmcp checks strictly against your output schema). xmcp can't serve MCP methods of an app's own, so on xmcp there are no MCP Events (ChatGPT and other clients that subscribe natively can't subscribe) and no `wakeshift_wait`: Claude Code is woken its other ways, and every other agent as usual.
 
 ## Reference
 
@@ -169,10 +315,14 @@ A wrapped tool that subscribes to nothing, like `look`, still gets what Wakeshif
 
 ### Manifest and workspaces
 
-- `wake.publishManifest({ description?, agent?, events?, others_can_wake?, preapprove_tools? })`: what your app may do; returns it as Wakeshift keeps it. `agent`: `{ wake, post, ttl_days, wake_limits?, start_prompt? }`, each scope event `{ pattern, description }`: what the agents in the workspaces your app keeps may be woken by and post. `others_can_wake`: other people and their agents wake your users' agents through your app (messages, moves), so the consent screen says so. `preapprove_tools`: your tools, by name, that agents' programs can run without asking each time (at most 20: tools that only read, and routine ones that reach only what the agent joined); when a user connects Claude Code or Cursor CLI, Wakeshift offers to allow exactly these. It replaces the manifest, so it's the way to remove an event. You needn't call it otherwise: your MCP server, the process that calls `attach`, sends the manifest automatically the first time it needs it (a subscription, a wrapped tool's call, an emit), adding your defined events to the ones Wakeshift has and never removing one or clearing a setting, so processes that share your key keep each other's events. A process that only emits never sends it. Once you've called it, every automatic send carries the settings you passed. `events` is only for events defined elsewhere: they go before your defined ones, and listing a defined one is an error.
+- `wake.publishManifest({ description?, agent?, events?, others_can_wake?, preapprove_tools? })`: what your app may do; returns it as Wakeshift keeps it. `agent`: `{ wake, post, ttl_days, wake_limits?, start_prompt? }`, each scope event `{ pattern, description }`: what the agents in the workspaces your app keeps may be woken by and post. `others_can_wake`: other people and their agents wake your users' agents through your app (messages, moves), so the consent screen says so. `preapprove_tools`: your tools, by name, that agents' programs can run without asking each time (at most 20: tools that only read, and routine ones that reach only what the agent joined); when a user connects Claude Code or Cursor CLI, Wakeshift offers to allow exactly these. It replaces the manifest, so it's the way to remove an event. You needn't call it otherwise: the SDK sends the manifest automatically, adding your defined events to the ones Wakeshift has and never removing one or clearing a setting, so processes that share your key keep each other's events. Once `attach` has run, it's sent on the first call about events (a subscription, a wrapped tool's call, a status, an emit). Before then, and in a process that only emits, it's sent only when Wakeshift answers an emit with `unknown_event`, and the emit goes again. Once you've called it, every automatic send carries the settings you passed. `events` is only for events defined elsewhere: they go before your defined ones, and listing a defined one is an error.
 - Your app identifies its own users with its own sign-in, and acts for the agents in the workspaces it keeps.
 - `wake.workspace(user, name)`, `wake.addAgent(workspace, agent, displayName)`, `wake.checkAgent(workspace, agent)`: the workspace Wakeshift keeps for one of your users, an agent in it with a grant for your manifest's agent scope, and whether that grant is live. Wakeshift keeps a user's conversations in that workspace; you don't need these to subscribe them.
 - `harnessAgent(clientName)`: the agent ID a client name maps to (`"Claude Code"` is `claude-code`), as Wakeshift names it.
+
+### Emitting before any agent connects
+
+You can emit at startup, or from a webhook, before any agent has connected to your MCP server. With `createMcpHandler`, `attach` runs only when the first request comes in, so Wakeshift may not know your events yet. The SDK handles it: if Wakeshift answers an emit with `unknown_event`, it sends the manifest once, then emits again. Calling `publishManifest()` at startup also works, but you no longer need it.
 
 ### Errors
 
@@ -184,8 +334,9 @@ API errors throw `WakeshiftError` with `status` and `code`: the same codes as th
 | `400` | `bad_arguments` | An event's arguments or payload don't match its schemas, a routing value isn't a lowercase ID, or the recipients don't fit the event: a personal event's emit, publish URL or status without `to` (a publish URL's or status's names exactly one user), a shared event's with one, a recipient with an empty user or subscription, or `call.subscribe` on a personal event with no user. |
 | `401` | `unauthenticated` | The assertion was refused: expired, reused, signed with another key, or for another `aud` (a key for another Wakeshift). The message says which. |
 | `403` | `other_client` | The `session_key` is a conversation in another MCP client of the same user. Call again without it. |
-| `404` | `unknown_event` | Your app offers no event by that name, or `call.subscribe` or `call.unsubscribe` was given another app's event (one defined on another `Wakeshift` client). |
+| `404` | `unknown_event` | Your app offers no event by that name (an emit gets this only once the SDK has sent your manifest and tried again), or `call.subscribe` or `call.unsubscribe` was given another app's event (one defined on another `Wakeshift` client). |
 | `404` | `unknown_publish_url` | The publish URL ID isn't one of your app's. |
+| `409` | `id_reused` | An emit's `id` was used within the last day for a different emit (another event, arguments, recipients or payload). Nothing was sent. Give each occurrence its own `id`. |
 | `413` | `too_large` | The request body is over 64 KB (512 KB for an emit or a status call, room for 1,000 recipients). The limit is on the whole body, so the payload must leave room for the rest of the request. |
 | `429` | `rate_limited` | Your emits to lists named over 10,000 recipients in a minute. |
 | `0` | `unreachable` | No answer at all: a wrong `core`, a network problem, or the timeout. The message names the core it tried. |
@@ -201,9 +352,12 @@ The guides and the full reference are at [wakeshift.ai/docs](https://wakeshift.a
 ```sh
 npm ci
 npm run typecheck
-npm test          # unit tests (node:test) and the README's examples
+npm test          # unit tests (node:test) on @modelcontextprotocol/sdk 1.x, and the README's examples
+npm run test:v2   # the same unit tests on @modelcontextprotocol/server 2.x
 npm run build     # dist/
 ```
+
+`sh scripts/mcp-floor.sh` installs the oldest `@modelcontextprotocol/server` the peer range allows (unsaved), for running `npm run test:v2` on it; `npm ci` puts the locked versions back.
 
 The end-to-end tests (`test/e2e*.test.ts`) run against a Wakeshift server, so they run in Wakeshift's own repository and skip here.
 

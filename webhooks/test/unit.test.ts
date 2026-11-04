@@ -5,15 +5,14 @@ import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { checkSignature, githubText, toEvent } from "../src/events.js";
 import { Links } from "../src/links.js";
-import { askLine, connectedText, esc, linkPage, shq } from "../src/page.js";
+import { askLine, connectedText, esc, linkPage, liveConnection, shq, skippedText } from "../src/page.js";
 import { pickerHtml, SCRIPT_PATH, STYLE_PATH } from "../src/agentpicker/picker.js";
 import { inline, legalDocsFor, markdown, siteFor, WAKESHIFT } from "../src/legal.js";
 import { State } from "../src/state.js";
-import { addressKey, logLine, MAX_DRAIN, sseWrite, tryServer } from "../src/server.js";
+import { addressKey, fromThisSite, logLine, MAX_DRAIN, sseWrite, tryServer } from "../src/server.js";
 import { openDb, roundRobin, testDatabase } from "./testdb.js";
 import type { AddressInfo } from "node:net";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { Wakeshift } from "@wakeshift/sdk";
 import { Db } from "../src/db.js";
 import pg from "pg";
@@ -56,8 +55,8 @@ test("links: each check has its own token, and a token isn't a code", () => {
   const open = links.token(l, "open");
   const gh = links.token(l, "github");
   assert.notEqual(open, gh);
-  assert.deepEqual(links.parseToken(open), { ...l, check: "open" });
-  assert.deepEqual(links.parseToken(gh), { ...l, check: "github" });
+  assert.deepEqual(links.parseToken(open), { ...l, check: "open", gen: 0 });
+  assert.deepEqual(links.parseToken(gh), { ...l, check: "github", gen: 0 });
   assert.equal(links.parseToken(links.token(l, "bearer"))?.check, "bearer");
   // Changing the check byte breaks the MAC: the signed URL can't be made open.
   const raw = Buffer.from(gh, "base64url");
@@ -82,10 +81,10 @@ test("links: Stripe's and Linear's secrets are sealed into their tokens", () => 
   const l = links.parse(links.create())!;
   const pasted = "whsec_5f8a1c2e9b7d4a6f0e3c8b1a2d4f6e8c";
   const st = links.token(l, "stripe", pasted);
-  assert.deepEqual(links.parseToken(st), { ...l, check: "stripe", secret: pasted });
+  assert.deepEqual(links.parseToken(st), { ...l, check: "stripe", gen: 0, secret: pasted });
   assert.ok(!Buffer.from(st, "base64url").toString("latin1").includes("5f8a1c2e"), "not readable in the URL");
   assert.notEqual(links.token(l, "stripe", pasted), st, "a fresh nonce each time");
-  assert.deepEqual(links.parseToken(links.token(l, "linear", "lin_wh_abcdefghijklmnop")), { ...l, check: "linear", secret: "lin_wh_abcdefghijklmnop" });
+  assert.deepEqual(links.parseToken(links.token(l, "linear", "lin_wh_abcdefghijklmnop")), { ...l, check: "linear", gen: 0, secret: "lin_wh_abcdefghijklmnop" });
   // A pasted check needs its secret.
   assert.throws(() => links.token(l, "stripe"));
   assert.throws(() => links.token(l, "linear", "x".repeat(201)));
@@ -526,6 +525,22 @@ test("state: an expired link's webhook is forgotten in Wakeshift, retried until 
   assert.deepEqual(left.rows, []);
 });
 
+test("state: a webhook being forgotten can't get a new open URL, even with its row there", async (t) => {
+  const db = openDb(t, await testDatabase(t));
+  const st = new State(db, { perHour: 3, perDay: 5, globalPerHour: 100 });
+  assert.equal(await st.openGen("h1"), 0);
+  assert.equal(await st.rotateOpen("h1"), 1);
+  assert.equal(await st.rotateOpen("h1"), 2);
+  assert.equal(await st.openGen("h1"), 2);
+  // Queued for forgetting (the row isn't normally there then; here it is): nothing changes.
+  await db.query("INSERT INTO forgets (hook, expired_at, next_try) VALUES ('h1', now(), now())");
+  assert.equal(await st.rotateOpen("h1"), undefined);
+  assert.equal(await st.openGen("h1"), 2);
+  await db.query("INSERT INTO forgets (hook, expired_at, next_try) VALUES ('h2', now(), now())");
+  assert.equal(await st.rotateOpen("h2"), undefined);
+  assert.equal(await st.openGen("h2"), 0);
+});
+
 test("state: a webhook in use again isn't forgotten", async (t) => {
   let now = Date.parse("2026-10-18T10:00:00Z");
   const url = await testDatabase(t);
@@ -564,6 +579,7 @@ test("the page says whether an agent is connected, and how", () => {
     limits: { perHour: 60, perDay: 500, idleDays: 7 },
   });
   assert.ok(html.includes('id="connected"'));
+  assert.ok(html.includes("A wake brings your agent at most 20 posts"), "the batch per wake (site/docs/try.md)");
   assert.ok(html.includes("const connectedText = function connectedText(s)"), "the function's source");
   assert.ok(html.includes('"/status"'));
 });
@@ -771,7 +787,13 @@ test("mcp: a protocol 2026-07-28 client is served without a session", async (t) 
   const call = async (id: number, method: string, params: Record<string, unknown> = {}, caps?: unknown) => {
     const r = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "mcp-protocol-version": "2026-07-28", "mcp-method": method },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": method,
+        ...(typeof params.name === "string" ? { "mcp-name": params.name } : {}),
+      },
       body: JSON.stringify({ jsonrpc: "2.0", id, method, params: { ...params, _meta: meta(caps) } }),
     });
     assert.equal(r.status, 200, `${method}: ${r.status}`);
@@ -791,6 +813,12 @@ test("mcp: a protocol 2026-07-28 client is served without a session", async (t) 
   const tools = (await call(3, "tools/list", {}, { extensions: { "io.modelcontextprotocol/events": {} } })).result;
   assert.equal(tools.resultType, "complete");
   assert.deepEqual(tools.tools.map((x: any) => x.name).sort(), ["list_subscriptions", "recent_posts", "unsubscribe_events", "unwatch", "watch", "webhook_info"]);
+  assert.equal(tools.ttlMs, 0, "a list's result says how long it may be cached");
+  assert.equal(tools.cacheScope, "private");
+  const info = (await call(4, "tools/call", { name: "webhook_info", arguments: {} })).result;
+  assert.equal(info.resultType, "complete");
+  assert.ok(!info.isError);
+  assert.match(info.content[0].text, /Open URL/);
 });
 
 test("mcp: the GET stream's headers and first bytes go out at once", async (t) => {
@@ -849,7 +877,8 @@ async function webhookFixture(t: { after: (fn: () => Promise<void>) => void }, p
     if (!duplicate) published.push({ text: e.text, data, id: e.id });
     return { matched: 1, duplicate };
   };
-  const app = tryServer({ wake, db: openDb(t, await testDatabase(t)), secret, publicUrl: "http://127.0.0.1", limits: { perHour, perDay: 100 }, log: () => {} });
+  const dbUrl = await testDatabase(t);
+  const app = tryServer({ wake, db: openDb(t, dbUrl), secret, publicUrl: "http://127.0.0.1", limits: { perHour, perDay: 100 }, log: () => {} });
   await new Promise<void>((r) => app.listen(0, "127.0.0.1", () => r()));
   t.after(() => app.stop());
   const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
@@ -861,7 +890,7 @@ async function webhookFixture(t: { after: (fn: () => Promise<void>) => void }, p
   const post = (url: string, body: string, headers: Record<string, string> = {}) => fetch(local(url), { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body });
   const paste = (check: string, s: string) =>
     fetch(`${base}${path}?check=${check}`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ secret: s }) });
-  return { base, path, open, post, paste, published, code: path.slice(3) };
+  return { base, path, open, post, paste, published, code: path.slice(3), dbUrl };
 }
 
 test("webhooks: refused posts, retries and the open URL don't use up a checked URL's limit", async (t) => {
@@ -997,6 +1026,156 @@ test("mcp: webhook_info gives the checked URL once there is one, and says which 
   // Looking at the GitHub tab makes that the one.
   const gh = codeIn(await (await fetch(f.base + f.path + "?check=github")).text(), "url")!;
   assert.ok((await info()).includes(`(it checks GitHub's X-Hub-Signature-256): ${gh}`));
+});
+
+test("links: a new open URL is the next generation's token, and nothing else changes", () => {
+  const links = new Links(secret);
+  const l = links.parse(links.create())!;
+  const first = links.token(l, "open");
+  assert.equal(links.token(l, "open", undefined, 0), first, "generation 0 is the first open URL, as it always was");
+  const second = links.token(l, "open", undefined, 1);
+  assert.notEqual(second, first);
+  assert.deepEqual(links.parseToken(second), { ...l, check: "open", gen: 1 });
+  assert.equal(links.parseToken(links.token(l, "open", undefined, 0xffffffff))?.gen, 0xffffffff);
+  // Signed like any token: a changed generation, or a generation of 0 spelled out, isn't one.
+  const raw = Buffer.from(second, "base64url");
+  for (let i = 0; i < raw.length; i++) {
+    const t = Buffer.from(raw);
+    t[i] ^= 1;
+    assert.equal(links.parseToken(t.toString("base64url")), undefined, `byte ${i}`);
+  }
+  const head = raw.subarray(0, 16);
+  const zero = Buffer.concat([head, Buffer.alloc(4)]);
+  const mac = (b: Buffer) => createHmac("sha256", secret).update("try/in\0").update(b).digest().subarray(0, 16);
+  assert.equal(links.parseToken(Buffer.concat([zero, mac(zero)]).toString("base64url")), undefined);
+  // Only the open URL has a generation; the code and the other checks' tokens don't change.
+  assert.throws(() => links.token(l, "github", undefined, 1));
+  assert.throws(() => links.token(l, "open", undefined, -1));
+  assert.equal(links.parse(second), undefined, "a token isn't a code");
+});
+
+test("rotate: a new open URL from the webhook's page; the old one is gone at once, everywhere, and the watch, history and checked URLs stay", async (t) => {
+  const dbUrl = await testDatabase(t);
+  const requests: { path: string; body: any }[] = [];
+  const a = await instance(t, dbUrl, { requests });
+  const b = await instance(t, dbUrl);
+  const made = await fetch(a.base + "/links", { method: "POST", redirect: "manual" });
+  const path = made.headers.get("location")!;
+  const page = async (base = a.base, q = "") => (await fetch(base + path + q)).text();
+  const old = codeIn(await page(), "url")!;
+  const gh = codeIn(await page(a.base, "?check=github"), "url")!;
+  const ghSecret = codeIn(await page(a.base, "?check=github"), "secret")!;
+  const post = (url: string, base: string, headers: Record<string, string> = {}) =>
+    fetch(onto(url, base), { method: "POST", headers: { "Content-Type": "text/plain", ...headers }, body: "hi" }).then(async (r) => ({ status: r.status, body: (await r.json()) as any }));
+  assert.equal((await post(old, a.base)).status, 202);
+  // An agent watches.
+  const client = new Client({ name: "claude-code", version: "1" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${a.base}/t/${path.slice(3)}/mcp`)));
+  t.after(() => client.close());
+  await client.callTool({ name: "watch", arguments: {} });
+  const watching = (await page()).match(/"watchers":(\[[^\]]*\])/)![1];
+  assert.notEqual(watching, "[]");
+  const before = requests.length;
+
+  // The page's button.
+  const html = await page();
+  assert.ok(html.includes(`<form method="post" action="${path}/rotate"`), "the button is on the open tab");
+  const r = await fetch(a.base + path + "/rotate", { method: "POST", redirect: "manual", headers: { Origin: "http://127.0.0.1", "Sec-Fetch-Site": "same-origin" } });
+  assert.equal(r.status, 303);
+  assert.equal(r.headers.get("location"), path + "?rotated=1");
+  const after = await page(a.base, "?rotated=1");
+  const fresh = codeIn(after, "url")!;
+  assert.notEqual(fresh, old);
+  assert.ok(after.includes("Here's your new open URL. The old one no longer works."));
+  assert.equal(codeIn(await page(b.base), "url"), fresh, "every instance shows the new one");
+
+  // The old URL is gone at once, on every instance, for posts and GETs alike.
+  for (const base of [a.base, b.base]) {
+    const gone = await post(old, base);
+    assert.equal(gone.status, 410);
+    assert.equal(gone.body.error.code, "replaced");
+    assert.equal((await fetch(onto(old, base))).status, 410);
+  }
+  // The new one works, and reaches the same watching conversation.
+  const sent = await post(fresh, b.base);
+  assert.equal(sent.status, 202);
+  assert.equal(sent.body.matched, 1);
+  // The checked URL and its secret are the same.
+  assert.equal(codeIn(await page(a.base, "?check=github"), "url"), gh);
+  const sig = "sha256=" + createHmac("sha256", ghSecret).update("hi").digest("hex");
+  assert.equal((await post(gh, a.base, { "X-Hub-Signature-256": sig, "X-GitHub-Event": "ping" })).status, 202);
+  // Nothing was asked of Wakeshift: the subscription is the webhook's, and the webhook is the same.
+  assert.deepEqual(requests.slice(before).map((x) => x.path).filter((p) => p.startsWith("/event-subscriptions")), []);
+  assert.equal((await page()).match(/"watchers":(\[[^\]]*\])/)![1], watching, "still watching");
+  const info = ((await client.callTool({ name: "webhook_info", arguments: {} })) as any).content.map((c: any) => c.text).join("\n") as string;
+  assert.ok(info.includes(fresh) && !info.includes(old), info);
+  // The history stays, with a line saying the URL changed.
+  const recent = JSON.parse((await page()).match(/const state = (\{.*\});/)![1]).recent as any[];
+  assert.deepEqual(recent.map((x) => x.kind), ["post", "watch", "rotated", "post", "post"]);
+  // Again: the second URL goes too.
+  assert.equal((await fetch(a.base + path + "/rotate", { method: "POST", redirect: "manual" })).status, 303);
+  assert.equal((await post(fresh, a.base)).status, 410);
+  assert.equal((await post(old, a.base)).status, 410);
+  assert.equal((await post(codeIn(await page(), "url")!, a.base)).status, 202);
+});
+
+test("rotate: only the webhook's page can, from this site, a few times an hour", async (t) => {
+  const dbUrl = await testDatabase(t);
+  const a = await instance(t, dbUrl);
+  const links = new Links(secret);
+  const code = links.create();
+  const l = links.parse(code)!;
+  const open = links.token(l, "open");
+  const rotate = (p: string, headers: Record<string, string> = {}, method = "POST") => fetch(a.base + p, { method, redirect: "manual", headers }).then(async (r) => (await r.arrayBuffer(), r.status));
+  const works = async () => (await fetch(onto(`http://127.0.0.1/in/${open}`, a.base), { method: "POST", body: "x" })).status;
+  // Not with a webhook URL (a different capability), a tampered code, another server's, or a GET.
+  assert.equal(await rotate(`/in/${open}/rotate`), 404);
+  assert.equal(await rotate(`/l/${open}/rotate`), 404);
+  assert.equal(await rotate(`/l/${code.slice(0, -2)}${code.endsWith("AA") ? "AB" : "AA"}/rotate`), 404);
+  assert.equal(await rotate(`/l/${new Links(secret + "x").code(l)}/rotate`), 404);
+  assert.equal(await rotate(`/l/${code}/rotate`, {}, "GET"), 404);
+  // Not from another site's page, though it would need the code too.
+  assert.equal(await rotate(`/l/${code}/rotate`, { Origin: "https://evil.example" }), 403);
+  assert.equal(await rotate(`/l/${code}/rotate`, { "Sec-Fetch-Site": "cross-site" }), 403);
+  assert.equal(await rotate(`/l/${code}/rotate`, { "Sec-Fetch-Site": "same-site" }), 403);
+  assert.equal(await rotate(`/l/${code}/rotate`, { Origin: "null" }), 403);
+  assert.equal(await works(), 202, "none of those changed the URL");
+  // Ten an hour.
+  for (let i = 0; i < 10; i++) assert.equal(await rotate(`/l/${code}/rotate`), 303, `rotation ${i}`);
+  const r = await fetch(a.base + `/l/${code}/rotate`, { method: "POST", redirect: "manual" });
+  assert.equal(r.status, 429);
+  assert.ok(Number(r.headers.get("retry-after")) > 0);
+  assert.match(await r.text(), /new URLs this hour/);
+  assert.equal(await works(), 410);
+});
+
+test("rotate: fromThisSite takes this site's page and clients that aren't browsers", () => {
+  const req = (headers: Record<string, string>) => ({ headers }) as any;
+  assert.equal(fromThisSite(req({}), "https://try.wakeshift.ai"), true);
+  assert.equal(fromThisSite(req({ origin: "https://try.wakeshift.ai", "sec-fetch-site": "same-origin" }), "https://try.wakeshift.ai/"), true);
+  assert.equal(fromThisSite(req({ "sec-fetch-site": "none" }), "https://try.wakeshift.ai"), true);
+  assert.equal(fromThisSite(req({ origin: "https://try.wakeshift.ai.evil.example" }), "https://try.wakeshift.ai"), false);
+  assert.equal(fromThisSite(req({ origin: "http://try.wakeshift.ai" }), "https://try.wakeshift.ai"), false);
+  assert.equal(fromThisSite(req({ "sec-fetch-site": "same-site" }), "https://try.wakeshift.ai"), false);
+});
+
+test("the open tab says who can post and how often, and points to a checked URL", () => {
+  const html = linkPage("n", {
+    code: "c",
+    mcpUrl: "https://h/t/c/mcp",
+    check: "open",
+    webhookUrl: "https://h/in/t",
+    openUrl: "https://h/in/t",
+    watchers: [],
+    recent: [],
+    limits: { perHour: 60, perDay: 500, idleDays: 7 },
+  });
+  assert.ok(html.includes("Open: anyone with this URL can wake your agent, with up to 60 posts an hour (500 a day)."));
+  assert.ok(html.includes("give it a checked URL from the other tabs instead"));
+  assert.ok(html.includes('action="/l/c/rotate"') && html.includes("Get a new URL"));
+  // The other tabs have no button: the open URL is the one that's replaced.
+  const gh = linkPage("n", { code: "c", mcpUrl: "https://h/t/c/mcp", check: "github", webhookUrl: "https://h/in/g", openUrl: "https://h/in/t", secret: "s", watchers: [], recent: [], limits: { perHour: 60, perDay: 500, idleDays: 7 } });
+  assert.ok(!gh.includes("/rotate") && gh.includes("get a new one on the Open tab"));
 });
 
 // ── Restarts and many instances: everything is in the database ──────────
@@ -1156,6 +1335,38 @@ test("live view: when its database connection drops, it comes back and sends wha
   await eventually("the missed post, after reconnecting", async () => live.events.find((e) => e.preview === "two"), 8000);
   await fetch(onto(open, a.base), { method: "POST", body: "three" });
   await eventually("and the next one", async () => live.events.find((e) => e.preview === "three"));
+});
+
+test("streams: a protocol 2026-07-28 client's listen streams take the webhook's stream slots", async (t) => {
+  const { url } = await mcpFixture(t);
+  const client = new Client({ name: "goose", version: "1.0" }, { versionNegotiation: { mode: { pin: "2026-07-28" } } });
+  await client.connect(new StreamableHTTPClientTransport(new URL(url)));
+  t.after(() => client.close());
+  const open = [];
+  for (let i = 0; i < 20; i++) open.push(await client.listen({ toolsListChanged: true }, { timeout: 5000 }));
+  await assert.rejects(client.listen({ toolsListChanged: true }, { timeout: 5000 }), /Too many open streams/);
+  // Agents' streams don't take the page's: its live view still opens.
+  const stop = new AbortController();
+  t.after(async () => stop.abort());
+  assert.equal((await sse(url.replace("/t/", "/l/").replace(/\/mcp$/, "/live"), stop.signal)).status, 200);
+  await open.pop()!.close();
+  await eventually("a slot is free again", async () => (await client.listen({ toolsListChanged: true }, { timeout: 5000 }).then((s) => (open.push(s), true)).catch(() => undefined)));
+  for (const s of open) await s.close();
+});
+
+test("a protocol 2026-07-28 client's watch is recorded under the name its requests give", async (t) => {
+  const dbUrl = await testDatabase(t);
+  const calls: Call[] = [];
+  const a = await instance(t, dbUrl, { calls });
+  const made = await fetch(a.base + "/links", { method: "POST", redirect: "manual" });
+  const code = made.headers.get("location")!.slice(3);
+  const client = new Client({ name: "goose", version: "1.0" }, { versionNegotiation: { mode: { pin: "2026-07-28" } } });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${a.base}/t/${code}/mcp`)));
+  t.after(() => client.close());
+  await client.callTool({ name: "watch", arguments: {} });
+  assert.deepEqual(calls.map((c) => c.client), ["goose"]);
+  const page = await (await fetch(`${a.base}/l/${code}`)).text();
+  assert.ok(page.includes('"client":"goose"'), "the page names the client");
 });
 
 test("two instances: one MCP session, its requests alternating between them, survives a restart", async (t) => {
@@ -1350,7 +1561,7 @@ test("overload: 503 with Retry-After and a clear message, and the page stays up"
   assert.equal(((await full.json()) as any).error.code, "busy");
   // The page itself still comes up, and says how the live view recovers.
   const html = await (await fetch(a.base + path)).text();
-  assert.ok(html.includes('id="livestatus"') && html.includes("The live view is busy"));
+  assert.ok(html.includes(`id="livestatus"`) && html.includes("The live view lost its connection. Trying again in "));
 
   // The database away (or out of connections): webhooks get 503 with
   // Retry-After, pages a clear message, and the instance stays up.
@@ -1581,16 +1792,275 @@ test("streams: one webhook can't take every stream slot, nor one MCP session", a
   await third.text();
 });
 
-test("webhooks: a flood of refused posts writes only a few lines a minute", async (t) => {
-  const f = await webhookFixture(t, 3);
-  const gh = codeIn(await (await fetch(f.base + f.path + "?check=github")).text(), "url")!;
-  for (let i = 0; i < 25; i++) assert.equal((await f.post(gh, "{}", { "X-Hub-Signature-256": "sha256=00" })).status, 401);
+test("webhooks: a flood of refused posts writes only a few lines a minute, and one line for the rest", async (t) => {
+  const dbUrl = await testDatabase(t);
+  // A clock that stays mid-minute: on the real one, 25 posts can cross a minute and get more lines.
+  const clock = Math.floor(Date.now() / 60_000) * 60_000 + 30_000;
+  const a = await instance(t, dbUrl, { now: () => clock });
+  const links = new Links(secret);
+  const code = links.create();
+  const gh = onto(`http://127.0.0.1/in/${links.token(links.parse(code)!, "github")}`, a.base);
+  const stop = new AbortController();
+  t.after(async () => stop.abort());
+  const live = await sse(`${a.base}/l/${code}/live`, stop.signal);
+  for (let i = 0; i < 25; i++) assert.equal((await fetch(gh, { method: "POST", body: "{}", headers: { "X-Hub-Signature-256": "sha256=00" } })).status, 401);
+  const refused = () => live.events.filter((e) => e.kind === "refused");
+  await eventually("ten refused lines", async () => (refused().length >= 10 ? true : undefined));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(new Set(refused().map((e) => e.seq)).size, 10, "ten lines");
+  assert.equal(refused().length, 10, "each sent once");
+  assert.equal(live.events.filter((e) => e.kind === "skipped").length, 0, "not until the minute is over");
+  // The instance stopping writes what it counted.
+  await a.stop();
+  const b = await instance(t, dbUrl);
+  const html = await (await fetch(`${b.base}/l/${code}`)).text();
+  const recent = JSON.parse(html.match(/const state = (\{.*\});/)![1]).recent as any[];
+  const skipped = recent.filter((x) => x.kind === "skipped");
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].count, 15);
+  assert.deepEqual(skipped[0].codes, [401]);
+  assert.equal(recent.filter((x) => x.kind === "refused").length, 10);
+});
+
+test("webhooks: the line for unlisted posts adds up every instance's count, once a minute, and the page updates it in place", async (t) => {
+  const dbUrl = await testDatabase(t);
+  // A clock both instances share, set by the test.
+  let clock = Date.UTC(2026, 10, 2, 12, 0, 5);
+  const now = () => clock;
+  const a = await instance(t, dbUrl, { now, limits: { perHour: 2 } });
+  const b = await instance(t, dbUrl, { now, limits: { perHour: 2 } });
+  const links = new Links(secret);
+  const code = links.create(new Date(clock));
+  const l = links.parse(code)!;
+  const open = `http://127.0.0.1/in/${links.token(l, "open")}`;
+  const gh = `http://127.0.0.1/in/${links.token(l, "github")}`;
+  const stop = new AbortController();
+  t.after(async () => stop.abort());
+  const live = await sse(`${a.base}/l/${code}/live`, stop.signal);
+  const post = (url: string, base: string, body = "x", headers: Record<string, string> = {}) =>
+    fetch(onto(url, base), { method: "POST", body, headers }).then(async (r) => (await r.arrayBuffer(), r.status));
+  const bad = { "X-Hub-Signature-256": "sha256=00" };
+  // On a: 2 posts, then 12 over the limit (10 listed, 2 not) and 3 bad signatures (none listed).
+  for (let i = 0; i < 2; i++) assert.equal(await post(open, a.base), 202);
+  for (let i = 0; i < 12; i++) assert.equal(await post(open, a.base), 429);
+  for (let i = 0; i < 3; i++) assert.equal(await post(gh, a.base, "{}", bad), 401);
+  // On b: 11 bad signatures (10 listed, 1 not) and a body over 64 KB (not listed).
+  for (let i = 0; i < 11; i++) assert.equal(await post(gh, b.base, "{}", bad), 401);
+  assert.equal(await post(open, b.base, "x".repeat(70_000)), 413);
+  await eventually("the listed lines", async () => (live.events.filter((e) => e.kind === "limited" || e.kind === "refused").length >= 20 ? true : undefined));
+  // The minute ends. The next refused post on a writes a's count for the
+  // minute before; b's comes when it stops, into the same line.
+  clock += 60_000;
+  assert.equal(await post(gh, a.base, "{}", bad), 401);
+  const first = await eventually("a's count", async () => live.events.find((e) => e.kind === "skipped"));
+  assert.equal(first.count, 5);
+  assert.deepEqual(first.codes, [401, 429]);
+  assert.equal(first.minute, new Date(Date.UTC(2026, 10, 2, 12, 0)).toISOString());
+  await b.stop();
+  const merged = await eventually("b's count added", async () => live.events.find((e) => e.kind === "skipped" && e.count === 7));
+  assert.equal(merged.seq, first.seq, "the same line");
+  assert.deepEqual(merged.codes, [401, 413, 429]);
+  // One line in what's kept, with the total.
+  const db = openDb(t, dbUrl);
+  const rows = (await new State(db, { perHour: 2, perDay: 100, globalPerHour: 1000 }).recent(l.hook)).filter((x) => x.kind === "skipped");
+  assert.deepEqual(rows.map((x) => [x.seq, x.count]), [[first.seq, 7]]);
+  // Nothing more to write for that minute: a stopping writes nothing new.
+  await a.stop();
+  assert.deepEqual((await db.query("SELECT n FROM skipped")).rows.map((r) => r.n), [7]);
+});
+
+test("webhooks: the line for unlisted posts is written when the minute ends, without another post", async (t) => {
+  const dbUrl = await testDatabase(t);
+  // A clock 2 seconds before a minute ends.
+  const offset = 60_000 - (Date.now() % 60_000) - 2000;
+  const a = await instance(t, dbUrl, { now: () => Date.now() + offset });
+  const links = new Links(secret);
+  const code = links.create();
+  const gh = onto(`http://127.0.0.1/in/${links.token(links.parse(code)!, "github")}`, a.base);
+  const stop = new AbortController();
+  t.after(async () => stop.abort());
+  const live = await sse(`${a.base}/l/${code}/live`, stop.signal);
+  const sent = await Promise.all(Array.from({ length: 12 }, () => fetch(gh, { method: "POST", body: "{}", headers: { "X-Hub-Signature-256": "sha256=00" } }).then((r) => r.status)));
+  assert.deepEqual([...new Set(sent)], [401]);
+  const line = await eventually("the line", async () => live.events.find((e) => e.kind === "skipped"), 6000);
+  assert.equal(line.count, 2);
+});
+
+test("the page's line for unlisted posts says how many, and what they were answered with", () => {
+  assert.equal(
+    skippedText(57, [401, 413, 429], "14:03"),
+    "…and 57 more refused or rate-limited posts in the minute from 14:03 weren't listed one by one; each was answered with 401, 413 or 429.",
+  );
+  assert.equal(skippedText(1, [429], "14:03"), "…and 1 more rate-limited post in the minute from 14:03 wasn't listed on its own; it was answered with 429.");
+  assert.equal(skippedText(3, [401], "9:15 AM"), "…and 3 more refused posts in the minute from 9:15 AM weren't listed one by one; each was answered with 401.");
+  const html = linkPage("n", {
+    code: "c",
+    mcpUrl: "https://h/t/c/mcp",
+    check: "open",
+    webhookUrl: "https://h/in/t",
+    openUrl: "https://h/in/t",
+    watchers: [],
+    recent: [],
+    limits: { perHour: 60, perDay: 500, idleDays: 7 },
+  });
+  assert.ok(html.includes("const skippedText = function skippedText(n, codes, from)"), "the function's source");
+});
+
+// ── The page's live view: it recovers, and catches up ─────────────────────
+
+// A fake EventSource and clock for liveConnection.
+function liveHarness(newest = 0, random = 0.5) {
+  const opened: { after: number; es: any }[] = [];
+  const timers: { fn: () => void; ms: number; cleared: boolean }[] = [];
+  const shown: (string | undefined)[] = [];
+  const lines: any[] = [];
+  let seq = newest;
+  const conn = liveConnection({
+    open: (after) => {
+      const es = { readyState: 0, onopen: null as any, onmessage: null as any, onerror: null as any, closed: false, close() { this.closed = true; this.readyState = 2; } };
+      opened.push({ after, es });
+      return es;
+    },
+    closed: 2,
+    line: (a) => { lines.push(a); seq = Math.max(seq, a.seq); },
+    newest: () => seq,
+    status: (text) => shown.push(text),
+    setTimeout: (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; },
+    clearTimeout: (t) => { t.cleared = true; },
+    random: () => random,
+  });
+  const last = () => opened[opened.length - 1].es;
+  // The server refuses (429, 503): EventSource gives up.
+  const refuse = () => { last().readyState = 2; last().onerror(); };
+  const fire = () => { const t = timers[timers.length - 1]; assert.ok(!t.cleared); t.fn(); };
+  return { conn, opened, timers, shown, lines, last, refuse, fire };
+}
+
+test("live view: after the server refuses it, it tries again soon, never more than 30 seconds apart, and starts over once it's back", () => {
+  const h = liveHarness(7);
+  assert.equal(h.opened.length, 1);
+  assert.equal(h.opened[0].after, 7, "from the newest line the page has");
+  // A dropped stream EventSource reconnects by itself: nothing to do.
+  h.last().readyState = 0;
+  h.last().onerror();
+  assert.equal(h.timers.length, 0);
+  // Refused again and again: 2, 4, 8, 16, then 30 seconds at most.
+  const waits = [];
+  for (let i = 0; i < 7; i++) {
+    h.refuse();
+    assert.ok(h.last().closed, "the refused one is closed");
+    waits.push(h.timers[h.timers.length - 1].ms / 1000);
+    assert.equal(h.shown[h.shown.length - 1], `The live view lost its connection. Trying again in ${waits[waits.length - 1]} seconds; posts still reach your agent.`);
+    h.fire();
+  }
+  assert.deepEqual(waits, [2, 4, 8, 16, 30, 30, 30]);
+  // Back: the line goes, and lines that came meanwhile are asked for after the newest.
+  h.last().onopen();
+  assert.equal(h.shown[h.shown.length - 1], undefined);
+  h.last().onmessage({ data: JSON.stringify({ seq: 12, kind: "post" }) });
+  assert.equal(h.lines[0].seq, 12);
+  h.refuse();
+  assert.equal(h.timers[h.timers.length - 1].ms, 2000, "the wait starts over");
+  h.fire();
+  assert.equal(h.opened[h.opened.length - 1].after, 12);
+});
+
+test("live view: retryNow connects at once while it's waiting, and does nothing while it's connected", () => {
+  const h = liveHarness();
+  h.conn.retryNow();
+  assert.equal(h.opened.length, 1, "connected (or connecting): nothing to do");
+  h.refuse();
+  h.fire();
+  h.refuse();
+  assert.equal(h.timers[h.timers.length - 1].ms, 4000);
+  h.conn.retryNow();
+  assert.ok(h.timers[h.timers.length - 1].cleared, "the timer is dropped");
+  assert.equal(h.opened.length, 3, "connected at once");
+  h.conn.retryNow();
+  assert.equal(h.opened.length, 3);
+});
+
+test("live view: the wait is randomized a little, so pages don't all come back at once, and stays within 30 seconds", () => {
+  for (const [r, expect] of [[0, [2, 3, 6, 13, 24, 24]], [0.999, [2, 5, 10, 19, 30, 30]]] as const) {
+    const h = liveHarness(0, r);
+    const waits = [];
+    for (let i = 0; i < 6; i++) {
+      h.refuse();
+      waits.push(h.timers[h.timers.length - 1].ms / 1000);
+      h.fire();
+    }
+    assert.deepEqual(waits, expect, `random ${r}`);
+  }
+});
+
+test("live view: the page runs liveConnection, and asks for what came after its newest line", () => {
+  const html = linkPage("n", {
+    code: "c",
+    mcpUrl: "https://h/t/c/mcp",
+    check: "open",
+    webhookUrl: "https://h/in/t",
+    openUrl: "https://h/in/t",
+    watchers: [],
+    recent: [],
+    limits: { perHour: 60, perDay: 500, idleDays: 7 },
+  });
+  assert.ok(html.includes("const liveConnection = function liveConnection(d)"), "the function's source");
+  assert.ok(html.includes('"?after=" + after'));
+  assert.ok(html.includes("live$.retryNow()"));
+});
+
+test("live view: a new connection gets the lines after the cursor (after=, or Last-Event-ID), each with its seq as its ID", async (t) => {
+  const f = await webhookFixture(t, 10);
+  for (let i = 0; i < 4; i++) assert.equal((await f.post(f.open, `{"n":${i}}`)).status, 202);
+  const read = async (q: string, headers: Record<string, string> = {}) => {
+    const stop = new AbortController();
+    const r = await fetch(`${f.base}${f.path}/live${q}`, { headers, signal: stop.signal });
+    assert.equal(r.status, 200);
+    let text = "";
+    const reader = r.body!.getReader();
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline) {
+      const chunk = await Promise.race([reader.read(), new Promise<null>((ok) => setTimeout(() => ok(null), 300))]);
+      if (!chunk || chunk.done) break;
+      text += new TextDecoder().decode(chunk.value);
+    }
+    stop.abort();
+    const events = text.split("\n\n").filter((e) => e.includes("data: "));
+    return events.map((e) => ({ id: e.match(/^id: (\d+)$/m)?.[1], a: JSON.parse(e.match(/^data: (.*)$/m)![1]) }));
+  };
+  const all = await read("");
+  assert.equal(all.length, 4);
+  assert.deepEqual(all.map((e) => e.id), all.map((e) => String(e.a.seq)));
+  const second = all[1].a.seq;
+  assert.deepEqual((await read(`?after=${second}`)).map((e) => e.a.seq), [all[2].a.seq, all[3].a.seq]);
+  assert.deepEqual((await read("", { "Last-Event-ID": String(all[2].a.seq) })).map((e) => e.a.seq), [all[3].a.seq]);
+  assert.deepEqual((await read(`?after=${all[3].a.seq}`)).map((e) => e.a.seq), []);
+  // Not a seq: the recent lines, as before.
+  assert.equal((await read("?after=nope")).length, 4);
+});
+
+test("live view: a line both replayed and notified is sent once", async (t) => {
+  const f = await webhookFixture(t, 10);
+  for (let i = 0; i < 3; i++) assert.equal((await f.post(f.open, `{"n":${i}}`)).status, 202);
   const stop = new AbortController();
   t.after(async () => stop.abort());
   const live = await sse(`${f.base}${f.path}/live`, stop.signal);
-  await eventually("ten refused lines", async () => (live.events.filter((e) => e.kind === "refused").length >= 10 ? true : undefined));
+  await eventually("the replay", async () => (live.events.length === 3 ? true : undefined));
+  // The notification for a replayed line arriving late (as for a line
+  // recorded while the stream was replaying), then a new line.
+  const hook = new Links(secret).parse(f.code)!.hook;
+  const notifier = new pg.Client({ connectionString: f.dbUrl });
+  notifier.on("error", () => {}); // dropped with the database at the end
+  await notifier.connect();
+  t.after(() => notifier.end());
+  const { seq, ...line } = live.events[0];
+  await notifier.query("SELECT pg_notify($1, $2)", [`try_${hook}`, `${seq} ${JSON.stringify(line)}`]);
+  assert.equal((await f.post(f.open, `{"n":3}`)).status, 202);
+  await eventually("the new line", async () => (live.events.length >= 4 ? true : undefined));
   await new Promise((r) => setTimeout(r, 300));
-  assert.equal(live.events.filter((e) => e.kind === "refused").length, 10);
+  const seqs = live.events.map((e) => e.seq);
+  assert.deepEqual(seqs, [...new Set(seqs)], "no line twice");
+  assert.equal(seqs.length, 4);
 });
 
 test("live view: a client that doesn't keep up is dropped", () => {

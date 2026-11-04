@@ -16,7 +16,8 @@
     "test": "tsc -p tsconfig.json && node --test --test-concurrency=1 'dist/test/unit.test.js' 'dist/test/live.test.js' 'dist/test/layout.test.js' 'dist/test/house.test.js' 'dist/test/tools.test.js' 'dist/test/authorize.test.js' 'dist/test/analytics.test.js' 'dist/test/boot.test.js' 'dist/test/joins.test.js'"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
     "@resvg/resvg-js": "^2.6.2",
     "@types/pg": "^8.23.1",
     "@wakeshift/sdk": "file:../third_party/wakeshift-node",
@@ -24,6 +25,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
     "@types/node": "^26.6.6",
     "typescript": "^5.9.3"
   }

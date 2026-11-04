@@ -1,17 +1,24 @@
 {
   "name": "@wakeshift/sdk",
-  "version": "0.5.2",
+  "version": "0.10.2",
   "description": "Let agents subscribe to things in your app: Wakeshift wakes them when you emit an event.",
   "license": "Apache-2.0",
   "author": "Clawvisor Inc. <support@wakeshift.ai>",
   "keywords": [
     "mcp",
     "model-context-protocol",
+    "mcp-events",
     "ai-agents",
     "agents",
+    "claude-code",
+    "codex",
+    "cursor",
     "events",
     "webhooks",
-    "wakeshift"
+    "notifications",
+    "wakeshift",
+    "mastra",
+    "xmcp"
   ],
   "homepage": "https://github.com/wakeshift/wakeshift-node#readme",
   "repository": {
@@ -28,6 +35,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./mastra": {
+      "types": "./dist/mastra.d.ts",
+      "import": "./dist/mastra.js"
+    },
+    "./xmcp": {
+      "types": "./dist/xmcp.d.ts",
+      "import": "./dist/xmcp.js"
     }
   },
   "files": [
@@ -42,19 +57,40 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "test": "tsc -p tsconfig.test.json && node --test 'build-test/test/*.test.js' && npm run examples",
     "examples": "node scripts/check-examples.mjs",
     "prepack": "npm run build",
-    "pack-check": "sh scripts/pack-check.sh"
+    "pack-check": "sh scripts/pack-check.sh",
+    "test:v2": "tsc -p tsconfig.test.json && WAKESHIFT_TEST_MCP=v2 node --test 'build-test/test/*.test.js'"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.23.0",
-    "zod": "^3.25.0 || ^4.0.0"
+    "@modelcontextprotocol/server": "^2.3.0",
+    "zod": "^3.25.0 || ^4.0.0",
+    "@mastra/mcp": "^2.7.0",
+    "xmcp": "^1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    },
+    "@modelcontextprotocol/server": {
+      "optional": true
+    },
+    "@mastra/mcp": {
+      "optional": true
+    },
+    "xmcp": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@modelcontextprotocol/node": "^2.1.2",
     "@modelcontextprotocol/sdk": "^1.32.1",
+    "@modelcontextprotocol/server": "^2.4.0",
     "@types/node": "^22.20.5",
     "expect-type": "^1.4.0",
     "typescript": "^7.0.2",

@@ -27,30 +27,33 @@ type joinIn struct {
 // mcp-tasks-wire.json (with the TypeScript and Python SDKs): what Wrap
 // serves a client on protocol 2026-07-28 that takes MCP tasks, in front of
 // a real stateless go-sdk handler, and what it asks Wakeshift.
+// tasksWire is mcp-tasks-wire.json.
+type tasksWire struct {
+	Extension   string         `json:"extension"`
+	HoldSeconds int            `json:"hold_seconds"`
+	WaitTool    map[string]any `json:"wait_tool"`
+	Lists       []struct {
+		Name     string         `json:"name"`
+		Meta     map[string]any `json:"meta"`
+		WaitTool bool           `json:"wait_tool"`
+	} `json:"lists"`
+	Cases []struct {
+		Name         string          `json:"name"`
+		Method       string          `json:"method"`
+		Params       map[string]any  `json:"params"`
+		CorePath     string          `json:"core_path"`
+		CoreRequest  map[string]any  `json:"core_request"`
+		CoreResponse json.RawMessage `json:"core_response"`
+		Result       map[string]any  `json:"result"`
+		Error        *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	} `json:"cases"`
+}
+
 func TestMCPTasksWireGolden(t *testing.T) {
-	var g struct {
-		Extension   string         `json:"extension"`
-		HoldSeconds int            `json:"hold_seconds"`
-		WaitTool    map[string]any `json:"wait_tool"`
-		Lists       []struct {
-			Name     string         `json:"name"`
-			Meta     map[string]any `json:"meta"`
-			WaitTool bool           `json:"wait_tool"`
-		} `json:"lists"`
-		Cases []struct {
-			Name         string          `json:"name"`
-			Method       string          `json:"method"`
-			Params       map[string]any  `json:"params"`
-			CorePath     string          `json:"core_path"`
-			CoreRequest  map[string]any  `json:"core_request"`
-			CoreResponse json.RawMessage `json:"core_response"`
-			Result       map[string]any  `json:"result"`
-			Error        *struct {
-				Code    int    `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
-		} `json:"cases"`
-	}
+	var g tasksWire
 	readSharedFixture(t, "mcp-tasks-wire.json", &g)
 	if g.Extension != TasksExtension || g.HoldSeconds != taskHoldSeconds || g.WaitTool["name"] != harnesses.WaitTool || g.WaitTool["description"] != harnesses.WaitToolDescription {
 		t.Fatalf("constants: %v %v %v", g.Extension, g.HoldSeconds, g.WaitTool["name"])
@@ -58,6 +61,18 @@ func TestMCPTasksWireGolden(t *testing.T) {
 	if !jsonEqual(g.WaitTool, plainJSON(t, waitToolDefinition())) {
 		t.Errorf("the wait tool\n got %v\nwant %v", waitToolDefinition(), g.WaitTool)
 	}
+	// With AttachOptions.Wait, the golden file's exchanges; without it (the
+	// default), none of the task path, and no call says it takes tasks.
+	for _, wait := range []bool{true, false} {
+		name := "wait"
+		if !wait {
+			name = "no wait"
+		}
+		t.Run(name, func(t *testing.T) { testTasksWire(t, wait, g) })
+	}
+}
+
+func testTasksWire(t *testing.T, wait bool, g tasksWire) {
 
 	var mu sync.Mutex
 	asked := map[string]map[string]any{}
@@ -84,7 +99,7 @@ func TestMCPTasksWireGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "chat", Version: "1"}, nil)
-	attached := app.Attach(srv, AttachOptions{
+	attached := app.Attach(srv, AttachOptions{Tools: Tools{Wait: Wait{Enabled: wait}},
 		Identify: func(_ context.Context, ti *auth.TokenInfo) (Identity, error) { return Identity{User: ti.UserID}, nil }})
 	mcp.AddTool(srv, &mcp.Tool{Name: "join", Description: "Join"}, Events(attached,
 		func(context.Context, *ToolCall, joinIn) (*mcp.CallToolResult, any, error) {
@@ -136,7 +151,7 @@ func TestMCPTasksWireGolden(t *testing.T) {
 	d := send("server/discover", map[string]any{"_meta": g.Lists[0].Meta})
 	caps, _ := d.Result["capabilities"].(map[string]any)
 	ext, _ := caps["extensions"].(map[string]any)
-	if v, ok := ext[TasksExtension]; !ok || !reflect.DeepEqual(v, map[string]any{}) {
+	if v, ok := ext[TasksExtension]; wait && (!ok || !reflect.DeepEqual(v, map[string]any{})) || !wait && (ok || ext["io.modelcontextprotocol/events"] == nil) {
 		t.Errorf("server/discover: %v %+v", d.Result, d.Error)
 	}
 	for _, l := range g.Lists {
@@ -148,7 +163,7 @@ func TestMCPTasksWireGolden(t *testing.T) {
 				found = m
 			}
 		}
-		if (found != nil) != l.WaitTool {
+		if (found != nil) != (l.WaitTool && wait) {
 			t.Errorf("tools/list: %s: wait tool %v (%+v)", l.Name, found != nil, res.Error)
 		}
 		if found != nil && !reflect.DeepEqual(found, g.WaitTool) {
@@ -165,6 +180,28 @@ func TestMCPTasksWireGolden(t *testing.T) {
 		mu.Lock()
 		body, ok := asked[c.CorePath]
 		mu.Unlock()
+		if !wait {
+			// The wait tool's call and Wakeshift's task requests go on to
+			// go-sdk (which knows neither); a wrapped tool's call never says
+			// it takes tasks.
+			if strings.HasPrefix(c.CorePath, "/calls/task") {
+				if ok {
+					t.Errorf("%s: asked Wakeshift %s without Wait", c.Name, c.CorePath)
+				}
+				if res.Error == nil && res.Result["isError"] != true {
+					t.Errorf("%s: answered without Wait: %v", c.Name, res.Result)
+				}
+				continue
+			}
+			if !ok {
+				t.Errorf("%s: didn't ask %s (asked %v)", c.Name, c.CorePath, asked)
+				continue
+			}
+			if call, _ := body["call"].(map[string]any); call == nil || call["tasks"] != nil {
+				t.Errorf("%s: without Wait, the call says it takes tasks: %v", c.Name, body)
+			}
+			continue
+		}
 		if !ok {
 			t.Errorf("%s: didn't ask %s (asked %v; %+v %+v)", c.Name, c.CorePath, asked, res.Result, res.Error)
 			continue

@@ -115,7 +115,7 @@ func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
 				out["note"] = note
 			}
 			return nil, out, nil
-		}))
+		}, appkit.Subscribes(a.notifications())))
 
 	mcp.AddTool(srv, &mcp.Tool{Name: "join", Description: "Join a channel as this conversation (pass session_key, from the watch tool), to read and post in it. Once you've called watch, every message in it wakes you (wake=all, the default); with wake=mentions, only @-mentions of you do. " +
 		"Any of your orgs' channels can be joined; a channel outside orgs needs an invite code from its owner the first time. You don't need to join dm, your direct messages with your user: it's always on."},
@@ -156,7 +156,7 @@ func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
 			}
 			out, err := a.joined(ctx, call, me, c, session, handle, wake)
 			return nil, out, err
-		}))
+		}, appkit.Subscribes(a.notifications())))
 
 	mcp.AddTool(srv, &mcp.Tool{Name: "leave", Description: "Leave a channel (this conversation's membership: pass session_key; without one, every one of yours). dm, your direct messages with your user, can't be left."},
 		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in leaveIn) (*mcp.CallToolResult, map[string]any, error) {

@@ -22,7 +22,10 @@ const followTTL = 24 * time.Hour
 
 // View is a game as one player's operator sees it.
 type View struct {
-	Game    string       `json:"game"`
+	Game string `json:"game"`
+	// GameNo is the game a table that plays game after game is on
+	// (Game.GameNo): 0 for other games, and before a table's first.
+	GameNo  int          `json:"game_no,omitempty"`
 	Status  string       `json:"status"` // "voting · 41s left"
 	You     []Line       `json:"you"`    // what the player knows: its role, what it learned
 	Players []ViewPlayer `json:"players"`
@@ -209,7 +212,7 @@ func (s *Server) followTable(w http.ResponseWriter, r *http.Request, t followTok
 			pics[p.Handle] = p.Avatar
 		}
 	}
-	data := map[string]any{"V": v, "Pics": pics, "Title": "Game " + v.Game, "Follow": true, "State": r.URL.Path + "/state"}
+	data := map[string]any{"V": v, "Pics": pics, "Title": s.roomName() + " " + v.Game, "Follow": true, "State": r.URL.Path + "/state"}
 	if err := s.table(data, v); err != nil {
 		slog.Error(s.Name+": a game's table", "err", err)
 		http.Error(w, "Something went wrong.", http.StatusInternalServerError)

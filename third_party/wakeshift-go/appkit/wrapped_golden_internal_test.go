@@ -3,6 +3,7 @@ package appkit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -161,6 +162,11 @@ func TestEmitRecipientsGolden(t *testing.T) {
 			Response json.RawMessage `json:"response"`
 			Emitted  json.RawMessage `json:"emitted"`
 		} `json:"responses"`
+		IDReused struct {
+			Status  int    `json:"status"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"id_reused"`
 		Refused []struct {
 			Name string            `json:"name"`
 			To   []json.RawMessage `json:"to"`
@@ -305,6 +311,29 @@ func TestEmitRecipientsGolden(t *testing.T) {
 			gb, _ := json.Marshal(got)
 			t.Errorf("%s: emitted %s, want %s", c.Name, gb, c.Emitted)
 		}
+	}
+	// An id used for a different emit: an *APIError that errors.Is
+	// ErrIDReused.
+	reusedApp, _ := testApp(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/events/emit") {
+			w.WriteHeader(f.IDReused.Status)
+			json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": f.IDReused.Code, "message": f.IDReused.Message}})
+			return
+		}
+		io.WriteString(w, `{}`)
+	}))
+	reusedEv, err := DefineEvent(reusedApp, "t.turn", EventDef[internalArgs, internalArgs]{Description: "E.", Personal: true, Text: func(internalArgs, internalArgs) string { return "" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = reusedEv.Emit(ctx, internalArgs{Table: "oak"}, internalArgs{}, To("u1"), WithID("m1"))
+	var apiErr *APIError
+	if !errors.Is(err, ErrIDReused) || !errors.As(err, &apiErr) || apiErr.Status != f.IDReused.Status || apiErr.Code != f.IDReused.Code || apiErr.Message != f.IDReused.Message {
+		t.Errorf("id reused: %v", err)
+	}
+	if errors.Is(badArguments("x"), ErrIDReused) {
+		t.Error("another APIError is ErrIDReused")
 	}
 	mu.Lock()
 	emits := len(bodies["/events/emit"])

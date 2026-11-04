@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"slices"
 	"time"
 
@@ -105,6 +106,18 @@ type Game struct {
 	Deadline time.Time `json:"deadline,omitzero"`
 	// Open is whether the game takes players (Join).
 	Open bool `json:"open"`
+	// Seating is whether a game that's playing seats joiners for its next
+	// game (a table that plays game after game: the game seats them as
+	// it likes). Matchmaking takes a game that's Open or Seating; kept
+	// apart from Open so that a revision from before tables, which reads
+	// only open, never seats a player into a game under way.
+	Seating bool `json:"seating,omitempty"`
+	// GameNo, for a game app whose rooms are tables that play game after
+	// game (Nightfall's, Secret Agent's), is the number of the game the
+	// table is on: 1 for its first, 0 until that starts. The table's
+	// public listing counts it as playing from its first game on, even
+	// while it waits for players again.
+	GameNo int `json:"game_no,omitempty"`
 
 	pending []Entry // announcements, written when the move commits
 	end     time.Duration
@@ -119,11 +132,29 @@ func (g *Game) Announce(subject, body string, mentions []string) {
 	g.pending = append(g.pending, Entry{From: "", Subject: subject, Text: body, Mentions: mentions})
 }
 
+// Why a table that plays game after game closed (TableClosed).
+const (
+	ClosedNeverFilled = "never_filled"     // a new table never had enough players for its first game
+	ClosedShort       = "short_of_players" // a table that's played didn't get enough back in time
+	ClosedEmpty       = "empty"            // everyone left
+)
+
+// TableClosed logs, once the move commits, that table g closed: the game,
+// the table's ID, why (ClosedNeverFilled, ClosedShort, ClosedEmpty), how
+// many games it played, and how long it had been waiting for players (0 if
+// it wasn't). Nothing about its players.
+func (s *Server) TableClosed(tx *Tx, g *Game, why string, waited time.Duration) {
+	name, id, played := s.Name, g.ID, g.GameNo
+	tx.AfterCommit(func() {
+		slog.Info(name+": table closed", "game", name, "table", id, "reason", why, "games_played", played, "waited_s", int64(max(waited, 0).Seconds()))
+	})
+}
+
 // End ends the game: it takes no more moves from the ticker, and its room
 // closes after linger (the game stays readable for a while longer, for the
 // follow-along page).
 func (g *Game) End(linger time.Duration) {
-	g.Open, g.ended, g.end = false, true, linger
+	g.Open, g.Seating, g.ended, g.end = false, false, true, linger
 }
 
 // Ended reports whether End was called in this move.
@@ -165,7 +196,23 @@ type Tx struct {
 	// while a game is locked.
 	Away map[string]bool
 
-	said bool // a player said something (Say): sent once this commits
+	said  bool     // a player said something (Say): sent once this commits
+	after []func() // AfterCommit's
+}
+
+// AfterCommit runs f once the move's transaction commits, and not if it
+// doesn't: for a log line about what the move did.
+func (tx *Tx) AfterCommit(f func()) { tx.after = append(tx.after, f) }
+
+// Committed runs what AfterCommit queued, once. The kit calls it when a
+// move commits; a test that runs a game's moves without the kit calls it
+// itself.
+func (tx *Tx) Committed() {
+	after := tx.after
+	tx.after = nil
+	for _, f := range after {
+		f()
+	}
 }
 
 // Recent is what each of players has had lately of kind.
@@ -277,6 +324,7 @@ func (s *Server) Update(ctx context.Context, id string, away map[string]bool, fn
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	tx.Committed()
 	if announced {
 		s.deliver(ctx, id)
 	}
@@ -306,7 +354,7 @@ func (s *Server) save(tx *Tx, g State, alreadyEnded bool) error {
 		// Once a game has ended, the kit's lifecycle owns its deadline.
 		_, err = tx.Exec(tx.Ctx, `UPDATE games SET phase = $2, open = $3 AND ended_at IS NULL, state = $4,
 			deadline_at = CASE WHEN ended_at IS NULL THEN $5 ELSE deadline_at END, updated_at = $6 WHERE id = $1`,
-			b.ID, b.Phase, b.Open, state, deadline, tx.Now)
+			b.ID, b.Phase, b.Open || b.Seating, state, deadline, tx.Now)
 	}
 	if err != nil {
 		return err
@@ -395,7 +443,8 @@ type reservation struct {
 }
 
 // reserve finds the player's current game, or reserves a seat in the
-// oldest open game with one free (making a game if there's none). A game
+// oldest open game with one free (making a game if there's none), those in
+// PreferPhases first. A game
 // never seats two players of one workspace: one person's agents (or
 // conversations) would pool what each is told. Workspaces in SharedSeats
 // are exempt, for demos. It holds
@@ -430,7 +479,7 @@ func (s *Server) reserve(ctx context.Context, workspace, agent, session string) 
 	err = tx.QueryRow(ctx, `SELECT id, names FROM games g WHERE open AND ended_at IS NULL
 		AND (SELECT count(*) FROM seats s WHERE s.game_id = g.id AND (s.handle IS NOT NULL OR s.reserved_at > $1)) < g.max_seats
 		AND ($3 OR NOT EXISTS (SELECT 1 FROM seats s WHERE s.game_id = g.id AND s.workspace = $2 AND (s.handle IS NOT NULL OR s.reserved_at > $1)))
-		ORDER BY created_at LIMIT 1`, stale, workspace, s.SharedSeats[workspace]).Scan(&r.game, &names)
+		ORDER BY phase = ANY($4::text[]) DESC, created_at LIMIT 1`, stale, workspace, s.SharedSeats[workspace], nonNil(s.PreferPhases)).Scan(&r.game, &names)
 	if errors.Is(err, pgx.ErrNoRows) {
 		r.game, err = s.newGame(tx)
 	}

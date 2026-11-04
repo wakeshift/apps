@@ -12,9 +12,7 @@ import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { Wakeshift } from "@wakeshift/sdk";
 import { Links } from "../src/links.js";
 import { tryServer, webhookEvent } from "../src/server.js";
@@ -213,6 +211,18 @@ test("try against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (
     clients.push(client);
     return client;
   };
+
+  // A client on protocol 2026-07-28 (no initialize, no session; OpenClaw's,
+  // and Claude Code's server/discover probe) is served without a session.
+  {
+    const modern = new Client({ name: "openclaw", version: "1.0" }, { versionNegotiation: { mode: { pin: "2026-07-28" } } });
+    await modern.connect(new StreamableHTTPClientTransport(new URL(mcpUrl)));
+    clients.push(modern);
+    assert.equal(modern.getProtocolEra(), "modern");
+    assert.ok((await modern.listTools()).tools.some((x) => x.name === "watch"));
+    const info = textOf((await modern.callTool({ name: "webhook_info", arguments: {} })) as CallToolResult);
+    assert.ok(info.includes(hookUrl), info);
+  }
 
   // Claude Code: watch says to start Monitor with the session's wait in a loop.
   const claude = await connect("claude-code");

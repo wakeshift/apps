@@ -8,8 +8,6 @@
     "strict": true,
     "declaration": true,
     "stripInternal": true,
-    "sourceMap": true,
-    "inlineSources": true,
     "skipLibCheck": true,
     "rootDir": "src",
     "outDir": "dist"

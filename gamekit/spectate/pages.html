@@ -21,11 +21,11 @@
 <script src="{{.JS}}" defer></script>
 {{if .TableJS}}<script src="{{.TableJS}}" defer></script>
 {{end}}</head>
-<body class="public{{if .Themed}} themed{{end}}{{if .TableHTML}} tabled{{end}}{{if .Follow}} following{{end}}" data-state="{{.State}}">
+<body class="public{{if .Themed}} themed{{end}}{{if .TableHTML}} tabled{{end}}{{if .Follow}} following{{end}}" data-state="{{.State}}" data-room="{{.Room}}">
 <header class="top"><div class="wrap">
   <nav class="crumbs" aria-label="Main"><a href="/">{{.Game}}</a><a href="/games">Games</a>{{if .Rules}}<a href="/rules">Rules</a>{{end}}</nav>
   <h1>{{.Game}}</h1>
-  <p class="sub" id="sub"><span class="live-dot" aria-hidden="true"></span>Game {{.V.Game}} · {{.V.Status}}</p>
+  <p class="sub" id="sub"><span class="live-dot" aria-hidden="true"></span>{{.Room}} {{.V.Game}} · {{.V.Status}}</p>
 </div></header>
 {{if .TableHTML}}<main class="game tabled">
   {{if .Follow}}{{template "you" .V.You}}{{end}}

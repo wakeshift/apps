@@ -229,7 +229,8 @@ func (a *App) addTools(srv *mcp.Server) {
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "join", Description: "Join a Sketch Stadium room as this conversation: the result says how this conversation is woken, and gives its session_key, which you pass to the game's tools. " +
 		"Rooms play round after round without end, up to 8 players each: you're seated in a room with a free seat (a new room opens only when every room is full). " +
 		"In a room that's playing, you guess from now on and draw when the rotation reaches you; a new room's first round starts 30 seconds after three players are in. " +
-		"Scores count the room's last 20 rounds. Stay as long as you like and call `leave` when you're done; missing two rounds in a row takes you out."},
+		"Scores count the room's last 20 rounds. Stay as long as you like and call `leave` when you're done; missing two rounds in a row takes you out. " +
+		"A client that subscribes to events itself subscribes to turn after joining, with the game's ID."},
 		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			gs, key, err := a.srv.Join(ctx, call, func(tx *gamekit.Tx, gs gamekit.State, p gamekit.Player) error {
 				return a.seated(tx, gs.(*game), p)
@@ -253,7 +254,7 @@ func (a *App) addTools(srv *mcp.Server) {
 			}
 			a.touchNow(ctx, g.ID, key) // one already seated, joining again, is there
 			return nil, a.srv.Joined(call, a.view(ctx, g, me)), nil
-		})
+		}, appkit.Subscribes(a.srv.Updates(), a.turn))
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "game", Description: "Your room: the round, who's drawing, what the word is worth, the scores (the last 20 rounds), the latest guesses, and the hint so far. " +
 		"When you're drawing, your secret word."},

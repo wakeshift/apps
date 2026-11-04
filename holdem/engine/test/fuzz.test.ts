@@ -112,10 +112,15 @@ function play(tableSeed: number, hands: number): { hands: number; actions: numbe
       assert.ok(who, "an unfinished hand with nobody to act");
       const legal = legalActions(s, who.player);
       assert.ok(legal, "the player to act has no choices");
-      // Mid-hand, folded players sometimes leave, and newcomers sit down.
+      // Mid-hand, folded players sometimes leave (and some sit straight
+      // back down), and newcomers sit down.
       if (rand() < 0.02) {
         const folded = s.hand!.players.find((p) => p.folded && !p.left);
-        if (folded) s = leave(s, folded.player).state;
+        if (folded) {
+          s = leave(s, folded.player).state;
+          const free = s.seats.flatMap((x, i) => (x ? [] : [i]));
+          if (rand() < 0.5 && free.length) s = sit(s, free[Math.floor(rand() * free.length)]!, folded.player, s.config.minBuyIn);
+        }
       }
       if (rand() < 0.01) seatSomeone();
       const a = randomAction(s, rand);

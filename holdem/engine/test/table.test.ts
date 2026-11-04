@@ -372,7 +372,7 @@ test("leaving: not while live in a hand; after folding, paid out at once", () =>
   assert.deepEqual(s.ledger, { in: 350, out: 100 });
 });
 
-test("names: a safe charset, no special object keys, and not reused within a hand", () => {
+test("names: a safe charset and no special object keys; one who folded and left may sit again mid-hand", () => {
   let s = createTable(CONFIG);
   for (const bad of ["", "__proto__", "constructor", "has space", "x".repeat(65), "<b>", "a\nb"])
     assert.throws(() => sit(s, 0, bad, 100), engineError("bad_name"), JSON.stringify(bad));
@@ -382,12 +382,28 @@ test("names: a safe charset, no special object keys, and not reused within a han
   s = start(s);
   s = go(s, "ws:ada@claude-code", "fold");
   s = leave(s, "ws:ada@claude-code").state;
-  // The name is still in this hand's records: someone else can't take it until the hand ends.
-  assert.throws(() => sit(s, 0, "ws:ada@claude-code", 100), engineError("already_seated"));
+  // Folded and left: they may sit again at once, dealt in from the next hand.
+  s = sit(s, 4, "ws:ada@claude-code", 100);
+  checkInvariants(s);
+  assert.throws(() => sit(s, 5, "ws:ada@claude-code", 100), engineError("already_seated"));
+  assert.equal(toAct(s)?.player, "bob");
   s = go(s, "bob", "fold");
   assert.equal(s.hand!.street, "complete");
-  s = sit(s, 0, "ws:ada@claude-code", 100);
+  assert.equal(s.hand!.result!.net["ws:ada@claude-code"], 0, "the hand they left: nothing put in");
+  assert.equal(s.seats[4]?.stack, 100, "the new seat isn't touched by the hand they left");
   checkInvariants(s);
+  s = start(s);
+  assert.ok(s.hand!.players.some((p) => p.player === "ws:ada@claude-code" && p.seat === 4), "dealt in at the next hand");
+  checkInvariants(s);
+});
+
+test("a player still live in the hand can't sit a second time", () => {
+  let s = start(table([100, 100, 100]));
+  const who = toAct(s)!.player;
+  assert.throws(() => sit(s, 5, who, 100), engineError("already_seated"));
+  s = go(s, who, "fold");
+  // Folded but not left: still seated, so still refused.
+  assert.throws(() => sit(s, 5, who, 100), engineError("already_seated"));
 });
 
 test("showdown order: the last river aggressor shows first, else the first live seat left of the button", () => {

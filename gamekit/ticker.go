@@ -255,6 +255,7 @@ func (s *Server) advance(ctx context.Context, id string, away map[string]bool) (
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
+	tx.Committed() // a step that failed queued nothing on this transaction
 	s.deliver(ctx, id)
 	return true, nil
 }

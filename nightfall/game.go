@@ -18,7 +18,8 @@ const (
 	night   = "night"
 	day     = "day"
 	voting  = "voting"
-	over    = "over"
+	next    = "next game" // between games: the last one's result, until the next starts
+	over    = "over"      // the table has closed
 )
 
 // Roles: a town with a coven of vampires hidden in it. Each role's
@@ -155,16 +156,29 @@ type player struct {
 	Learned []string `json:"learned,omitempty"` // what it saw at night
 	Vote    string   `json:"vote,omitempty"`
 	Dead    bool     `json:"dead,omitempty"`
+	// Leaving: it asked to leave during a game, and its seat goes when the
+	// game ends. Left: it left between games; its seat has gone, and it
+	// stays in the last game's result until the next starts.
+	Leaving bool `json:"leaving,omitempty"`
+	Left    bool `json:"left,omitempty"`
 }
 
-// game is one game: the kit's part (its ID, phase and deadline) and
-// Nightfall's, kept as JSON in the database.
+// game is a table: the kit's part (its ID, phase, deadline and game
+// number) and Nightfall's, kept as JSON in the database. A table plays game
+// after game; Players are the current game's (or the last one's, between
+// games, or, while it waits for players, the next one's).
 type game struct {
 	gamekit.Game
-	Players []*player          `json:"players"`
-	Roles   []string           `json:"roles,omitempty"` // the cards in this game (public)
-	Center  [centerSize]string `json:"center"`
-	Result  []string           `json:"result,omitempty"`
+	Players []*player `json:"players"`
+	// Next are the players seated while a game was on: they play from the
+	// next game.
+	Next []*player `json:"next,omitempty"`
+	// Until is when a table waiting for players closes if three aren't
+	// here.
+	Until  time.Time          `json:"until,omitzero"`
+	Roles  []string           `json:"roles,omitempty"` // the cards in this game (public)
+	Center [centerSize]string `json:"center"`
+	Result []string           `json:"result,omitempty"`
 	// When the night fell and the day broke: archived moves are timed from
 	// the night.
 	Started time.Time `json:"started,omitzero"`
@@ -186,6 +200,49 @@ func (g *game) player(key string) *player {
 		}
 	}
 	return nil
+}
+
+// seat is the player with key seated at the table: in its game (or, between
+// games, the last one), or seated for the next game (forNext). Nil if it
+// isn't seated here (it never joined, or it has left).
+func (g *game) seat(key string) (p *player, forNext bool) {
+	for _, p := range g.Players {
+		if p.Key() == key && !p.Left {
+			return p, false
+		}
+	}
+	for _, p := range g.Next {
+		if p.Key() == key {
+			return p, true
+		}
+	}
+	return nil, false
+}
+
+// seatedNext is how many players play the table's next game: those
+// seated, but for any leaving.
+func (g *game) seatedNext() int {
+	n := len(g.Next)
+	for _, p := range g.Players {
+		if !p.Left && !p.Leaving {
+			n++
+		}
+	}
+	return n
+}
+
+// revealed is whether the table shows a finished game's cards: between
+// games, or once it has closed after one.
+func (g *game) revealed() bool { return (g.Phase == next || g.Phase == over) && len(g.Roles) > 0 }
+
+// carryOver makes a game that started before tables (it has no number, and
+// doesn't seat joiners) its table's first, as it finishes: the table then
+// seats joiners between games, as any other does.
+func carryOver(g *game) {
+	if g.GameNo == 0 {
+		g.GameNo = 1
+	}
+	g.Open, g.Seating = false, true
 }
 
 func (g *game) byHandle(h string) *player {

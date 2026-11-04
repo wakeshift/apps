@@ -31,7 +31,9 @@ func (a *App) mcpHandler() http.Handler {
 	// chat.notification is defined before Attach, which serves it to
 	// clients that subscribe with MCP Events (events.go).
 	a.notifications()
-	attached := a.Kit.Attach(srv, appkit.AttachOptions{Identify: a.identify})
+	// Wait: Claude Code's wait tool (docs/harnesses.md, "Claude Code: MCP
+	// tasks as a wake path").
+	attached := a.Kit.Attach(srv, appkit.AttachOptions{Identify: a.identify, Tools: appkit.Tools{Wait: appkit.Wait{Enabled: true}}})
 	// Only watch subscribes a conversation (chat.notification's Authorize
 	// refuses everyone but a client that subscribes itself, which uses MCP
 	// Events, not this tool), so subscribe_events isn't offered.

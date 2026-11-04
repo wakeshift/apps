@@ -6,14 +6,14 @@
 <p class="ap-label">Run</p>
 <div class="ap-codewrap"><pre class="ap-code"><code>claude mcp add --transport http webhooks https://try.example/t/abc/mcp</code></pre></div>
 <p class="ap-say">Then ask your agent: <q>Watch.</q></p>
-<ul class="ap-facts"><li>Claude Code starts a background monitor (in manual permission mode, it asks you to approve it). Then each post wakes the agent within seconds, even when it&#39;s idle.</li><li>Nothing to install. Claude Code ends a monitor after 30 minutes, so the agent starts it again every 25; in manual permission mode, each restart asks you again. If the agent offers to install Wakeshift&#39;s hooks, they&#39;re optional: they wake it with no monitor and nothing more to approve.</li></ul>
+<ul class="ap-facts"><li>The agent first asks whether to install Wakeshift&#39;s plugin for Claude Code. Say yes, then type /reload-plugins and send any message so it connects. Then each post wakes the agent within seconds, even when it&#39;s idle, with nothing more to approve.</li><li>If you say no, Claude Code starts a background monitor instead (in manual permission mode, it asks you to approve it), with nothing installed. Claude Code ends a monitor after 30 minutes, so the agent starts it again every 25; in manual permission mode, each restart asks you again.</li></ul>
 </section>
 <section class="ap-panel" id="ap-codex" data-agent="codex" aria-label="Codex">
 <h3 class="ap-title">Codex</h3>
 <p class="ap-label">Run</p>
 <div class="ap-codewrap"><pre class="ap-code"><code>codex mcp add webhooks --url https://try.example/t/abc/mcp</code></pre></div>
 <p class="ap-say">Then ask your agent: <q>Watch.</q></p>
-<ul class="ap-facts"><li>The first time, the agent offers a one-time install of Wakeshift&#39;s connector for Codex. Say yes, then restart Codex with codex resume --last, choose Trust all and continue, and send any message so it connects.</li><li>After that, each post wakes the agent within seconds, even when it&#39;s idle.</li></ul>
+<ul class="ap-facts"><li>The first time, the agent offers to install Wakeshift&#39;s plugin for Codex with Codex&#39;s own plugin command. Say yes, then restart Codex with codex resume --last, choose Trust all and continue, and send any message so it connects.</li><li>After that, each post wakes the agent within seconds, even when it&#39;s idle.</li></ul>
 </section>
 <section class="ap-panel" id="ap-claude-cowork" data-agent="claude-cowork" aria-label="Claude Cowork">
 <h3 class="ap-title">Claude Cowork</h3>
@@ -36,7 +36,7 @@
   }
 }</code></pre></div>
 <p class="ap-say">Then ask your agent: <q>Watch.</q></p>
-<ul class="ap-facts"><li>The agent starts a background command that waits (Cursor may ask you to allow it). Each post wakes the agent within seconds, even when it&#39;s idle. Nothing to install.</li><li>Cursor&#39;s cloud agents aren&#39;t woken: they see what&#39;s new on their next tool call.</li></ul>
+<ul class="ap-facts"><li>The agent starts a background command that waits (Cursor may ask you to allow it). Each post wakes the agent within seconds, even when it&#39;s idle. Nothing to install. The agent also asks once whether to install Wakeshift&#39;s package for Cursor, which is optional.</li><li>Cursor&#39;s cloud agents aren&#39;t woken: they see what&#39;s new on their next tool call.</li></ul>
 </section>
 <section class="ap-panel" id="ap-opencode" data-agent="opencode" aria-label="opencode">
 <h3 class="ap-title">opencode</h3>
@@ -50,7 +50,7 @@
 <p class="ap-label">Run</p>
 <div class="ap-codewrap"><pre class="ap-code"><code>agy mcp add webhooks https://try.example/t/abc/mcp</code></pre></div>
 <p class="ap-say">Then ask your agent: <q>Watch.</q></p>
-<ul class="ap-facts"><li>The agent starts a background command that waits (agy may ask you to allow it). Each post wakes the agent within seconds, even when it&#39;s idle. Nothing to install.</li></ul>
+<ul class="ap-facts"><li>The agent starts a background command that waits (agy may ask you to allow it). Each post wakes the agent within seconds, even when it&#39;s idle. Nothing to install. The agent also asks once whether to install Wakeshift&#39;s plugin for Antigravity, which is optional.</li></ul>
 </section>
 <section class="ap-panel" id="ap-chatgpt" data-agent="chatgpt" aria-label="ChatGPT">
 <h3 class="ap-title">ChatGPT</h3>
@@ -71,7 +71,7 @@
   webhooks:
     url: https://try.example/t/abc/mcp</code></pre></div>
 <p class="ap-say">Then ask your agent: <q>Watch.</q></p>
-<ul class="ap-facts"><li>The agent offers a one-time install of Wakeshift&#39;s plugin for Hermes. Say yes (Hermes may ask you to approve the command once). Hermes loads plugins only when a chat starts or is resumed, so then resume the chat (exit and run hermes chat --continue) or start a new one, and send any message.</li><li>After that, each post wakes the agent within a second, even when it&#39;s idle, as long as Hermes runs.</li></ul>
+<ul class="ap-facts"><li>The agent offers a one-time install of Wakeshift&#39;s plugin for Hermes. Say yes (Hermes may ask you to approve the command once). If the install says the running gateway loaded the plugin, just send any message. Otherwise Hermes loads it when a chat starts or is resumed, so resume the chat (exit and run hermes chat --continue, or restart the gateway) or start a new one, and send any message.</li><li>After that, each post wakes the agent within a second, even when it&#39;s idle, as long as Hermes runs.</li></ul>
 </section>
 <section class="ap-panel" id="ap-openclaw" data-agent="openclaw" aria-label="OpenClaw">
 <h3 class="ap-title">OpenClaw</h3>
@@ -86,7 +86,7 @@
 <p class="ap-label">Run</p>
 <div class="ap-codewrap"><pre class="ap-code"><code>copilot mcp add --transport http webhooks https://try.example/t/abc/mcp</code></pre></div>
 <p class="ap-say">Then ask your agent: <q>Watch.</q></p>
-<ul class="ap-facts"><li>The agent starts a background command that waits. Each post wakes the agent within seconds, even when it&#39;s idle. Nothing to install.</li><li>Copilot asks you to approve that command each time the agent goes back to waiting, so each wake needs one &#34;Yes&#34;. To skip that, run copilot with --allow-all-tools, which approves every tool, not just this one.</li></ul>
+<ul class="ap-facts"><li>The agent starts a background command that waits. Each post wakes the agent within seconds, even when it&#39;s idle. Nothing to install. The agent also asks once whether to install Wakeshift&#39;s plugin for Copilot CLI, which is optional.</li><li>Copilot asks you to approve that command each time the agent goes back to waiting, so each wake needs one &#34;Yes&#34;. To skip that, run copilot with --allow-all-tools, which approves every tool, not just this one.</li></ul>
 </section>
 <section class="ap-panel" id="ap-other" data-agent="other" aria-label="Any other MCP client">
 <h3 class="ap-title">Any other MCP client</h3>

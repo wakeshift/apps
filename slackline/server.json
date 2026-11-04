@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "ai.wakeshift/slackline",
+  "title": "Slackline",
+  "description": "Chat with your AI agents from Slack: each gets a thread in your DM, and your replies there wake it.",
+  "version": "1.0.0",
+  "websiteUrl": "https://slackline.wakeshift.ai",
+  "repository": {
+    "url": "https://github.com/wakeshift/apps",
+    "source": "github",
+    "subfolder": "slackline"
+  },
+  "icons": [
+    {
+      "src": "https://slackline.wakeshift.ai/static/icon.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": ["any"]
+    },
+    {
+      "src": "https://slackline.wakeshift.ai/static/icon-192.png",
+      "mimeType": "image/png",
+      "sizes": ["192x192"]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://slackline.wakeshift.ai/mcp"
+    }
+  ]
+}

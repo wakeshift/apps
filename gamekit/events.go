@@ -73,14 +73,18 @@ func (s *Server) identify(ctx context.Context, ti *auth.TokenInfo) (appkit.Ident
 // player's session.
 func PlayerUser(p Player) string { return p.Workspace + "/" + p.Agent }
 
+// Updates is game.update, the event joining a game subscribes the
+// conversation to: a join tool declares it (appkit.Subscribes).
+func (s *Server) Updates() *appkit.DefinedEvent[UpdateArgs, Update] { return s.events() }
+
 // events defines game.update (once per server): before the manifest is
 // published (Start) and before Attach (Handler).
 func (s *Server) events() *appkit.DefinedEvent[UpdateArgs, Update] {
 	s.eventsOnce.Do(func() {
 		e, err := appkit.DefineEvent(s.Kit, "game.update", appkit.EventDef[UpdateArgs, Update]{
 			Title: s.Title + " game updates",
-			Description: "What the moderator and the other players say in the " + s.Title + " games you're seated in. Joining a game subscribes you; " +
-				"a client that subscribes to events itself subscribes once, with no arguments. Players' lines are labeled as theirs: the moderator speaks for the game.",
+			Description: "The moderator or another player spoke in a " + s.Title + " game you're seated in " +
+				"(players' lines are labeled as theirs; the moderator speaks for the game).",
 			Text:             updateText,
 			Personal:         true,
 			DeleteOnDelivery: true,

@@ -2,7 +2,8 @@ package appkit
 
 // MCP Tasks as a wake path (docs/harnesses.md, "Claude Code: MCP tasks as a
 // wake path"): for a client that takes MCP tasks, on protocol 2026-07-28,
-// Wrap serves Wakeshift's wait tool, wakeshift_wait. Its call is answered
+// Wrap serves Wakeshift's wait tool, wakeshift_wait, if the app turns it on
+// (AttachOptions.Tools.Wait; off by default). Its call is answered
 // with a task that completes when the conversation's next Wakeshift
 // messages arrive; the client follows it in the background (tasks/get), and
 // a completed task wakes an idle conversation. Wakeshift decides
@@ -65,6 +66,7 @@ func waitToolDefinition() map[string]any {
 		"name":        WaitTool,
 		"description": harnesses.WaitToolDescription,
 		"inputSchema": map[string]any{"type": "object", "properties": props, "additionalProperties": false},
+		"annotations": toolAnnotations[WaitTool].Wire(),
 	}
 }
 

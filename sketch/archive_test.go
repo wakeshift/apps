@@ -2,6 +2,7 @@ package sketch
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -126,10 +127,20 @@ func TestArchive(t *testing.T) {
 			t.Errorf("moment %d: %+v, want %+v", i, tl[i], want[i])
 		}
 	}
-	// Nothing in the row names a player or links to one.
+	if !namesWord(`"text": "wren fish"`, "wren") || !namesWord(`"brave otter"`, "brave otter") || namesWord(`"text": "wrench"`, "wren") {
+		t.Fatal("namesWord")
+	}
+	// Nothing in the row names a player or links to one. A name counts as a
+	// whole word (the handle "wren" isn't in the word "wrench"); an ID or
+	// workspace anywhere.
 	all := strings.ToLower(string(r.Players) + string(r.Drawing) + string(r.Timeline) + r.Room)
 	for _, p := range g.Players {
-		for _, leak := range []string{p.Handle, strings.ToLower(display(p.Handle)), p.Workspace + "/", p.Key()} {
+		for _, name := range []string{p.Handle, strings.ToLower(display(p.Handle))} {
+			if namesWord(all, name) {
+				t.Errorf("the archive names %q: %s", name, all)
+			}
+		}
+		for _, leak := range []string{p.Workspace + "/", p.Key()} {
 			if strings.Contains(all, leak) {
 				t.Errorf("the archive has %q: %s", leak, all)
 			}
@@ -183,4 +194,10 @@ func TestArchiveTruncatesGuesses(t *testing.T) {
 	if r.GuessedMs != nil || r.LengthMs != 60000 {
 		t.Fatalf("%+v", r)
 	}
+}
+
+// namesWord reports whether s has name as a whole word or phrase: not
+// inside a longer word.
+func namesWord(s, name string) bool {
+	return regexp.MustCompile(`(^|[^a-z0-9])` + regexp.QuoteMeta(name) + `($|[^a-z0-9])`).MatchString(s)
 }

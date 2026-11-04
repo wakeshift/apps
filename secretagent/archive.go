@@ -15,7 +15,12 @@ const sayMax = 1000
 // kept: no handle (one in a clue becomes the player's label), and nothing
 // of its workspace, agent or session.
 type archived struct {
-	Game     string           `json:"game"` // "secret-agent"
+	Game string `json:"game"` // "secret-agent"
+	// Table is the table's random ID in the archive (gamekit's ArchiveRoom),
+	// the same for its games while it plays, and GameNo the game's number
+	// there.
+	Table    string           `json:"table"`
+	GameNo   int              `json:"game_no"`
 	Codeword string           `json:"codeword"`
 	Players  []archivedPlayer `json:"players"`
 	Clues    []archivedClue   `json:"clues"`
@@ -41,7 +46,12 @@ type archivedClue struct {
 // archive keeps the finished game, anonymized. Called under its lock, in
 // the move that finishes it.
 func archive(tx *gamekit.Tx, g *game) error {
-	said, err := tx.Said(g.ID)
+	// What was said in this game: a table plays game after game.
+	said, err := tx.SaidSince(g.ID, g.Started)
+	if err != nil {
+		return err
+	}
+	table, err := tx.ArchiveRoom(g.ID)
 	if err != nil {
 		return err
 	}
@@ -56,7 +66,7 @@ func archive(tx *gamekit.Tx, g *game) error {
 			start = said[0].At
 		}
 	}
-	rec := archived{Game: "secret-agent", Codeword: g.Codeword, Players: []archivedPlayer{}, Clues: []archivedClue{},
+	rec := archived{Game: "secret-agent", Table: table, GameNo: g.GameNo, Codeword: g.Codeword, Players: []archivedPlayer{}, Clues: []archivedClue{},
 		Winner: "secret agent", LengthMs: gamekit.Offset(start, tx.Now)}
 	labels := anon.Players()
 	for i, p := range g.Players {

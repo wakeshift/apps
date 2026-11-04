@@ -1,9 +1,9 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest, type InitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from "@modelcontextprotocol/node";
+import { createMcpHandler, isInitializeRequest, isLegacyRequest, McpServer, type InitializeRequest } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { Wakeshift, WakeshiftError } from "@wakeshift/sdk";
 import { Analytics, type AnalyticsConfig } from "./analytics.js";
@@ -13,15 +13,25 @@ import { isCheck, isPasted, Links, MAX_PASTED, type Check, type Link, type Paste
 import { legalDocsFor, legalPage } from "./legal.js";
 import { checkNames, css, curlFor, homePage, linkPage, logoSvg, messagePage, type PageLimits } from "./page.js";
 import { pickerAssets } from "./agentpicker/picker.js";
-import { State, type Limits, type McpSession } from "./state.js";
+import { State, type Activity, type Limits, type McpSession } from "./state.js";
 
 const DAY = 24 * 3600_000;
 const MAX_MCP_BODY = 1024 * 1024;
 const MAX_SESSIONS_PER_HOOK = 20;
-/** Open streams (live views and MCP GET streams) one webhook may hold on an instance, and one MCP session. */
+/**
+ * Open streams one webhook may hold on an instance: agents' (MCP GET and
+ * listen streams) and, apart, the page's live views, so agents' streams
+ * can't leave the page without one; and one MCP session's.
+ */
 const MAX_STREAMS_PER_HOOK = 20;
+const MAX_LIVE_VIEWS_PER_HOOK = 20;
 const MAX_STREAMS_PER_SESSION = 2;
-/** Refused posts a webhook's live view shows a minute (per instance): more are answered, not recorded. */
+/** New open URLs a webhook may get an hour ("Get a new URL" on its page). */
+const ROTATIONS_PER_HOUR = 10;
+/**
+ * Refused posts a webhook's live view lists a minute (per instance): more
+ * are answered and counted, and the count is one line once the minute is over.
+ */
 const REFUSED_LINES_PER_MINUTE = 10;
 
 export interface Options {
@@ -120,7 +130,9 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
   const open = new Set<ServerResponse>();
 
   const mcpUrl = (code: string) => `${base}/t/${code}/mcp`;
-  const webhookUrl = (l: Link, check: Exclude<Check, PastedCheck>) => `${base}/in/${links.token(l, check)}`;
+  const webhookUrl = (l: Link, check: Exclude<Check, PastedCheck | "open">) => `${base}/in/${links.token(l, check)}`;
+  // The open URL is the current generation's: the user can replace it (rotate).
+  const openUrl = async (l: Link) => `${base}/in/${links.token(l, "open", undefined, await state.openGen(l.hook))}`;
   const secretFor = (hook: string, check: Check) => (check === "github" || check === "bearer" ? links.signingSecret(hook, check) : undefined);
 
   // A link works until idleDays pass without use: when it was last used
@@ -176,16 +188,18 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     // identify (a server made per request never sees initialize); its
     // capabilities the wrapper reads from the server, which serveMcp
     // restores from the session.
-    const attached = wake.attach(server, { identify: () => ({ user: l.hook, client: session.client() || undefined }) });
+    // wait: Claude Code's wait tool (docs/harnesses.md, "Claude Code: MCP
+    // tasks as a wake path").
+    const attached = wake.attach(server, { identify: () => ({ user: l.hook, client: session.client() || undefined }), tools: { wait: { enabled: true } } });
     const hookArgs = { hook: l.hook };
-    const url = webhookUrl(l, "open");
     const pageUrl = `${base}/l/${links.code(l)}`;
     const client = session.client;
     server.registerTool(
       "watch",
-      { description: "Wake this conversation when something is posted to your webhook.", inputSchema: attached.inputs({}) },
-      attached.events("watch", async (_args, call) => {
+      { description: "Wake this conversation when something is posted to your webhook.", inputSchema: attached.inputs(z.object({})) },
+      attached.events("watch", { subscribes: [received] }, async (_args, call) => {
         const sub = await call.subscribe(received, hookArgs, { reason: "Watching the webhook" });
+        const url = await openUrl(l);
         // A client that speaks MCP Events subscribes itself (events/subscribe):
         // the wrapper's block names the event and arguments, and there's no
         // conversation to record here.
@@ -210,7 +224,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     );
     server.registerTool(
       "unwatch",
-      { description: "Stop waking this conversation for your webhook.", inputSchema: attached.inputs({}) },
+      { description: "Stop waking this conversation for your webhook.", inputSchema: attached.inputs(z.object({})) },
       attached.events("unwatch", async (_args, call) => {
         // The session_key the agent passed: the conversation watch labeled.
         const passed = call.session;
@@ -228,7 +242,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
       "recent_posts",
       {
         description: "The last posts to your webhook in full (up to 10), newest first: a woken line may be cut to fit.",
-        inputSchema: attached.inputs({ limit: z.number().int().min(1).max(10).optional() }),
+        inputSchema: attached.inputs(z.object({ limit: z.number().int().min(1).max(10).optional() })),
       },
       attached.events("recent_posts", async ({ limit }) => {
         const posts = await state.posts(l.hook, limit ?? 3);
@@ -239,9 +253,9 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     );
     server.registerTool(
       "webhook_info",
-      { description: "Your webhook's URLs (the checked one to give services, and the open one), and how to test them.", inputSchema: attached.inputs({}) },
+      { description: "Your webhook's URLs (the checked one to give services, and the open one), and how to test them.", inputSchema: attached.inputs(z.object({})) },
       attached.events("webhook_info", async () => {
-        const c = await state.checked(l.hook);
+        const [c, url] = await Promise.all([state.checked(l.hook), openUrl(l)]);
         const urls = c
           ? `Checked URL, for services (it checks ${checkNames[c.check]}): ${c.url}\n` + `Open URL, for tests (anyone with it can post): ${url}\n`
           : `Open URL (anyone with it can post): ${url}\n` +
@@ -259,6 +273,21 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     return server;
   }
 
+  // Protocol 2026-07-28 requests go to the MCP SDK's handler for that
+  // revision, which builds a server for each from the link the request is
+  // for and the client's name as the request gives it (modernRequest: the
+  // handler's factory takes no arguments of ours).
+  const modernRequest = new AsyncLocalStorage<{ link: Link; client: string }>();
+  const modern = createMcpHandler(
+    () => {
+      const r = modernRequest.getStore();
+      if (!r) throw new Error("no link for this MCP request");
+      return mcpServerFor(r.link, { id: "", client: () => r.client });
+    },
+    { legacy: "reject", responseMode: "sse" },
+  );
+  const serveModern = toNodeHandler(modern);
+
   // Serves one request of a session on a fresh server and stateless transport.
   async function serveMcp(req: IncomingMessage, res: ServerResponse, l: Link, s: McpSession | { id: string; init: InitializeRequest | undefined }, body: unknown) {
     const stored = "hook" in s ? s : undefined;
@@ -274,13 +303,12 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
       // itself). Its name goes through attach's identify.
       server.server.getClientCapabilities = () => stored.capabilities;
     }
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: false });
+    const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: false });
     res.on("close", () => {
       transport.close().catch(() => {});
       server.close().catch(() => {});
     });
-    // A protocol 2026-07-28 request has no session (s.id is "").
-    if (s.id) res.setHeader("mcp-session-id", s.id);
+    res.setHeader("mcp-session-id", s.id);
     await server.connect(transport);
     await transport.handleRequest(req, res, body);
   }
@@ -319,9 +347,16 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     if (body === null) return;
     // Protocol 2026-07-28 has no initialize and no sessions: each request
     // names its version, client and capabilities itself (OpenClaw speaks
-    // only that; the SDK's attach answers server/discover). Served as it
-    // comes, with nothing kept.
-    if (stateless(req, body)) return serveMcp(req, res, l, { id: "", init: undefined }, body);
+    // only that). Served as it comes, with nothing kept.
+    if (!(await isLegacyRequest(await toWebRequest(req, body), body))) {
+      // subscriptions/listen holds its response open, as a session's GET
+      // stream does, so it takes one of the instance's and the webhook's
+      // stream slots.
+      if (messages(body).some((m) => m.method === "subscriptions/listen") && !holdStream(res, [["h/" + l.hook, MAX_STREAMS_PER_HOOK]])) {
+        return jsonRpcError(res, 429, "Too many open streams right now: try again later.", -32000, requestId(body));
+      }
+      return modernRequest.run({ link: l, client: envelopeClient(body) }, () => serveModern(req, res, body));
+    }
     if (!isInitializeRequest(body)) {
       // Notifications (and responses) before initialize: Antigravity sends
       // notifications/roots/list_changed with no session while initialize
@@ -358,6 +393,10 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     const w = links.parseToken(token);
     if (!w) return apiError(res, 404, "unknown_webhook", "No such webhook.");
     if (!(await alive(w))) return apiError(res, 410, "expired", `This webhook's link expired after ${idleDays} days without use. Get a new one at ${base}.`);
+    // An open URL the user has replaced: gone, for good.
+    if (w.check === "open" && w.gen !== (await state.openGen(w.hook))) {
+      return apiError(res, 410, "replaced", "This webhook URL was replaced by a new one, and no longer works. Ask whoever gave it to you for the new one.");
+    }
     const url = `${base}/in/${token}`;
     if (req.method === "GET" || req.method === "HEAD") {
       const need = {
@@ -382,7 +421,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     const ctype = (header(req, "content-type") ?? "").split(";")[0].trim();
     const seen = { method: req.method, contentType: ctype, size: body?.length ?? Number(header(req, "content-length") ?? 0) };
     if (!body) {
-      refusedLine(w.hook, { kind: "refused", ...seen, reason: "Over 64 KB." });
+      refusedLine(w.hook, 413, { kind: "refused", ...seen, reason: "Over 64 KB." });
       return apiError(res, 413, "too_large", "A webhook takes bodies up to 64 KB.");
     }
     // The check comes before the limit: a refused request doesn't count, so
@@ -390,13 +429,13 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     const incoming = { method: req.method, headers: req.headers, body };
     const refused = checkSignature(w.check, w.secret ?? secretFor(w.hook, w.check), incoming, now());
     if (refused) {
-      refusedLine(w.hook, { kind: "refused", ...seen, check: w.check, reason: refused });
+      refusedLine(w.hook, 401, { kind: "refused", ...seen, check: w.check, reason: refused });
       return apiError(res, 401, "bad_signature", refused);
     }
     const at = now();
     const wait = await state.take(w.hook, w.check, at);
     if (wait > 0) {
-      refusedLine(w.hook, { kind: "limited", ...seen, check: w.check, reason: `Over this URL's limit (${limits.perHour} an hour, ${limits.perDay} a day). Try again in ${wait}s.` });
+      refusedLine(w.hook, 429, { kind: "limited", ...seen, check: w.check, reason: `Over this URL's limit (${limits.perHour} an hour, ${limits.perDay} a day). Try again in ${wait}s.` });
       res.setHeader("Retry-After", String(wait));
       return apiError(res, 429, "rate_limited", `Too many posts to this webhook URL. Try again in ${wait}s.`);
     }
@@ -433,19 +472,48 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
   // mustn't wait on a database in trouble), and at most
   // REFUSED_LINES_PER_MINUTE a minute per webhook on this instance: a flood
   // of bad signatures is answered, but doesn't flood the database or push
-  // the real posts out of the live view.
+  // the real posts out of the live view. The rest are counted, and once
+  // the minute is over (or this instance stops) the count goes into the
+  // webhook's one line for the minute, which every instance adds to
+  // (state.skipped): one write per webhook a minute here, however many.
   let refusedMinute = 0;
   const refusedBy = new Map<string, number>();
-  function refusedLine(hook: string, a: Parameters<typeof state.record>[1]) {
+  const skippedBy = new Map<string, { n: number; codes: Set<number> }>();
+  let flushTimer: NodeJS.Timeout | undefined;
+  function refusedLine(hook: string, status: 401 | 413 | 429, a: Parameters<typeof state.record>[1]) {
     const minute = Math.floor(now() / 60_000);
     if (minute !== refusedMinute) {
+      void flushSkipped();
       refusedMinute = minute;
       refusedBy.clear();
     }
     const n = refusedBy.get(hook) ?? 0;
-    if (n >= REFUSED_LINES_PER_MINUTE) return;
-    refusedBy.set(hook, n + 1);
-    void quietly(state.record(hook, a));
+    if (n < REFUSED_LINES_PER_MINUTE) {
+      refusedBy.set(hook, n + 1);
+      void quietly(state.record(hook, a));
+      return;
+    }
+    let s = skippedBy.get(hook);
+    if (!s) skippedBy.set(hook, (s = { n: 0, codes: new Set() }));
+    s.n++;
+    s.codes.add(status);
+    // Written when the minute is over, whether or not another post comes.
+    flushTimer ??= setTimeout(() => {
+      flushTimer = undefined;
+      void flushSkipped();
+    }, 60_000 - (now() % 60_000) + 250).unref();
+  }
+
+  // Writes this instance's counts of unlisted posts for the minute they
+  // were counted in.
+  async function flushSkipped(): Promise<void> {
+    if (skippedBy.size === 0) return;
+    const minute = refusedMinute * 60_000;
+    const counts = [...skippedBy];
+    skippedBy.clear();
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = undefined;
+    await Promise.all(counts.map(([hook, c]) => quietly(state.skipped(hook, minute, c.n, [...c.codes]))));
   }
 
   // Runs a write whose failure only costs the page a line: logs it, and goes on.
@@ -509,7 +577,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
   // The page for one of the tabs. Looking at the GitHub or bearer tab picks
   // that URL for the agent; Stripe's and Linear's are picked when made. If
   // the database is slow, the page still comes up, without its history.
-  async function livePage(res: ServerResponse, l: Link, check: Check, made?: { url?: string; error?: string }, status = 200) {
+  async function livePage(res: ServerResponse, l: Link, check: Check, made?: { url?: string; error?: string; rotated?: boolean }, status = 200) {
     let url: string | undefined;
     let busy = false;
     const soft = async <T>(p: Promise<T>, fallback: T): Promise<T> => {
@@ -521,9 +589,13 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
         return fallback;
       }
     };
-    if (!isPasted(check)) {
+    // Without the database, the open URL's generation is unknown: no URL rather than an old one.
+    const open = await soft(openUrl(l), undefined);
+    if (check === "open") {
+      url = open;
+    } else if (!isPasted(check)) {
       url = webhookUrl(l, check);
-      if (check !== "open") await soft(state.pick(l.hook, { check, url }), undefined);
+      await soft(state.pick(l.hook, { check, url }), undefined);
     } else {
       const c = await soft(state.checked(l.hook), undefined);
       url = made?.url ?? (c?.check === check ? c.url : undefined);
@@ -535,7 +607,8 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
         mcpUrl: mcpUrl(links.code(l)),
         check,
         webhookUrl: url,
-        openUrl: webhookUrl(l, "open"),
+        openUrl: open ?? "",
+        rotated: made?.rotated,
         secret: secretFor(l.hook, check),
         error: made?.error,
         notice: busy ? "Webhooks is busy right now, so the history below may be missing. New posts still show up." : undefined,
@@ -561,12 +634,42 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     return livePage(res, l, check, { url });
   }
 
-  async function liveStream(req: IncomingMessage, res: ServerResponse, l: Link) {
-    if (streams >= maxStreams) throw new Busy(15);
-    if (!holdStream(res, [["h/" + l.hook, MAX_STREAMS_PER_HOOK]])) {
-      res.setHeader("Retry-After", "30");
-      return apiError(res, 429, "too_many_streams", `This webhook has ${MAX_STREAMS_PER_HOOK} live views open here already. Close one, or try again later.`);
+  // "Get a new URL" on the page: replaces the open URL. Only the link's
+  // code, the page's capability, can ask (a webhook URL can't), and only
+  // from this site's page: a request another site makes the browser send
+  // is refused, though it would need the code too. The webhook stays the
+  // same (its ID is the SDK user, so its subscriptions stay), and so do its
+  // history and checked URLs. The old open URL is refused from now on, on
+  // every instance (webhook).
+  async function rotate(req: IncomingMessage, res: ServerResponse, l: Link) {
+    req.resume();
+    if (!fromThisSite(req, base)) return page(res, 403, (n) => messagePage(n, "Not from this page", "Get a new URL from the button on your webhook's page.", false));
+    const wait = await state.takeHourly(`${l.hook}/rotate/h`, ROTATIONS_PER_HOUR, now());
+    if (wait > 0) {
+      res.setHeader("Retry-After", String(wait));
+      return livePage(res, l, "open", { error: `You've made ${ROTATIONS_PER_HOUR} new URLs this hour. Try again in ${Math.ceil(wait / 60)} minutes.` }, 429);
     }
+    if ((await state.rotateOpen(l.hook)) === undefined) {
+      return page(res, 410, (n) => messagePage(n, "This link expired", `This link expired after ${idleDays} days without use. Get a new one below.`));
+    }
+    await quietly(state.record(l.hook, { kind: "rotated", reason: "The open URL was replaced: the old one no longer works." }));
+    // Post, then redirect: reloading the page doesn't make another.
+    res.writeHead(303, { Location: `/l/${links.code(l)}?rotated=1`, "Cache-Control": "no-store" });
+    res.end();
+  }
+
+  // The page's live view: the recent lines, or those after the line the
+  // page last had (?after=, or Last-Event-ID when EventSource reconnects by
+  // itself), then each new one. Each line's seq is its event ID, but for a
+  // minute's line for unlisted posts, which is updated in place and so is
+  // sent again whatever the cursor.
+  async function liveStream(req: IncomingMessage, res: ServerResponse, l: Link, u: URL) {
+    if (streams >= maxStreams) throw new Busy(15);
+    if (!holdStream(res, [["v/" + l.hook, MAX_LIVE_VIEWS_PER_HOOK]])) {
+      res.setHeader("Retry-After", "30");
+      return apiError(res, 429, "too_many_streams", `This webhook has ${MAX_LIVE_VIEWS_PER_HOOK} live views open here already. Close one, or try again later.`);
+    }
+    const after = Math.max(seqParam(header(req, "last-event-id")), seqParam(u.searchParams.get("after")));
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-store",
@@ -574,11 +677,15 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
       Connection: "keep-alive",
     });
     res.write("retry: 3000\n\n");
-    const send = (a: unknown) => sseWrite(res, `data: ${JSON.stringify(a)}\n\n`);
-    // Listen first, then replay: a line recorded in between comes twice
-    // (the page drops repeats by seq), never not at all.
+    const send = (a: Activity) => sseWrite(res, `${a.kind === "skipped" ? "" : `id: ${a.seq}\n`}data: ${JSON.stringify(a)}\n\n`);
+    // Listen first, then replay, so no line falls between the two. A line
+    // recorded meanwhile can be both in the replay and notified, before or
+    // after it: it's sent once (the page drops repeats by seq too). A
+    // minute's line for unlisted posts is updated in place, so each version
+    // of it is sent.
     let replayed: Set<number> | undefined;
-    const early: { seq: number }[] = [];
+    const fresh = (a: Activity) => a.kind === "skipped" || (a.seq > after && !replayed!.has(a.seq));
+    const early: Activity[] = [];
     let off: (() => void) | undefined;
     let closed = false;
     const ping = setInterval(() => sseWrite(res, ": ping\n\n"), 20_000);
@@ -587,12 +694,12 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
       off?.();
       clearInterval(ping);
     });
-    off = await state.listen(l.hook, (a) => (replayed ? send(a) : early.push(a)));
+    off = await state.listen(l.hook, (a) => (replayed ? fresh(a) && send(a) : early.push(a)));
     if (closed) return off();
-    const recent = await state.recent(l.hook).catch(() => []);
+    const recent = (await state.recent(l.hook).catch(() => [] as Activity[])).filter((a) => a.seq > after || a.kind === "skipped");
     for (const a of recent) send(a);
     replayed = new Set(recent.map((a) => a.seq));
-    for (const a of early) if (!replayed.has(a.seq)) send(a);
+    for (const a of early) if (fresh(a)) send(a);
   }
 
   // Who's connected to the webhook right now, for the page: Wakeshift's
@@ -659,7 +766,7 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     }
     if ((match = p.match(/^\/l\/([A-Za-z0-9_-]+)\/live$/)) && m === "GET") {
       const l = await linkFrom(res, match[1], "api");
-      if (l) return liveStream(req, res, l);
+      if (l) return liveStream(req, res, l, u);
       return;
     }
     if ((match = p.match(/^\/l\/([A-Za-z0-9_-]+)\/status$/)) && m === "GET") {
@@ -671,7 +778,12 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
       const l = await linkFrom(res, match[1], "page");
       if (!l) return;
       const c = u.searchParams.get("check");
-      return livePage(res, l, isCheck(c) ? c : "open");
+      return livePage(res, l, isCheck(c) ? c : "open", { rotated: !c && u.searchParams.get("rotated") === "1" });
+    }
+    if ((match = p.match(/^\/l\/([A-Za-z0-9_-]+)\/rotate$/)) && m === "POST") {
+      const l = await linkFrom(res, match[1], "page");
+      if (l) return rotate(req, res, l);
+      return;
     }
     if ((match = p.match(/^\/l\/([A-Za-z0-9_-]+)\/?$/)) && m === "POST") {
       const c = u.searchParams.get("check");
@@ -734,9 +846,12 @@ export function tryServer(o: Options): Server & { stop(): Promise<void>; retain(
     retain,
     async stop() {
       clearInterval(sweep);
+      await modern.close().catch(() => {});
       server.closeAllConnections();
       for (const res of open) res.destroy();
       await new Promise<void>((r) => server.close(() => r()));
+      // What this instance counted but didn't list: written before it goes.
+      await flushSkipped();
     },
   });
 }
@@ -753,6 +868,23 @@ export function pastedError(check: PastedCheck, s: string): string | undefined {
   }
   if (s.length < 16) return "That's too short for a signing secret: copy it again.";
   return undefined;
+}
+
+/**
+ * Whether a request came from this site's own pages: a browser says where
+ * a request came from (Sec-Fetch-Site, Origin); a client that says nothing
+ * isn't a browser another site can make send it.
+ */
+export function fromThisSite(req: IncomingMessage, base: string): boolean {
+  const site = header(req, "sec-fetch-site");
+  if (site && site !== "same-origin" && site !== "none") return false;
+  const origin = header(req, "origin");
+  return !origin || origin === new URL(base).origin;
+}
+
+/** A live view's cursor (a line's seq), or 0 if it isn't one. */
+function seqParam(v: string | null | undefined): number {
+  return v && /^\d{1,15}$/.test(v) ? Number(v) : 0;
 }
 
 function clipText(s: string, n: number): string {
@@ -874,14 +1006,11 @@ const messages = (body: unknown): RpcMessage[] =>
   (Array.isArray(body) ? body : [body]).filter((m): m is RpcMessage => typeof m === "object" && m !== null);
 const isRequest = (m: RpcMessage) => typeof m.method === "string" && "id" in m;
 
-/**
- * Whether a POST is protocol 2026-07-28: its MCP-Protocol-Version header
- * says so, or every request in it names that version in its _meta.
- */
-function stateless(req: IncomingMessage, body: unknown): boolean {
-  if (header(req, "mcp-protocol-version") === "2026-07-28") return true;
-  const reqs = messages(body).filter(isRequest) as { params?: { _meta?: Record<string, unknown> } }[];
-  return reqs.length > 0 && reqs.every((m) => m.params?._meta?.["io.modelcontextprotocol/protocolVersion"] === "2026-07-28");
+/** The client's name a protocol 2026-07-28 request gives in its _meta (a batch's first request's), cut to size; "" if none. */
+function envelopeClient(body: unknown): string {
+  const m = messages(body).find(isRequest) as { params?: { _meta?: Record<string, unknown> } } | undefined;
+  const info = m?.params?._meta?.["io.modelcontextprotocol/clientInfo"] as { name?: unknown } | undefined;
+  return typeof info?.name === "string" ? info.name.slice(0, 100) : "";
 }
 
 /** Whether a POST's body holds a JSON-RPC request (not only notifications or responses). */

@@ -109,9 +109,9 @@ type Session struct {
 	Conversation string `json:"conversation,omitempty"`
 	// Watching: it asked to be woken (a subscribe from a wrapped tool) and hasn't stopped (Unwatch).
 	Watching bool `json:"watching"`
-	// Connector, for a conversation session: the local app that delivers
-	// to it (Wakeshift for Mac), and while it isn't running, how the user
-	// installs it.
+	// Connector, for a conversation session: what delivers to it (the
+	// harness's connector, or the agent's own stream), and while it isn't
+	// running, how the user installs it.
 	Connector *Connector `json:"connector,omitempty"`
 }
 

@@ -537,6 +537,73 @@ test("a live stream whose browser goes before its first snapshot gives its place
   assert.equal(hub.size, 0, "a stream whose browser went is counted again, for good, once its read finished");
 });
 
+test("a watch stream's last snapshot before \"moved\" never seats the player, even when the leave lands after the poll read the table", async (t) => {
+  const db = await testDb(t);
+  const { casino } = room(db);
+  const a = await player(casino, 81);
+  const b = await player(casino, 82);
+  const j = await casino.join(a.id, {});
+  await casino.join(b.id, { table: j.table });
+  const sa = await watchLinkOf(casino, "live-race-secret-at-least-32-bytes-long", a.id);
+  const aName = (await casino.watchAway(a.id)).name;
+  // The poll's read of the table is held until a has left: the view it got
+  // still seats a, and the link, read next, says a has moved.
+  const read = casino.spectate.bind(casino);
+  let armed = false;
+  let staleSeated: boolean | undefined;
+  casino.spectate = async (id: string) => {
+    const v = await read(id);
+    if (armed && id === j.table) {
+      armed = false;
+      staleSeated = !!v?.seats.some((x) => x?.name === aName);
+      await casino.leave(a.id);
+      await playOut(casino, [a.id, b.id]);
+    }
+    return v;
+  };
+  const hub = new LiveHub({ casino, log: () => {}, pollMs: 20 });
+  const server = createServer((_req, res) => void hub.open(res, j.table, "192.0.2.2", { hash: watchHash(sa), player: a.id }).catch(() => res.destroy()));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const stop = new AbortController();
+  t.after(async () => {
+    stop.abort();
+    hub.close();
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+  const res = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/`, { signal: stop.signal });
+  const got: { event: string; data: any }[] = [];
+  void (async () => {
+    let buf = "";
+    try {
+      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+        buf += Buffer.from(chunk).toString();
+        let i;
+        while ((i = buf.indexOf("\n\n")) >= 0) {
+          const block = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          const event = block.match(/^event: (.+)$/m)?.[1];
+          const data = block.match(/^data: (.+)$/m)?.[1];
+          if (event) got.push({ event, data: data ? JSON.parse(data) : null });
+        }
+      }
+    } catch {}
+  })();
+  const until = async (ok: () => boolean, what: string) => {
+    for (let i = 0; i < 150 && !ok(); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(ok(), what);
+  };
+  await until(() => got.length > 0, "the first snapshot");
+  armed = true;
+  await casino.say(b.id, "Still here.");
+  await until(() => got.some((e) => e.event === "moved"), "the watch stream was told the player moved");
+  assert.equal(staleSeated, true, "the poll's read of the table still seated the player");
+  const mi = got.findIndex((e) => e.event === "moved");
+  const last = got[mi - 1]!;
+  assert.equal(last.event, "snap");
+  assert.ok(!last.data.seats.some((x: { name: string } | null) => x?.name === aName), "the final snapshot no longer seats the player");
+});
+
 // ── Link previews ──────────────────────────────────────────────────────────
 
 const CRAWLERS = [

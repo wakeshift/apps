@@ -22,9 +22,9 @@ func spectated(t *testing.T) (*App, *httptest.Server, map[string]*game) {
 	app.Store, _ = gametest.Store(t)
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)
-	words := map[string]string{waiting: "", discussion: "zeppelin", voting: "kumquat", over: "marmalade"}
+	words := map[string]string{waiting: "", discussion: "zeppelin", voting: "kumquat", next: "marmalade", over: "marmalade"}
 	games := map[string]*game{}
-	for i, phase := range []string{waiting, discussion, voting, over} {
+	for i, phase := range []string{waiting, discussion, voting, next, over} {
 		g := &game{Codeword: words[phase]}
 		g.ID, g.Phase, g.Deadline, g.Open = fmt.Sprintf("sa%d", i), phase, time.Now().Add(time.Minute), phase == waiting
 		for j, h := range []string{"dusty-heron", "quiet-otter", "mole-" + phase} {
@@ -40,11 +40,11 @@ func spectated(t *testing.T) (*App, *httptest.Server, map[string]*game) {
 			}
 			g.Players = append(g.Players, p)
 		}
-		if phase == voting || phase == over {
+		if phase == voting || phase == next || phase == over {
 			g.Players[0].Vote, g.Players[1].Vote = "mole-"+phase, "mole-"+phase
 		}
-		if phase == over {
-			g.Result = "The civilians win: they caught mole-over."
+		if phase == next || phase == over {
+			g.Result, g.GameNo = "The civilians win: they caught mole-"+phase+".", 1
 		}
 		said := []gamekit.Entry{{Text: "Secret Agent game " + g.ID + " has started."}, {From: "dusty-heron", Text: "It's something you'd find in a kitchen, " + phase + "."}}
 		gametest.Put(t, app.Store, g.ID, phase, g.Open, phase == over, g, said...)
@@ -73,7 +73,7 @@ func spectated(t *testing.T) (*App, *httptest.Server, map[string]*game) {
 // a player beyond its handle.
 func TestSpectatorsSeeNoSecrets(t *testing.T) {
 	_, srv, games := spectated(t)
-	for _, phase := range []string{waiting, discussion, voting, over} {
+	for _, phase := range []string{waiting, discussion, voting, next, over} {
 		g := games[phase]
 		pages := gametest.Spectated(t, srv.URL, g.ID)
 		for name, body := range pages {
@@ -89,7 +89,7 @@ func TestSpectatorsSeeNoSecrets(t *testing.T) {
 					t.Errorf("%s game: %s shows %q", phase, name, secret)
 				}
 			}
-			over := phase == over && (name == "page" || name == "state")
+			over := (phase == next || phase == over) && (name == "page" || name == "state")
 			for _, secret := range []string{"marmalade", "(secret agent)", "(civilian)", "→ mole-", "The civilians win"} {
 				if strings.Contains(body, secret) != over {
 					t.Errorf("%s game: %s shows %q: %v", phase, name, secret, over)
@@ -97,12 +97,12 @@ func TestSpectatorsSeeNoSecrets(t *testing.T) {
 			}
 		}
 		// Without JavaScript, the page shows the game as it is.
-		for _, want := range []string{"Game " + g.ID, "dusty-heron", "quiet-otter", "kitchen, " + phase, "Moderator", `<noscript><meta http-equiv="refresh"`} {
+		for _, want := range []string{"Table " + g.ID, "dusty-heron", "quiet-otter", "kitchen, " + phase, "Moderator", `<noscript><meta http-equiv="refresh"`} {
 			if !strings.Contains(pages["page"], want) {
 				t.Errorf("%s game: the page has no %q", phase, want)
 			}
 		}
-		if (phase == voting || phase == over) != strings.Contains(pages["page"], "✓ voted") {
+		if (phase == voting || phase == next || phase == over) != strings.Contains(pages["page"], "✓ voted") {
 			t.Errorf("%s game: votes on the page", phase)
 		}
 	}
@@ -120,10 +120,10 @@ func TestSpectatorsSeeNoSecrets(t *testing.T) {
 		}
 		return out
 	}
-	if got := strings.Join(ids(l.Live), " "); !strings.Contains(got, "sa1") || !strings.Contains(got, "sa2") || !strings.Contains(got, "sahouse") || len(l.Live) != 3 {
+	if got := strings.Join(ids(l.Live), " "); !strings.Contains(got, "sa1") || !strings.Contains(got, "sa2") || !strings.Contains(got, "sa3") || !strings.Contains(got, "sahouse") || len(l.Live) != 4 {
 		t.Errorf("live: %s", got)
 	}
-	if got := strings.Join(ids(l.Finished), " "); got != "sa3" {
+	if got := strings.Join(ids(l.Finished), " "); got != "sa4" {
 		t.Errorf("finished: %s", got)
 	}
 	landing := gametest.Spectated(t, srv.URL, "sa1")["landing"]

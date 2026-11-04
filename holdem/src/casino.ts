@@ -371,15 +371,17 @@ export class Casino {
         balance = DAILY_BANKROLL;
       }
       const { id } = await this.chooseTable(c, { ...o, house }, day);
-      // One seat per sign-in at a table: a player's wakes are addressed to
-      // their sign-in and table, so two of one sign-in's players at the same
-      // table would each be woken for the other's moves.
-      const twin = await c.query(
-        "SELECT 1 FROM seats s JOIN players p ON p.id = s.player WHERE s.table_id = $1 AND p.guest = (SELECT guest FROM players WHERE id = $2) AND p.id <> $2",
-        [id, playerId],
-      );
-      if (twin.rowCount) throw new GameError("Another conversation signed in the same way already has a seat at that table. Join a different table, or play from that conversation.");
       return await this.withTable(c, id, effects, async (row) => {
+        // One seat per sign-in at a table: a player's wakes are addressed to
+        // their sign-in and table, so two of one sign-in's players at the same
+        // table would each be woken for the other's moves. Checked under the
+        // table's lock (withTable), so two joins at once can't both pass it:
+        // the second waits for the first and then sees its seat.
+        const twin = await c.query(
+          "SELECT 1 FROM seats s JOIN players p ON p.id = s.player WHERE s.table_id = $1 AND p.guest = (SELECT guest FROM players WHERE id = $2) AND p.id <> $2",
+          [row.id, playerId],
+        );
+        if (twin.rowCount) throw new GameError("Another conversation signed in the same way already has a seat at that table. Join a different table, or play from that conversation.");
         if (row.day !== day) throw new GameError("This table is finishing yesterday's last hand. Try again in a minute.");
         const cfg = row.state.config;
         if (balance <= 0) throw new GameError("You're out of chips for today. Everyone starts again with $100 at 00:00 UTC.");
@@ -1777,8 +1779,28 @@ export function actionLines(log: readonly HandEvent[], name: (id: string) => str
   return out;
 }
 
-/** An engine error as the agent hears it. */
-function engineMessage(err: EngineError): string {
-  const m = err.message.replace(/\bp_[A-Za-z0-9_-]{12}\b/g, "you");
-  return m.charAt(0).toUpperCase() + m.slice(1) + ".";
+/**
+ * An engine error as the agent hears it: every engine error a tool call can
+ * hit is about the caller, so it's worded from its code, to them. The
+ * engine's own messages name players by ID, for logs; they're never shown
+ * with a name in them.
+ */
+export function engineMessage(err: EngineError): string {
+  switch (err.code) {
+    case "already_seated":
+      return "You're already at this table: you'll be dealt in at the next hand and woken when it's your move. Call state to see the table.";
+    case "not_seated":
+      return "You're not at this table. Call join to sit down.";
+    case "still_in_hand":
+      return "You're still in this hand. Fold when it's your move, or call leave to go when the hand ends.";
+    case "not_your_turn":
+      return "It's not your move. You'll be woken when it is; call state to see the table.";
+    case "illegal_action":
+      return `${sentence(err.message)} Call state to see your choices.`;
+    default:
+      // The rest name no player; a stray ID is scrubbed all the same.
+      return sentence(err.message.replace(/\bp_[A-Za-z0-9_-]{12}\b/g, "a player"));
+  }
 }
+
+const sentence = (m: string) => m.charAt(0).toUpperCase() + m.slice(1) + ".";

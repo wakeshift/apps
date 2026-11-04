@@ -9,19 +9,20 @@ package appkit
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"reflect"
 	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/wakeshift/wakeshift-go/appkit/internal/adapt"
 )
 
 // beaconLinePrefix starts the line a text-carried beacon is on (the core's
 // beacon.Text), which a harness's hook reads only as the last line of a
 // result's text.
-const beaconLinePrefix = "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: "
+const beaconLinePrefix = adapt.BeaconLinePrefix
 
 // rollbackTimeout bounds a rollback's requests, which outlive the call.
 const rollbackTimeout = 15 * time.Second
@@ -31,7 +32,10 @@ func (at *Attachment) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		if method == "tools/list" {
 			res, err = next(ctx, method, req)
 			if list, ok := res.(*mcp.ListToolsResult); ok && err == nil {
+				lr, _ := req.(*mcp.ListToolsRequest)
+				at.describeTools(list, list.NextCursor == "" && (lr == nil || lr.Params == nil || lr.Params.Cursor == ""))
 				amendTools(list)
+				at.nameApp(ctx, list)
 			}
 			return res, err
 		}
@@ -41,7 +45,7 @@ func (at *Attachment) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		}
 		// Before the MCP SDK validates them (undeclared.go).
 		at.dropUndeclared(ctx, next, call)
-		s := &callScope{at: at, req: call}
+		s := at.newScope(requestOf(call))
 		ctx = context.WithValue(ctx, scopeKey{}, s)
 		defer func() {
 			if r := recover(); r != nil {
@@ -56,20 +60,45 @@ func (at *Attachment) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			return res, err
 		}
 		out, _ := res.(*mcp.CallToolResult)
-		if err != nil || out == nil || out.IsError || ctx.Err() != nil {
-			at.rollback(ctx, s)
+		// A result that asks the client for input (go-sdk's multi-round
+		// trip) isn't final: the client calls again with the answers, and
+		// the handler subscribes again then (as mcpgo's adapter does).
+		failed := err != nil || out == nil || out.IsError || ctx.Err() != nil || out.NeedsInput() || len(out.InputRequests) > 0
+		blk, has, failure := at.finish(ctx, s, failed)
+		switch {
+		case failed:
 			return res, err
-		}
-		if berr := at.addBlock(ctx, s, out); berr != nil {
-			// The conversation is subscribed but wouldn't learn how it's
-			// woken: the call fails, as one whose handler failed does.
-			at.rollback(ctx, s)
-			slog.Warn("appkit: Wakeshift's block for a tool result failed, so the call's subscriptions were rolled back", "tool", s.call.Tool, "err", berr)
-			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{
-				Text: "Wakeshift couldn't finish setting up this conversation's wakes (" + detailOf(berr) + "). Try again."}}}, nil
+		case failure != "":
+			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: failure}}}, nil
+		case has:
+			at.applyBlock(s, out, blk)
+		default:
+			// Nothing to add, but a beacon line ending the app's text is still dropped.
+			dropTrailers(out)
 		}
 		return res, err
 	}
+}
+
+// finish ends a wrapped tool's call once its final result is known: a call
+// that failed has its subscriptions rolled back; one that didn't gets the
+// call's block (has: there's one to add). failure, if not "", is the text
+// of the error result that replaces the call's: Wakeshift's block failed
+// for a call that subscribed, so it was rolled back.
+func (at *Attachment) finish(ctx context.Context, s *callScope, failed bool) (blk adapt.Block, has bool, failure string) {
+	if failed {
+		at.rollback(ctx, s)
+		return adapt.Block{}, false, ""
+	}
+	blk, has, err := at.blockFor(ctx, s)
+	if err != nil {
+		// The conversation is subscribed but wouldn't learn how it's
+		// woken: the call fails, as one whose handler failed does.
+		at.rollback(ctx, s)
+		slog.Warn("appkit: Wakeshift's block for a tool result failed, so the call's subscriptions were rolled back", "tool", s.call.Tool, "err", err)
+		return adapt.Block{}, false, "Wakeshift couldn't finish setting up this conversation's wakes (" + detailOf(err) + "). Try again."
+	}
+	return blk, has, ""
 }
 
 // rollback ends every subscription the call created and no other call has
@@ -91,17 +120,29 @@ func (at *Attachment) rollback(ctx context.Context, s *callScope) {
 	}
 }
 
-// addBlock adds the call's one block to out: what the conversation needs to
-// be woken (from the call's pending-addition record, if a subscribe or
+// blockFor is the call's one block: what the conversation needs to be
+// woken (from the call's pending-addition record, if a subscribe or
 // ResolveSession made one; otherwise what any other tool result of the
 // app's carries), and a line per event a native caller should subscribe
 // to. A call that names no conversation, and subscribed nothing, gets
-// nothing. Only a failure for a call that subscribed is returned: without
-// a subscription, the block is a courtesy.
-func (at *Attachment) addBlock(ctx context.Context, s *callScope, out *mcp.CallToolResult) error {
+// nothing (has false). Only a failure for a call that subscribed is
+// returned: without a subscription, the block is a courtesy.
+//
+// Notes from the call's unsubscribes come first, whatever else it gets.
+func (at *Attachment) blockFor(ctx context.Context, s *callScope) (blk adapt.Block, has bool, err error) {
+	blk, has, err = at.fetchBlock(ctx, s)
+	if err != nil || len(s.notes) == 0 {
+		return blk, has, err
+	}
+	blk.Text = strings.TrimSpace(strings.Join(s.notes, " ") + "\n\n" + blk.Text)
+	return blk, true, nil
+}
+
+// fetchBlock is the call's block from /calls/addition (blockFor).
+func (at *Attachment) fetchBlock(ctx context.Context, s *callScope) (blk adapt.Block, has bool, err error) {
 	wire := s.call.wire()
 	if s.pending == "" && len(s.native) == 0 && wire.Session == "" && wire.Conversation == "" && conversationKey(wire.Meta) == "" {
-		return nil
+		return adapt.Block{}, false, nil
 	}
 	body := map[string]any{"call": wire}
 	if s.pending != "" {
@@ -117,21 +158,31 @@ func (at *Attachment) addBlock(ctx context.Context, s *callScope, out *mcp.CallT
 	}
 	if err := at.app.eventsCall(ctx, "POST", "/api/apps/v1/calls/addition", body, &add); err != nil {
 		if s.armed || len(s.native) > 0 {
-			return err
+			return adapt.Block{}, false, err
 		}
 		slog.Warn("appkit: Wakeshift's addition to a tool result", "tool", s.call.Tool, "err", err)
-		return nil
+		return adapt.Block{}, false, nil
 	}
-	text := strings.TrimSpace(add.Text)
-	mergeBlock(out, text, add.Trailer, add.Meta)
-	if text == "" || out.StructuredContent == nil {
-		return nil
+	return adapt.Block{Text: strings.TrimSpace(add.Text), Trailer: add.Trailer, Meta: add.Meta}, true, nil
+}
+
+// applyBlock adds the call's block to out, and its text to a structured
+// result's wakeshift field.
+func (at *Attachment) applyBlock(s *callScope, out *mcp.CallToolResult, blk adapt.Block) {
+	mergeBlock(out, blk.Text, blk.Trailer, blk.Meta)
+	if blk.Text == "" || out.StructuredContent == nil {
+		return
 	}
-	if !setWakeshift(out, text) {
-		at.warnOnce("output:"+s.call.Tool, "appkit: a wrapped tool returns structuredContent that isn't an object, so it can't carry how this conversation is woken: hosts that show only structuredContent won't see it",
-			"tool", s.call.Tool)
+	if !setWakeshift(out, blk.Text) {
+		at.warnStructured(s)
 	}
-	return nil
+}
+
+// warnStructured warns, once per tool, that a wrapped tool's structured
+// result isn't an object.
+func (at *Attachment) warnStructured(s *callScope) {
+	at.warnOnce("output:"+s.call.Tool, "appkit: a wrapped tool returns structuredContent that isn't an object, so it can't carry how this conversation is woken: hosts that show only structuredContent won't see it",
+		"tool", s.call.Tool)
 }
 
 // amendTools gives each wrapped tool's object output schema in a tools/list
@@ -191,67 +242,30 @@ var wakeArgDescriptions = func() map[string]string {
 
 // schemaMap is a schema (a *jsonschema.Schema, raw JSON or a map) as a
 // fresh map.
-func schemaMap(schema any) (map[string]any, bool) {
-	b, err := json.Marshal(schema)
-	if err != nil {
-		return nil, false
-	}
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil || m == nil {
-		return nil, false
-	}
-	return m, true
-}
+func schemaMap(schema any) (map[string]any, bool) { return adapt.SchemaMap(schema) }
 
 // withWakeshiftField is an object schema with an optional wakeshift string
-// added, and whether it changed: anything else, or a schema that already
-// names it, is left as it was. The shared fixture wrapped-block.json
-// (output_schemas) pins it.
+// added, and whether it changed (adapt.WithWakeshiftField).
 func withWakeshiftField(schema map[string]any) (map[string]any, bool) {
-	if schema["type"] != "object" {
-		return schema, false
-	}
-	props := map[string]any{}
-	if p, has := schema["properties"]; has && p != nil {
-		m, ok := p.(map[string]any)
-		if !ok {
-			return schema, false
-		}
-		if _, named := m[WakeshiftField]; named {
-			return schema, false
-		}
-		for k, v := range m {
-			props[k] = v
-		}
-	}
-	props[WakeshiftField] = map[string]any{"type": "string", "description": wakeshiftFieldDescription}
-	out := make(map[string]any, len(schema)+1)
-	for k, v := range schema {
-		out[k] = v
-	}
-	out["properties"] = props
-	return out, true
+	return adapt.WithWakeshiftField(schema)
 }
 
 // mergeBlock adds Wakeshift's text to res as a block after the app's
-// content, then a text-carried beacon as the last line, and _meta. A result
-// that already carries a beacon (a tool or older middleware added one)
-// keeps it, last, and gets no second one.
+// content, then a text-carried beacon as the last line, and _meta. Beacon
+// lines ending the app's own text are dropped (dropTrailers). A result
+// whose own _meta carries a connector beacon gets no second one, in _meta
+// or its text.
 func mergeBlock(res *mcp.CallToolResult, text, trailer string, meta map[string]any) {
 	_, metaBeacon := res.Meta[ConnectorMetaKey]
-	existing := takeTrailer(res)
+	dropTrailers(res)
 	if text != "" {
 		res.Content = append(res.Content, &mcp.TextContent{Text: text})
 	}
-	has := metaBeacon || existing != ""
-	switch {
-	case existing != "":
-		res.Content = append(res.Content, &mcp.TextContent{Text: existing})
-	case !has && trailer != "":
+	if !metaBeacon && trailer != "" {
 		res.Content = append(res.Content, &mcp.TextContent{Text: trailer})
 	}
 	for k, v := range meta {
-		if k == ConnectorMetaKey && has {
+		if k == ConnectorMetaKey && metaBeacon {
 			continue
 		}
 		if res.Meta == nil {
@@ -261,57 +275,42 @@ func mergeBlock(res *mcp.CallToolResult, text, trailer string, meta map[string]a
 	}
 }
 
-// takeTrailer takes a beacon line off the end of res's text (dropping its
-// block if nothing else is in it), returning it ("" if there's none).
-func takeTrailer(res *mcp.CallToolResult) string {
-	if len(res.Content) == 0 {
-		return ""
+// dropTrailers takes every beacon line off the end of res's last text
+// (dropping its block if nothing else is in it). Only Wakeshift's own
+// trailer may end a wrapped tool's text: a hook acts on the beacon there,
+// and one in the app's text may be someone else's, relayed (a chat message
+// carrying a beacon minted for another session).
+func dropTrailers(res *mcp.CallToolResult) {
+	for {
+		i := len(res.Content) - 1
+		for i >= 0 {
+			if _, ok := res.Content[i].(*mcp.TextContent); ok {
+				break
+			}
+			i--
+		}
+		if i < 0 {
+			return
+		}
+		tc := res.Content[i].(*mcp.TextContent)
+		rest, line := adapt.SplitTrailer(tc.Text)
+		if line == "" {
+			return
+		}
+		if rest == "" {
+			res.Content = append(res.Content[:i:i], res.Content[i+1:]...)
+		} else {
+			tc.Text = rest
+		}
 	}
-	tc, ok := res.Content[len(res.Content)-1].(*mcp.TextContent)
-	if !ok {
-		return ""
-	}
-	text := strings.TrimRight(tc.Text, " \t\r\n")
-	rest, line := "", text
-	if i := strings.LastIndexByte(text, '\n'); i >= 0 {
-		rest, line = text[:i], text[i+1:]
-	}
-	if !strings.HasPrefix(line, beaconLinePrefix) || !strings.HasSuffix(line, ")") {
-		return ""
-	}
-	if rest = strings.TrimRight(rest, " \t\r\n"); rest == "" {
-		res.Content = res.Content[:len(res.Content)-1]
-	} else {
-		tc.Text = rest
-	}
-	return line
 }
 
 // setWakeshift sets a structured result's wakeshift field to the block's
 // text, reporting false if structuredContent isn't an object.
 func setWakeshift(res *mcp.CallToolResult, text string) bool {
-	var b []byte
-	switch v := res.StructuredContent.(type) {
-	case nil:
-		return false
-	case json.RawMessage:
-		b = v
-	default:
-		var err error
-		if b, err = json.Marshal(v); err != nil {
-			return false
-		}
+	out, ok := adapt.SetWakeshift(res.StructuredContent, text)
+	if ok {
+		res.StructuredContent = out
 	}
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(b, &obj) != nil || obj == nil {
-		return false
-	}
-	t, _ := json.Marshal(text)
-	obj[WakeshiftField] = t
-	nb, err := json.Marshal(obj)
-	if err != nil {
-		return false
-	}
-	res.StructuredContent = json.RawMessage(nb)
-	return true
+	return ok
 }

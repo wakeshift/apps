@@ -1,5 +1,6 @@
-// Errors the engine throws for a request it refuses. Messages name players,
-// seats and amounts, never cards: they can reach any player.
+// Errors the engine throws for a request it refuses. Messages may name
+// players, seats and amounts, never cards: they can reach any player. They're
+// for logs and developers; an app words what its users read from the code.
 
 export type ErrorCode =
   | "bad_config"

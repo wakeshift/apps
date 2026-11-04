@@ -10,24 +10,25 @@
 //   const attached = wake.attach(server, { identify: (extra) => ({ user: userOf(extra) }) })
 //   server.registerTool("join",
 //     { description: "…", inputSchema: attached.inputs({ table: z.string() }) },
-//     attached.events("join", async ({ table }, call) => {
+//     attached.events("join", { subscribes: [turn] }, async ({ table }, call) => {
 //       const sub = await call.subscribe(turn, { table }, { reason: `Playing at ${table}` })
 //       await casino.seat(call.user!, table, sub.id)
 //       return `You're seated at ${table}.`
 //     }))
 
+import { UNNAMED_APP, unnamedNotifiesParts, withSubscribes } from "./events.js";
 import { z } from "zod";
 import * as z3 from "zod/v3";
 import * as z4 from "zod/v4";
-import type { CallToolResult, ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
-import type { McpServer, ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import { getObjectShape, isZ4Schema, normalizeObjectSchema, safeParseAsync, type AnySchema, type SchemaInput, type ShapeOutput, type ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import * as z4mini from "zod/v4-mini";
+import type { CallToolResult, ToolCallExtra } from "./mcp.js";
+import { getObjectShape, isSchema, isZ4Schema, normalizeObjectSchema, type AnySchema, type SchemaInput, type ShapeOutput, type ZodRawShapeCompat } from "./zod.js";
+import type { Host } from "./host.js";
 import { WakeshiftError } from "./errors.js";
 import { EXTENSION_KEY, dialectOf } from "./spec.js";
 import { takesTasks } from "./discover.js";
 import type { Identity, WakeEvent } from "./events.js";
-import { packCall, type Call, type Duration, type Recognized, type Wakeshift } from "./wakeshift.js";
+import { packCall, userAgentOf, type Call, type Duration, type Recognized, type Wakeshift } from "./wakeshift.js";
 
 // Wakeshift's three arguments (wakeshift.ts's SESSION_ARG, HARNESS_ARG and
 // CONVERSATION_ARG, repeated: that module imports this one).
@@ -35,8 +36,7 @@ const SESSION_ARG = "session_key";
 const HARNESS_ARG = "harness";
 const CONVERSATION_ARG = "conversation_id";
 
-/** MCP's own extra for a tool call: the request's signal, auth, _meta, HTTP request. */
-export type ToolCallExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
+export type { ToolCallExtra };
 
 // What the agent is told each of Wakeshift's arguments is: the Go SDK's
 // WakeArgs, word for word.
@@ -82,17 +82,48 @@ const byVersion = {
 };
 
 // fieldsFor is Wakeshift's fields in the zod API shape's own fields use
-// (the default import's for an empty shape).
-function fieldsFor<K extends "inputs" | "output">(shape: ZodRawShapeCompat, kind: K): K extends "inputs" ? WakeInputs : WakeOutputShape {
+// (for an empty shape, the default import's, or zod 4's for the MCP SDK
+// 2.x, which takes only zod 4).
+function fieldsFor<K extends "inputs" | "output">(shape: ZodRawShapeCompat, kind: K, host?: Host): K extends "inputs" ? WakeInputs : WakeOutputShape {
   const first = Object.values(shape ?? {})[0];
-  const fields = !first ? (kind === "inputs" ? wakeInputs : wakeOutput) : byVersion[isZ4Schema(first) ? "v4" : "v3"][kind];
+  const version = first ? (isZ4Schema(first) ? "v4" : "v3") : host?.version === 2 ? "v4" : null;
+  const fields = version ? byVersion[version][kind] : kind === "inputs" ? wakeInputs : wakeOutput;
   return fields as any;
+}
+
+/** @internal Wakeshift's three arguments as attach's own tools take them, in the zod the host's MCP SDK takes. */
+export function wakeInputsFor(host: Host): ZodRawShapeCompat {
+  return host.version === 2 ? byVersion.v4.inputs : wakeInputs;
+}
+
+// withFields is an object schema with fields added, in the schema's own zod
+// API (zod 3, zod 4 classic or mini).
+function withFields(schema: AnySchema, fields: ZodRawShapeCompat): AnySchema {
+  const s = schema as { extend?: (f: ZodRawShapeCompat) => AnySchema };
+  if (typeof s.extend === "function") return s.extend(fields);
+  return z4mini.extend(schema as any, fields as any) as AnySchema;
 }
 
 /** Wakeshift's three arguments, as attached.inputs adds them. */
 export type WakeInputs = typeof wakeInputs;
 /** The optional wakeshift string attached.output adds. */
 export type WakeOutputShape = typeof wakeOutput;
+/** Wakeshift's three arguments in zod 4, as attached.inputs adds them to a zod 4 object. */
+export type WakeInputsV4 = typeof byVersion.v4.inputs;
+/** Wakeshift's three arguments in zod 3, as attached.inputs adds them to a zod 3 object. */
+export type WakeInputsV3 = typeof byVersion.v3.inputs;
+/** The optional wakeshift string in zod 4, as attached.output adds it to a zod 4 object. */
+export type WakeOutputV4 = typeof byVersion.v4.output;
+/** The optional wakeshift string in zod 3, as attached.output adds it to a zod 3 object. */
+export type WakeOutputV3 = typeof byVersion.v3.output;
+/** What a wrapped tool's arguments must include: Wakeshift's three (attached.inputs adds them). */
+export type WakeArgs = { [K in WakeKey]?: string | undefined };
+/**
+ * The callback attached.events returns, for `server.registerTool`: it takes
+ * the tool's arguments (A, Wakeshift's three included) and your MCP SDK's
+ * request context (C).
+ */
+export type WrappedCallback<A, C> = (args: A, extra: C) => Promise<any>;
 /** The names of Wakeshift's three arguments. */
 export type WakeKey = typeof SESSION_ARG | typeof HARNESS_ARG | typeof CONVERSATION_ARG;
 /** An input shape with Wakeshift's three arguments in it (attached.inputs'). */
@@ -145,12 +176,18 @@ export interface ToolSubscribeOptions {
   label?: string;
 }
 
+/** Any of the app's events: what call.subscribe takes in a tool that doesn't declare its events. */
+export type AnyWakeEvent = WakeEvent<any, any, any>;
+
+/** The arguments event takes, as call.subscribe takes them. */
+export type EventArgs<E> = E extends WakeEvent<infer A, any, any> ? SchemaInput<A> : never;
+
 /**
- * One call of a wrapped tool (attached.events): who's calling, and the
- * calls that subscribe the calling conversation. Only the wrapper makes
- * one, and it works until the handler returns (then CallEnded).
+ * What every ToolCall has, whatever its tool subscribes to: who's calling,
+ * unsubscribe and resolveSession. Only the wrapper makes one, and it works
+ * until the handler returns (then CallEnded).
  */
-export interface ToolCall {
+export interface ToolCallBase<C = any> {
   /** Who attach's identify says is calling (undefined for none). */
   readonly user: string | undefined;
   /** The tool being called. */
@@ -167,17 +204,8 @@ export interface ToolCall {
   readonly session: string | null;
   /** What Wakeshift recognized the agent's program as: null until a subscribe or resolveSession. */
   readonly recognized: Recognized | null;
-  /** MCP's own extra for the call. */
-  readonly extra: ToolCallExtra;
-  /**
-   * Subscribes the calling conversation to event with args, or renews its
-   * subscription. The reply then carries what the conversation needs to be
-   * woken (one block for the call, however many subscribes it makes), and
-   * if the call fails, the subscription is ended. For a native caller
-   * nothing is made. Your tool decides who may: authorize isn't consulted.
-   * A personal event needs a user (identify's).
-   */
-  subscribe<A extends AnySchema>(event: WakeEvent<A, any>, args: SchemaInput<A>, opts?: ToolSubscribeOptions): Promise<Subscription>;
+  /** The call's request context, as your MCP SDK passes it to the tool's callback: 2.x's ctx, 1.x's extra. */
+  readonly extra: C;
   /**
    * Ends the calling conversation's subscription to event with args,
    * resolving to whether one ended. For a native caller it ends the user's
@@ -186,6 +214,68 @@ export interface ToolCall {
   unsubscribe<A extends AnySchema>(event: WakeEvent<A, any>, args: SchemaInput<A>): Promise<boolean>;
   /** Finds or starts the calling conversation's session without subscribing it (it doesn't make it wakeable). */
   resolveSession(): Promise<string>;
+}
+
+/** call.subscribe, for a tool that subscribes to the events E. */
+export interface ToolCallSubscribe<E extends AnyWakeEvent = AnyWakeEvent> {
+  /**
+   * Subscribes the calling conversation to event with args, or renews its
+   * subscription. The reply then carries what the conversation needs to be
+   * woken (one block for the call, however many subscribes it makes), and
+   * if the call fails, the subscription is ended. For a native caller
+   * nothing is made. Your tool decides who may: authorize isn't consulted.
+   * A personal event needs a user (identify's). event is one of the events
+   * the tool declares (attached.events' subscribes).
+   */
+  subscribe<Ev extends E>(event: Ev, args: EventArgs<Ev>, opts?: ToolSubscribeOptions): Promise<Subscription>;
+}
+
+/**
+ * One call of a wrapped tool (attached.events): who's calling, and the
+ * calls that subscribe the calling conversation. E is the events the tool
+ * declares (`attached.events(name, { subscribes: [...] }, handler)`):
+ * call.subscribe takes only those, and a tool that declares none has no
+ * call.subscribe. A tool wrapped without subscribes gets a call whose
+ * subscribe takes any of the app's events, and warns when it's used.
+ */
+export type ToolCall<C = any, E extends AnyWakeEvent = AnyWakeEvent> = ToolCallBase<C> & ([E] extends [never] ? {} : ToolCallSubscribe<E>);
+
+/** attached.events' options for a tool. */
+export interface ToolEventsOptions<E extends readonly AnyWakeEvent[] = readonly AnyWakeEvent[]> {
+  /**
+   * The events the tool subscribes the calling conversation to (with
+   * call.subscribe). tools/list then adds a sentence to the tool's
+   * description saying the tool is how the app notifies the agent of them,
+   * in their own descriptions' words, and that the result may ask to start
+   * a listener and offer an install. Agents set Wakeshift's part of a
+   * result aside as unrequested unless the tool's description says so. An
+   * empty list declares that the tool subscribes to nothing.
+   */
+  subscribes: E;
+}
+
+/**
+ * @internal What a subscribe the tool doesn't declare does: warns once per
+ * tool (this release) or throws (error: the next release). Tests flip it.
+ */
+export const undeclaredSubscribe = { error: false };
+
+// eventRef is how a warning writes an event in its fix: the name of the
+// event wake.defineEvent returned.
+const eventRef = (name: string) => `<${name}'s event>`;
+
+/** @internal The warning (or, with undeclaredSubscribe.error, the error) for a subscribe the tool doesn't declare. */
+export function undeclaredMessage(tool: string, event: string, declared: readonly string[] | null, error: boolean): string {
+  const all = [...(declared ?? []), event];
+  const fix = `attached.events(${JSON.stringify(tool)}, { subscribes: [${all.map(eventRef).join(", ")}] }, handler)`;
+  const what =
+    declared === null
+      ? `the tool ${tool} subscribed to ${event} without declaring the events it subscribes to`
+      : declared.length === 0
+        ? `the tool ${tool} subscribed to ${event}, but declares that it subscribes to nothing`
+        : `the tool ${tool} subscribed to ${event}, which its subscribes doesn't list (${declared.join(", ")})`;
+  if (error) return `wakeshift: ${what}, so the subscribe was refused. Fix: ${fix}.`;
+  return `wakeshift: ${what}, so tools/list doesn't tell the agent that the tool is how this app notifies it. Fix: ${fix}. It works for now; from the next release an undeclared subscribe throws.`;
 }
 
 /** A ToolCall used after its handler returned. */
@@ -197,14 +287,14 @@ export class CallEnded extends Error {
 }
 
 /** attach's event options. */
-export interface EventsOptions {
+export interface EventsOptions<C = any> {
   /**
    * Asked first whether a wrapped tool's call comes from a client that
    * subscribes to the app's events itself (call.native), for callers the
    * SDK can't tell (an app's own house agents). False leaves it to the
-   * SDK's own checks.
+   * SDK's own checks. It gets the call's request context, as identify does.
    */
-  native?: (extra: ToolCallExtra) => boolean;
+  native?(extra: C): boolean;
 }
 
 // The line a text-carried beacon is on (the core's beacon.Text), which a
@@ -223,20 +313,25 @@ export interface CallAddition {
 
 type Content = CallToolResult["content"][number];
 
-// takeTrailer takes a beacon line off the end of the result's text
-// (dropping its block if nothing else is in it), returning it ("" if
-// there's none).
-function takeTrailer(content: Content[]): string {
-  const last = content.at(-1);
-  if (!last || last.type !== "text") return "";
-  const text = last.text.replace(/[ \t\r\n]+$/, "");
-  const i = text.lastIndexOf("\n");
-  const line = i >= 0 ? text.slice(i + 1) : text;
-  if (!line.startsWith(BEACON_LINE_PREFIX) || !line.endsWith(")")) return "";
-  const rest = i >= 0 ? text.slice(0, i).replace(/[ \t\r\n]+$/, "") : "";
-  if (rest === "") content.pop();
-  else content[content.length - 1] = { ...last, text: rest };
-  return line;
+// dropTrailers takes every beacon line off the end of the result's last
+// text (dropping its block if nothing else is in it). Only Wakeshift's own
+// trailer may end a wrapped tool's text: a hook acts on the beacon there,
+// and one in the app's text may be someone else's, relayed (a chat message
+// carrying a beacon minted for another session).
+function dropTrailers(content: Content[]): void {
+  for (;;) {
+    let i = content.length - 1;
+    while (i >= 0 && content[i]!.type !== "text") i--;
+    if (i < 0) return;
+    const block = content[i] as Extract<Content, { type: "text" }>;
+    const text = block.text.replace(/[ \t\r\n]+$/, "");
+    const j = text.lastIndexOf("\n");
+    const line = j >= 0 ? text.slice(j + 1) : text;
+    if (!line.startsWith(BEACON_LINE_PREFIX) || !line.endsWith(")")) return;
+    const rest = j >= 0 ? text.slice(0, j).replace(/[ \t\r\n]+$/, "") : "";
+    if (rest === "") content.splice(i, 1);
+    else content[i] = { ...block, text: rest };
+  }
 }
 
 /** The structuredContent field a wrapped tool's structured result carries Wakeshift's block in (the same in every SDK). */
@@ -262,8 +357,10 @@ export function withWakeshiftField(schema: unknown): unknown {
 /**
  * @internal Adds the call's block to a wrapped handler's result: Wakeshift's
  * text as a block after the app's content, then a text-carried beacon last,
- * and _meta; a string result stays one text block. A result that already
- * carries a beacon keeps it, last, and gets no second one. A structured
+ * and _meta; a string result stays one text block. Beacon lines ending the
+ * app's own text are dropped (dropTrailers), whether or not there's a block
+ * to add. A result whose own _meta carries a connector beacon gets no second
+ * one, in _meta or its text. A structured
  * result (structuredContent an object) gets the block's text in its
  * wakeshift field too. test/wrapped-block.json is the shape, shared with
  * the other SDKs.
@@ -274,13 +371,11 @@ export function mergeBlock(result: WrappedResult, add: CallAddition): CallToolRe
   const out: CallToolResult = { ...base, content: [...(base.content ?? [])] };
   const text = (add.text ?? "").trim();
   const metaBeacon = !!out._meta && CONNECTOR_META_KEY in out._meta;
-  const existing = takeTrailer(out.content);
+  dropTrailers(out.content);
   if (text) out.content.push({ type: "text", text });
-  const has = metaBeacon || existing !== "";
-  if (existing) out.content.push({ type: "text", text: existing });
-  else if (!has && add.trailer) out.content.push({ type: "text", text: add.trailer });
+  if (!metaBeacon && add.trailer) out.content.push({ type: "text", text: add.trailer });
   for (const [k, v] of Object.entries(add.meta ?? {})) {
-    if (k === CONNECTOR_META_KEY && has) continue;
+    if (k === CONNECTOR_META_KEY && metaBeacon) continue;
     out._meta = { ...(out._meta ?? {}), [k]: v };
   }
   if (isString) {
@@ -288,7 +383,7 @@ export function mergeBlock(result: WrappedResult, add: CallAddition): CallToolRe
     out.content = [{ type: "text", text: texts.join("\n\n") }];
   }
   if (text && out.structuredContent && typeof out.structuredContent === "object" && !Array.isArray(out.structuredContent)) {
-    out.structuredContent = { ...out.structuredContent, [WAKESHIFT_FIELD]: text };
+    out.structuredContent = { ...(out.structuredContent as Record<string, unknown>), [WAKESHIFT_FIELD]: text };
   }
   return out;
 }
@@ -328,22 +423,6 @@ function detailOf(err: unknown): string {
   return err instanceof WakeshiftError ? err.detail : String((err as Error)?.message ?? err);
 }
 
-// The parts of an McpServer the wrapper reads that aren't public: its
-// registered tools (the handler, input and output schemas). A unit test pins
-// them against the supported MCP SDK versions.
-interface RegisteredToolInternal {
-  inputSchema?: AnySchema;
-  outputSchema?: AnySchema;
-  handler?: unknown;
-  callback?: unknown;
-}
-
-function registeredTool(server: McpServer, name: string): RegisteredToolInternal | undefined | null {
-  const tools = (server as unknown as { _registeredTools?: Record<string, RegisteredToolInternal> })._registeredTools;
-  if (!tools || typeof tools !== "object") return null; // an MCP SDK that keeps them elsewhere
-  return tools[name];
-}
-
 interface CreatedSub {
   name: string;
   arguments: unknown;
@@ -359,30 +438,38 @@ interface NativeLine {
 /** @internal What the wrapper needs of attach: the client, the server, who's calling, the event options. */
 export interface AttachContext {
   wake: Wakeshift;
-  server: McpServer;
-  /** Who attach's identify says is calling: its user and client. */
-  identify(extra: ToolCallExtra): Identity | undefined;
+  /** The server, through what attach needs of its MCP SDK (host.ts). */
+  host: Host;
+  /** Who attach's identify says is calling: its user and client (raw: the MCP SDK's own request context). */
+  identify(raw: unknown): Identity | undefined;
   /** The client's name: the request's (initialize's, else _meta's), else identified (identify's), else "". */
   clientOf(meta: Record<string, unknown> | undefined, identified?: string): string;
-  events: EventsOptions;
+  events: EventsOptions<any>;
   warnOnce(key: string, message: string): void;
+  /** attach serves the wait tool (AttachOptions.wait): only then does a call say its client takes tasks. */
+  wait?: boolean;
 }
 
-/** One tools/call of a wrapped tool: what its handler subscribed, for the block and the rollback. */
-class CallScope implements ToolCall {
+/** @internal One tools/call of a wrapped tool: what its handler subscribed, for the block and the rollback. */
+export class CallScope<C> implements ToolCall<C> {
+  /** The events the tool declares (null: it declares none: attached.events without subscribes). */
+  readonly declared: readonly AnyWakeEvent[] | null;
   user: string | undefined;
   tool: string;
   native = false;
   nativeConversation: string | null = null;
   session: string | null;
   recognized: Recognized | null = null;
-  extra: ToolCallExtra;
+  extra: C;
 
   ended = false;
   pending = "";
   armed = false;
   created: CreatedSub[] = [];
   nativeLines: NativeLine[] = [];
+  // Wakeshift's notes from the call's unsubscribes (one that ended nothing
+  // because the call passed no session key), for the block.
+  notes: string[] = [];
   inflight = new Set<Promise<unknown>>();
   private queue: Promise<unknown> = Promise.resolve();
   // The client's name identify gave, for a request that names none.
@@ -391,9 +478,11 @@ class CallScope implements ToolCall {
   constructor(
     private readonly at: AttachContext,
     tool: string,
-    extra: ToolCallExtra,
+    extra: C,
     private readonly args: { session?: string; harness?: string; conversation?: string },
+    declared: readonly AnyWakeEvent[] | null = null,
   ) {
+    this.declared = declared;
     this.tool = tool;
     this.extra = extra;
     const id = at.identify(extra);
@@ -409,17 +498,18 @@ class CallScope implements ToolCall {
   // User-Agent, the agent's harness and conversation_id arguments, the
   // conversation's session, and who's calling.
   wire(session = this.session): Call {
-    const meta = this.extra._meta as Record<string, unknown> | undefined;
+    const req = this.at.host.req(this.extra);
+    const meta = req.meta;
     return packCall({
       meta,
       clientName: this.at.clientOf(meta, this.identified),
       user: this.user,
       session: session ?? undefined,
-      userAgent: userAgentOf(this.extra),
+      userAgent: userAgentOf(req),
       harness: this.args.harness,
       conversation: this.args.conversation,
       tool: this.tool,
-      tasks: takesTasks(meta, this.extra),
+      tasks: !!this.at.wait && takesTasks(meta, req),
     });
   }
 
@@ -443,9 +533,20 @@ class CallScope implements ToolCall {
     }
   }
 
-  subscribe<A extends AnySchema>(event: WakeEvent<A, any>, args: SchemaInput<A>, opts: ToolSubscribeOptions = {}): Promise<Subscription> {
+  // checkDeclared warns once per tool (or throws, once undeclared subscribes
+  // are an error) when the tool doesn't declare event.
+  private checkDeclared(event: AnyWakeEvent): void {
+    const d = this.declared;
+    if (d && d.some((e) => e === event || e.name === event.name)) return;
+    const names = d ? d.map((e) => e.name) : null;
+    if (undeclaredSubscribe.error) throw new Error(undeclaredMessage(this.tool, event.name, names, true));
+    this.at.warnOnce("undeclared:" + this.tool, undeclaredMessage(this.tool, event.name, names, false));
+  }
+
+  subscribe<Ev extends AnyWakeEvent>(event: Ev, args: EventArgs<Ev>, opts: ToolSubscribeOptions = {}): Promise<Subscription> {
     return this.request(async () => {
       this.checkEvent(event);
+      this.checkDeclared(event);
       const known = event.parseArgs(args);
       if (this.native) {
         this.addNative(event.name, known);
@@ -481,7 +582,15 @@ class CallScope implements ToolCall {
       this.checkEvent(event);
       const known = event.parseArgs(args);
       if (this.native) return this.endNative(event.name, known);
-      const out = await this.at.wake.requestApp<{ ended?: boolean }>("POST", "/event-subscriptions/unsubscribe", { call: this.wire(), name: event.name, arguments: known });
+      const out = await this.at.wake.requestApp<{ ended?: boolean; addition?: CallAddition }>("POST", "/event-subscriptions/unsubscribe", {
+        call: this.wire(),
+        name: event.name,
+        arguments: known,
+      });
+      // addition: the call passed no session key, so it ended nothing; the
+      // block says to call again with it.
+      const note = out.addition?.text?.trim();
+      if (note && !this.notes.includes(note)) this.notes.push(note);
       return !!out.ended;
     });
   }
@@ -560,7 +669,16 @@ class CallScope implements ToolCall {
   // should subscribe to. A call that names no conversation, and subscribed
   // nothing, gets nothing (null). Only a failure for a call that subscribed
   // is thrown: without a subscription, the block is a courtesy.
+  //
+  // Notes from the call's unsubscribes come first, whatever else it gets.
   async addition(): Promise<CallAddition | null> {
+    const add = await this.fetchAddition();
+    if (this.notes.length === 0) return add;
+    const text = [this.notes.join(" "), add?.text?.trim() ?? ""].filter(Boolean).join("\n\n");
+    return { ...(add ?? {}), text };
+  }
+
+  private async fetchAddition(): Promise<CallAddition | null> {
     const wire = this.wire();
     if (!this.pending && this.nativeLines.length === 0 && !wire.session && !wire.conversation && !namesConversation(wire.meta)) return null;
     const body: Record<string, unknown> = { call: wire };
@@ -576,23 +694,25 @@ class CallScope implements ToolCall {
   }
 }
 
+// isInputRequired is whether a handler's result asks the client for input
+// first (resultType input_required, or input requests), as the MCP SDK
+// 2.x's isInputRequiredResult and go-sdk's NeedsInput read it.
+function isInputRequired(result: WrappedResult): boolean {
+  if (!result || typeof result !== "object") return false;
+  const r = result as { resultType?: unknown; inputRequests?: unknown };
+  return r.resultType === "input_required" || (!!r.inputRequests && typeof r.inputRequests === "object" && Object.keys(r.inputRequests).length > 0);
+}
+
 function recognizedOf(a: Partial<Recognized> | undefined): Recognized {
   return { harness: a?.harness ?? null, via: a?.via ?? null, claimed: a?.claimed ?? null };
 }
 
-function headerOf(extra: ToolCallExtra, name: string): string {
-  const h = extra?.requestInfo?.headers as Record<string, string | string[] | undefined> | undefined;
-  if (!h) return "";
-  const v = h[name] ?? h[name.toLowerCase()];
-  return (Array.isArray(v) ? v[0] : v) ?? "";
-}
-
-function userAgentOf(extra: ToolCallExtra): string {
-  return headerOf(extra, "user-agent") || headerOf(extra, "User-Agent");
-}
-
 function hasKey(o: unknown, key: string): boolean {
   return !!o && typeof o === "object" && !Array.isArray(o) && (o as Record<string, unknown>)[key] !== undefined;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
 /**
@@ -604,17 +724,16 @@ function hasKey(o: unknown, key: string): boolean {
  * declares the MCP Events extension (initialize's capabilities, or
  * _meta's). conversation is ChatGPT's conversation, when it names one.
  */
-export function nativeOf(
-  at: Pick<AttachContext, "server" | "clientOf" | "events">,
-  extra: ToolCallExtra,
-  identified?: string,
-): { native: boolean; conversation: string | null } {
-  const meta = (extra._meta ?? {}) as Record<string, unknown>;
+export function nativeOf(at: Pick<AttachContext, "host" | "clientOf" | "events">, extra: unknown, identified?: string): { native: boolean; conversation: string | null } {
+  // A server that doesn't serve MCP Events (an xmcp app's) has no native callers.
+  if (!at.host.servesEvents) return { native: false, conversation: null };
+  const req = at.host.req(extra);
+  const meta = (req.meta ?? {}) as Record<string, unknown>;
   const conversation = typeof meta["openai/session"] === "string" && meta["openai/session"] ? (meta["openai/session"] as string) : null;
   if (at.events.native?.(extra)) return { native: true, conversation };
   if (conversation) return { native: true, conversation };
-  if (dialectOf(at.clientOf(meta, identified), userAgentOf(extra)) === "chatgpt") return { native: true, conversation: null };
-  const caps = at.server.server.getClientCapabilities() as Record<string, unknown> | undefined;
+  if (dialectOf(at.clientOf(meta, identified), userAgentOf(req)) === "chatgpt") return { native: true, conversation: null };
+  const caps = at.host.clientCapabilities();
   if (hasKey(caps?.extensions, EXTENSION_KEY)) return { native: true, conversation: null };
   const metaCaps = meta["io.modelcontextprotocol/clientCapabilities"] as Record<string, unknown> | undefined;
   if (hasKey(metaCaps?.extensions, EXTENSION_KEY)) return { native: true, conversation: null };
@@ -624,36 +743,61 @@ export function nativeOf(
 /**
  * Wakeshift attached to an MCP server: the handle `wake.attach` returns.
  * Wrap a tool's callback with events, and give its input schema
- * Wakeshift's three arguments with inputs.
+ * Wakeshift's three arguments with inputs. C is your MCP SDK's request
+ * context (2.x's ctx, 1.x's extra), which a wrapped call carries as
+ * `call.extra`.
  */
-export class Attached {
+export class Attached<C = any> {
   /** @internal */
   private readonly wrapped = new Map<string, unknown>();
+  // The events each wrapped tool declares (attached.events' subscribes), by tool.
+  private readonly declared = new Map<string, readonly AnyWakeEvent[]>();
 
   /** @internal Use wake.attach. */
   constructor(private readonly at: AttachContext) {}
 
   /**
-   * shape plus Wakeshift's three optional arguments (session_key, harness
-   * and conversation_id), for a wrapped tool's inputSchema:
+   * A tool's input schema plus Wakeshift's three optional arguments
+   * (session_key, harness and conversation_id), for a wrapped tool's
+   * inputSchema: a zod object, `inputSchema: attached.inputs(z.object({ table: z.string() }))`
+   * (as @modelcontextprotocol/server 2.x takes it), or a shape,
    * `inputSchema: attached.inputs({ table: z.string() })`.
    */
-  inputs<S extends ZodRawShapeCompat>(shape: S): S & WakeInputs {
+  inputs<O extends z4.ZodObject>(schema: O): z4.ZodObject<O["shape"] & WakeInputsV4, O["_zod"]["config"]>;
+  inputs<O extends z3.AnyZodObject>(schema: O): z3.ZodObject<O["shape"] & WakeInputsV3, O["_def"]["unknownKeys"], O["_def"]["catchall"]>;
+  inputs<S extends ZodRawShapeCompat>(shape: S): S & WakeInputs;
+  inputs(shape: ZodRawShapeCompat | AnySchema): unknown {
+    if (isSchema(shape)) {
+      const own = getObjectShape(shape);
+      if (!own) throw new Error("wakeshift: attached.inputs takes a zod object or a shape");
+      for (const k of WAKE_KEYS) if (k in own) throw new Error(`wakeshift: attached.inputs adds ${k} itself: leave it out of the schema`);
+      return withFields(shape, byVersion[isZ4Schema(shape) ? "v4" : "v3"].inputs);
+    }
     for (const k of WAKE_KEYS) if (k in (shape ?? {})) throw new Error(`wakeshift: attached.inputs adds ${k} itself: leave it out of the shape`);
-    return { ...shape, ...fieldsFor(shape, "inputs") };
+    return { ...shape, ...fieldsFor(shape, "inputs", this.at.host) };
   }
 
   /**
-   * shape plus an optional wakeshift string, for a wrapped tool's
-   * outputSchema. Optional: every structured result of a wrapped tool gets
-   * the block's text (without the beacon line) in wakeshift, for hosts that
-   * show the model only structuredContent, and tools/list names it in the
-   * tool's output schema; this declares it in your own schema and types.
-   * The block stays in the content too.
+   * A tool's output schema plus an optional wakeshift string, for a wrapped
+   * tool's outputSchema (a zod object or a shape, as inputs takes).
+   * Optional: every structured result of a wrapped tool gets the block's
+   * text (without the beacon line) in wakeshift, for hosts that show the
+   * model only structuredContent, and tools/list names it in the tool's
+   * output schema; this declares it in your own schema and types. The
+   * block stays in the content too.
    */
-  output<S extends ZodRawShapeCompat>(shape: S): S & WakeOutputShape {
+  output<O extends z4.ZodObject>(schema: O): z4.ZodObject<O["shape"] & WakeOutputV4, O["_zod"]["config"]>;
+  output<O extends z3.AnyZodObject>(schema: O): z3.ZodObject<O["shape"] & WakeOutputV3, O["_def"]["unknownKeys"], O["_def"]["catchall"]>;
+  output<S extends ZodRawShapeCompat>(shape: S): S & WakeOutputShape;
+  output(shape: ZodRawShapeCompat | AnySchema): unknown {
+    if (isSchema(shape)) {
+      const own = getObjectShape(shape);
+      if (!own) throw new Error("wakeshift: attached.output takes a zod object or a shape");
+      if (WAKESHIFT_FIELD in own) throw new Error("wakeshift: attached.output adds wakeshift itself: leave it out of the schema");
+      return withFields(shape, byVersion[isZ4Schema(shape) ? "v4" : "v3"].output);
+    }
     if ("wakeshift" in (shape ?? {})) throw new Error("wakeshift: attached.output adds wakeshift itself: leave it out of the shape");
-    return { ...shape, ...fieldsFor(shape, "output") };
+    return { ...shape, ...fieldsFor(shape, "output", this.at.host) };
   }
 
   /**
@@ -663,49 +807,114 @@ export class Attached {
    * a CallToolResult; the reply gets Wakeshift's block. The tool's
    * inputSchema must come from attached.inputs (a type error otherwise).
    * Register it on the server passed to attach.
+   *
+   * subscribes lists the events the tool subscribes to: call.subscribe
+   * takes only those, and tools/list adds a sentence to the tool's
+   * description saying it's how the app notifies the agent of them.
+   *
+   *   attached.events("watch_build", { subscribes: [buildFinished] }, async ({ build }, call) => { … })
+   *
+   * Without subscribes (attached.events(name, handler)), call.subscribe
+   * takes any of the app's events but warns: declare them.
    */
-  events<S extends WakeShape>(name: string, handler: (args: AppArgs<S>, call: ToolCall) => WrappedResult | Promise<WrappedResult>): ToolCallback<S> {
+  events<A extends WakeArgs, const E extends readonly AnyWakeEvent[]>(
+    name: string,
+    opts: ToolEventsOptions<E>,
+    handler: (args: Omit<A, WakeKey>, call: ToolCall<C, E[number]>) => WrappedResult | Promise<WrappedResult>,
+  ): WrappedCallback<A, C>;
+  events<A extends WakeArgs>(name: string, handler: (args: Omit<A, WakeKey>, call: ToolCall<C>) => WrappedResult | Promise<WrappedResult>): WrappedCallback<A, C>;
+  events(name: string, optsOrHandler: unknown, maybeHandler?: unknown): WrappedCallback<any, C> {
     if (!name || typeof name !== "string") throw new Error("wakeshift: attached.events needs the tool's name, as registered");
+    const declared = typeof optsOrHandler === "function" ? null : this.declaredOf(name, optsOrHandler);
+    const handler = typeof optsOrHandler === "function" ? optsOrHandler : maybeHandler;
     if (typeof handler !== "function") throw new Error("wakeshift: attached.events needs a handler");
-    const cb = (async (args: Record<string, unknown>, extra: ToolCallExtra) => this.run(name, cb, handler as any, args ?? {}, extra)) as unknown as ToolCallback<S>;
+    const cb = (async (args: Record<string, unknown>, extra: C) => this.run(name, cb, handler as any, args ?? {}, extra)) as unknown as WrappedCallback<any, C>;
     this.wrapped.set(name, cb);
+    this.declare(name, declared);
     return cb;
+  }
+
+  // declaredOf checks attached.events' options: the tool's subscribes, each
+  // one of this app's events.
+  private declaredOf(name: string, opts: unknown): readonly AnyWakeEvent[] {
+    const list = (opts as { subscribes?: unknown } | null)?.subscribes;
+    if (!Array.isArray(list)) throw new Error(`wakeshift: attached.events("${name}", options, handler): options.subscribes lists the events the tool subscribes to ([] for none)`);
+    for (const e of list) {
+      if (!e || typeof (e as AnyWakeEvent).owner !== "function" || (e as AnyWakeEvent).owner() !== this.at.wake) {
+        throw new Error(`wakeshift: attached.events("${name}", …): subscribes lists ${(e as { name?: unknown })?.name ?? String(e)}, which isn't one of this app's events (wake.defineEvent)`);
+      }
+    }
+    return [...list];
+  }
+
+  // declare records the events a tool declares (null: none declared).
+  private declare(name: string, declared: readonly AnyWakeEvent[] | null): void {
+    if (declared) this.declared.set(name, declared);
+    else this.declared.delete(name);
   }
 
   private async run(
     name: string,
     cb: unknown,
-    handler: (args: Record<string, unknown>, call: ToolCall) => WrappedResult | Promise<WrappedResult>,
+    handler: (args: Record<string, unknown>, call: ToolCall<C>) => WrappedResult | Promise<WrappedResult>,
     input: Record<string, unknown>,
-    extra: ToolCallExtra,
+    extra: C,
   ): Promise<CallToolResult> {
-    const tool = registeredTool(this.at.server, name);
+    const host = this.at.host;
+    const tool = host.registeredTool(name);
     if (tool === undefined || (tool && (tool.handler ?? tool.callback) !== cb)) {
       throw new Error(`wakeshift: attached.events("${name}", …) isn't the tool named ${name} on the server passed to attach: register it with the same name, on that server`);
     }
-    let outputSchema: AnySchema | undefined;
+    let outputSchema: unknown;
     if (tool) {
       const shape = getObjectShape(normalizeObjectSchema(tool.inputSchema));
       if (!shape || WAKE_KEYS.some((k) => !(k in shape))) {
         throw new Error(`wakeshift: the tool ${name} doesn't take Wakeshift's arguments: make its inputSchema with attached.inputs(…)`);
       }
       outputSchema = tool.outputSchema;
-    } else {
+    } else if (!host.framework) {
       this.at.warnOnce("internals", "wakeshift: this MCP SDK keeps its tools where Wakeshift can't read them, so wrapped tools' registration and output aren't checked");
     }
-    const str = (k: string) => (typeof input[k] === "string" && (input[k] as string) ? (input[k] as string) : undefined);
-    const call = new CallScope(this.at, name, extra, { session: str(SESSION_ARG), harness: str(HARNESS_ARG), conversation: str(CONVERSATION_ARG) });
-    const appArgs: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(input)) if (!(WAKE_KEYS as readonly string[]).includes(k)) appArgs[k] = v;
-
+    const { call, appArgs } = this.begin(name, input, extra);
     let result: WrappedResult;
     try {
       result = await handler(appArgs, call);
     } catch (err) {
-      await call.end();
-      await call.rollback();
+      await this.fail(call);
       throw err;
     }
+    return this.finish(call, result, outputSchema);
+  }
+
+  /**
+   * @internal The first half of a wrapped call: the call's scope, from the
+   * tool's arguments (Wakeshift's three among them) and the request's
+   * context, and the app's own arguments. finish (or fail) ends it.
+   */
+  begin(name: string, input: Record<string, unknown>, extra: C): { call: CallScope<C>; appArgs: Record<string, unknown> } {
+    const str = (k: string) => (typeof input[k] === "string" && (input[k] as string) ? (input[k] as string) : undefined);
+    const call = new CallScope<C>(this.at, name, extra, { session: str(SESSION_ARG), harness: str(HARNESS_ARG), conversation: str(CONVERSATION_ARG) }, this.declared.get(name) ?? null);
+    const appArgs: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(input ?? {})) if (!(WAKE_KEYS as readonly string[]).includes(k)) appArgs[k] = v;
+    return { call, appArgs };
+  }
+
+  /** @internal Ends a call whose handler threw: what it subscribed is rolled back. */
+  async fail(call: CallScope<C>): Promise<void> {
+    await call.end();
+    await call.rollback();
+  }
+
+  /**
+   * @internal The second half of a wrapped call: the handler's result with
+   * Wakeshift's block, or rolled back (a failed result, a canceled call, an
+   * output its schema refuses). outputSchema is the tool's, as its MCP SDK
+   * checks it (undefined: not checked here).
+   */
+  async finish(call: CallScope<C>, result: WrappedResult, outputSchema: unknown): Promise<CallToolResult> {
+    const host = this.at.host;
+    const name = call.tool;
+    const extra = call.extra;
     await call.end();
     // Rollback is decided from the final result, the one the client would
     // receive: MCP validates the output after this callback returns, so
@@ -714,7 +923,15 @@ export class Attached {
       await call.rollback();
       return result as unknown as CallToolResult;
     }
-    if ((typeof result === "object" && result.isError) || extra?.signal?.aborted || !(await validOutput(outputSchema, result))) {
+    // A result that asks the client for input (protocol 2026-07-28's
+    // input_required) isn't final: the client calls again with the answers,
+    // and the handler subscribes again then. Nothing it subscribed stays,
+    // and it gets no block (content beside inputRequests is refused).
+    if (isInputRequired(result)) {
+      await call.rollback();
+      return result as CallToolResult;
+    }
+    if ((typeof result === "object" && result.isError) || host.req(extra).signal?.aborted || !(await host.validOutput(outputSchema, result))) {
       await call.rollback();
       return typeof result === "string" ? { content: [{ type: "text", text: result }] } : result;
     }
@@ -729,7 +946,7 @@ export class Attached {
       return { isError: true, content: [{ type: "text", text: `Wakeshift couldn't finish setting up this conversation's wakes (${detailOf(err)}). Try again.` }] };
     }
     const out = mergeBlock(result, add ?? {});
-    if (out.structuredContent && WAKESHIFT_FIELD in out.structuredContent && !(await validOutput(outputSchema, out))) {
+    if (isRecord(out.structuredContent) && WAKESHIFT_FIELD in out.structuredContent && !(await host.validOutput(outputSchema, out))) {
       // A schema that refuses fields it doesn't name (a strict object):
       // MCP would refuse the result, so it goes without the field.
       const { [WAKESHIFT_FIELD]: _dropped, ...own } = out.structuredContent;
@@ -748,15 +965,30 @@ export class Attached {
    * sets the handler when the first tool is registered, perhaps after
    * attach, so a later set is wrapped too (as tasks.ts does).
    */
+  /** @internal Marks name as a wrapped tool, for tools/list (a framework adapter's tool, wrapped outside this handle), with the events it declares (null: none). */
+  markWrapped(name: string, declared: readonly AnyWakeEvent[] | null = null): void {
+    if (!this.wrapped.has(name)) this.wrapped.set(name, true);
+    this.declare(name, declared);
+  }
+
+  /** @internal The events a framework adapter's tool declares, checked as attached.events checks them. */
+  checkDeclared(name: string, opts: unknown): readonly AnyWakeEvent[] {
+    return this.declaredOf(name, opts);
+  }
+
   amendToolsList(): void {
     type Handler = (request: any, extra: any) => Promise<any>;
-    const handlers = (this.at.server.server as any)._requestHandlers as Map<string, Handler> | undefined;
-    if (!(handlers instanceof Map)) return; // a future SDK: schemas stay as registered
+    const handlers = this.at.host.handlers();
+    if (!handlers) return; // a future SDK: schemas stay as registered
     const wrap =
       (h: Handler): Handler =>
       async (request, extra) => {
         const out = await h(request, extra);
-        if (out && Array.isArray(out.tools)) this.amendTools(out.tools);
+        if (out && Array.isArray(out.tools)) {
+          this.amendTools(out.tools);
+          this.describeTools(out.tools);
+          await this.nameApp(out.tools);
+        }
         return out;
       };
     const h = handlers.get("tools/list");
@@ -764,6 +996,44 @@ export class Attached {
     const set = handlers.set.bind(handlers);
     handlers.set = (method: string, h: Handler) => set(method, method === "tools/list" ? wrap(h) : h);
   }
+
+  // describeTools adds the subscribes sentence to each tool that declares
+  // events (withSubscribes; "this app" until nameApp names it). A tool's
+  // own notifies() sentence stays the only one.
+  private describeTools(tools: unknown[]): void {
+    for (let i = 0; i < tools.length; i++) {
+      const t = tools[i] as { name?: unknown; description?: unknown } | null;
+      if (!t || typeof t !== "object" || typeof t.name !== "string") continue;
+      const evs = this.declared.get(t.name);
+      if (!evs || evs.length === 0) continue;
+      const d = typeof t.description === "string" ? t.description : "";
+      const described = withSubscribes(d, evs.map((e) => e.description));
+      if (described !== d) tools[i] = { ...t, description: described };
+    }
+  }
+
+  /**
+   * notifies(description) with no app named says "this app": tools/list
+   * names the app instead, as the console has it (GET /app, asked once). A
+   * name Wakeshift doesn't give, or doesn't give in time (wake.appName),
+   * leaves "this app".
+   */
+  private async nameApp(tools: unknown[]): Promise<void> {
+    const [first, second] = unnamedNotifiesParts();
+    const has = (t: unknown) => {
+      const d = (t as { description?: unknown } | null)?.description;
+      return typeof d === "string" && d.includes(first) && d.includes(second);
+    };
+    if (!tools.some(has)) return;
+    const name = await this.at.wake.appName();
+    if (!name) return;
+    const [named1, named2] = [first.replace(UNNAMED_APP, name), second.replace("This app", name.charAt(0).toUpperCase() + name.slice(1))];
+    for (let i = 0; i < tools.length; i++) {
+      const t = tools[i] as { description: string };
+      if (has(t)) tools[i] = { ...t, description: t.description.replace(first, named1).replace(second, named2) };
+    }
+  }
+
 
   private amendTools(tools: unknown[]): void {
     for (let i = 0; i < tools.length; i++) {
@@ -773,14 +1043,4 @@ export class Attached {
       if (schema !== t.outputSchema) tools[i] = { ...t, outputSchema: schema };
     }
   }
-}
-
-// validOutput mirrors McpServer's own check of a result against the tool's
-// outputSchema (validateToolOutput): one it would refuse fails the call.
-async function validOutput(outputSchema: AnySchema | undefined, result: WrappedResult): Promise<boolean> {
-  if (!outputSchema) return true;
-  if (typeof result === "string" || !result.structuredContent) return false;
-  const obj = normalizeObjectSchema(outputSchema);
-  if (!obj) return true;
-  return (await safeParseAsync(obj, result.structuredContent)).success;
 }

@@ -5,17 +5,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { InMemoryTransport, type AuthInfo, type CallToolResult } from "@modelcontextprotocol/server";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { Wakeshift } from "@wakeshift/sdk";
 import { type Casino, GameError } from "../src/casino.js";
 import { defineHoldemEvents } from "../src/events.js";
 import { HOUSE_HEADER, signHouseClaim } from "../src/house.js";
 import { NOTE_DESCRIPTION } from "../src/moderation.js";
+import { mcpEndpoint } from "../src/server.js";
 import { holdemServer } from "../src/tools.js";
 
 /** A signed-in client of holdemServer, and the note each act reached the casino with. */
@@ -140,27 +137,30 @@ function stubCasino(o: { joinFails?: boolean; seatedAt?: string; known?: boolean
   return { casino, log };
 }
 
-/** Hold'em's MCP endpoint over HTTP (a new server per request, signed in as client), and clients of it. */
-async function serve(t: { after: (fn: () => Promise<void>) => void }, casino: Casino, client = "Claude Code") {
+/**
+ * Hold'em's MCP endpoint over HTTP (mcpEndpoint: a new server per request,
+ * signed in as client), and clients of it: on protocol 2026-07-28 if modern,
+ * else initializing first.
+ */
+async function serve(t: { after: (fn: () => Promise<void>) => void }, casino: Casino, client = "Claude Code", modern = false) {
   const core = new FakeCore();
   const wake = new Wakeshift({ key: "wst_test_holdem_" + "x".repeat(43), core: "http://core.test", fetch: core.fetch, onWarning: () => {} });
   const events = defineHoldemEvents(wake, casino);
+  const endpoint = mcpEndpoint(() => holdemServer({ wake, casino, events, secret: "tools-test-secret-at-least-32-bytes-long", publicUrl: "http://localhost", log: () => {}, houseSecret: HOUSE_SECRET }));
   const http = createServer(async (req: IncomingMessage & { auth?: AuthInfo }, res) => {
     req.auth = { token: TOKEN, clientId: "c", scopes: [], extra: { signedIn: { user: "p_1", client, agent: "claude-code" } } };
-    const server = holdemServer({ wake, casino, events, secret: "tools-test-secret-at-least-32-bytes-long", publicUrl: "http://localhost", log: () => {}, houseSecret: HOUSE_SECRET });
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    await server.connect(transport);
-    await transport.handleRequest(req, res);
+    await endpoint.serve(req, res);
   });
   await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
   const url = new URL(`http://127.0.0.1:${(http.address() as AddressInfo).port}/mcp`);
   const clients: Client[] = [];
   t.after(async () => {
     for (const c of clients) await c.close();
+    await endpoint.close();
     await new Promise<void>((r) => http.close(() => r()));
   });
   const open = async (headers: Record<string, string> = {}, name = "test-agent") => {
-    const c = new Client({ name, version: "0" });
+    const c = new Client({ name, version: "0" }, modern ? { versionNegotiation: { mode: { pin: "2026-07-28" } } } : {});
     await c.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { Authorization: "Bearer " + TOKEN, ...headers } } }));
     clients.push(c);
     return c;
@@ -172,7 +172,7 @@ async function serve(t: { after: (fn: () => Promise<void>) => void }, casino: Ca
       return { ...r, text: r.content.map((x) => (x.type === "text" ? x.text : "")).join("\n") };
     };
   };
-  return { core, connect, listTools: async () => (await (await open()).listTools()).tools };
+  return { core, connect, open, listTools: async () => (await (await open()).listTools()).tools };
 }
 
 test("every tool takes Wakeshift's session_key, harness and conversation_id", async (t) => {
@@ -247,6 +247,38 @@ test("a house agent joins as a native client: seated first, told to subscribe it
   assert.doesNotMatch(r.text, /session_key/);
   assert.equal(log.identify[0]!.info.harness, "house");
   assert.equal(log.identify[0]!.info.house, true);
+});
+
+test("a protocol 2026-07-28 client connects without initialize, and joins as an initializing client does", async (t) => {
+  const { casino, log } = stubCasino();
+  const { core, connect, open } = await serve(t, casino, "Claude Code", true);
+  const c = await open();
+  assert.equal(c.getProtocolEra(), "modern");
+  assert.equal(c.getServerVersion()?.name, "agent-holdem");
+  const tools = (await c.listTools()).tools.map((x) => x.name);
+  for (const name of ["act", "join", "leave", "state"]) assert.ok(tools.includes(name), name);
+  // subscriptions/listen (Claude Code opens one) is acknowledged while it stays open.
+  await (await c.listen({ toolsListChanged: true }, { timeout: 5000 })).close();
+  const r = await (await connect())("join", {});
+  assert.ok(!r.isError, r.text);
+  const [sub] = core.bodies("/event-subscriptions");
+  assert.deepEqual(sub.arguments, { table: "tnew" });
+  assert.equal(sub.call.user, "p_1", "the sign-in reaches the tool call");
+  assert.equal(sub.call.client, "test-agent", "the client's name as the request gives it (there's no initialize)");
+  assert.match(r.text, /session_key "wsc_s1"/);
+  assert.match(r.text, /WAKESHIFT BLOCK$/);
+  assert.equal(log.identify[0]!.info.harness, "claude-code");
+});
+
+test("a house agent on protocol 2026-07-28 is still a house agent: its claim's headers reach the tool call", async (t) => {
+  const { casino, log } = stubCasino();
+  const { core, connect } = await serve(t, casino, "Claude Code", true);
+  const claim = signHouseClaim(HOUSE_SECRET, "holdem", { agent: "h1", model: "Haiku 5.5" }, TOKEN, Math.floor(Date.now() / 1000) + 300);
+  const r = await (await connect({ [HOUSE_HEADER]: claim }, "wakeshift-house"))("join", {});
+  assert.ok(!r.isError, r.text);
+  assert.equal(core.bodies("/event-subscriptions").length, 0);
+  assert.deepEqual(core.bodies("/calls/addition")[0].native, [{ name: "holdem.turn", arguments: { table: "thouse" } }]);
+  assert.equal(log.identify[0]!.info.harness, "house");
 });
 
 test("a ChatGPT conversation is its own native player, keyed by its conversation", async (t) => {

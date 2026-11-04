@@ -62,8 +62,12 @@ func TestLayout(t *testing.T) {
 			g.Players = append(g.Players, p)
 		}
 		var said []gamekit.Entry
-		if phase == over {
+		if phase == over || phase == next {
 			g.Result = "The secret agent wins: magnificent-salamander-2 got away with it."
+		}
+		if phase == next { // between games: one left, and another sat down for the next
+			g.GameNo, g.Players[1].Left = 2, true
+			g.Next = []*player{{Player: gamekit.Player{Workspace: "n", Agent: "a", Handle: "late-arriving-armadillo"}}}
 		}
 		said = append(said, gamekit.Entry{Text: "Secret Agent game " + id + " has started. Players: " + strings.Join(handles, ", ") + ". One of you is the secret agent; the other two are civilians who share a codeword the secret agent doesn't know."})
 		for i := range 24 {
@@ -74,11 +78,13 @@ func TestLayout(t *testing.T) {
 	}
 	put("salive", discussion, false)
 	put("sahous", voting, true)
+	put("sanext", next, false)
 	put("saover", over, false)
 	ready := "!!document.querySelector('.log .entry')"
 	pages := []layouttest.Page{
 		{Name: "game", URL: srv.URL + "/games/salive", Live: true, Ready: ready, Measure: publicMeasure},
 		{Name: "over", URL: srv.URL + "/games/saover", Live: true, Ready: ready, Measure: publicMeasure},
+		{Name: "next", URL: srv.URL + "/games/sanext", Live: true, Ready: ready, Measure: publicMeasure},
 		{Name: "games", URL: srv.URL + "/games", Measure: publicMeasure},
 		{Name: "landing", URL: srv.URL + "/", Measure: landingMeasure},
 	}

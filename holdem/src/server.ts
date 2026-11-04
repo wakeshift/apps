@@ -8,7 +8,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from "@modelcontextprotocol/node";
+import { createMcpHandler, isLegacyRequest, type McpServer } from "@modelcontextprotocol/server";
 import type { Wakeshift } from "@wakeshift/sdk";
 import { Analytics, clientAddress, type AnalyticsConfig } from "./analytics.js";
 import { AuthorizePage } from "./authorize.js";
@@ -141,16 +142,13 @@ export function holdemHandler(o: ServerOptions): { handle: (req: IncomingMessage
   const json = (res: ServerResponse, status: number, body: unknown) => send(res, status, "application/json", JSON.stringify(body), { "Cache-Control": "no-store" });
   const notFound = (res: ServerResponse) => page(res, 404, messagePage("Not here", "There's nothing at this address.", "404"));
 
+  const endpoint = mcpEndpoint(() =>
+    holdemServer({ wake: o.wake, casino: o.casino, events: o.events, secret: o.secret, publicUrl: base, log: o.log, houseSecret: o.houseSecret, operatorNote: o.operatorNote }),
+  );
+
   async function mcp(req: IncomingMessage, res: ServerResponse) {
     if (!signIn.authenticate(req, res)) return;
-    const server = holdemServer({ wake: o.wake, casino: o.casino, events: o.events, secret: o.secret, publicUrl: base, log: o.log, houseSecret: o.houseSecret, operatorNote: o.operatorNote });
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    res.on("close", () => {
-      transport.close().catch(() => {});
-      server.close().catch(() => {});
-    });
-    await server.connect(transport);
-    await transport.handleRequest(req, res);
+    await endpoint.serve(req, res);
   }
 
   async function route(req: IncomingMessage, res: ServerResponse) {
@@ -292,7 +290,63 @@ export function holdemHandler(o: ServerOptions): { handle: (req: IncomingMessage
       else res.end();
     });
   };
-  return { handle, close: () => live.close() };
+  return {
+    handle,
+    close: () => {
+      live.close();
+      endpoint.close().catch(() => {});
+    },
+  };
+}
+
+/**
+ * MCP over Streamable HTTP, stateless: a server per request (newServer).
+ * Protocol 2026-07-28 requests (each names its version, client and
+ * capabilities in its _meta) go to the MCP SDK's handler for that revision;
+ * the rest, from clients that initialize first, to a stateless transport of
+ * their own. Both answer with JSON, and both hand the sign-in (req.auth) to
+ * tool calls as ctx.http.authInfo.
+ */
+export function mcpEndpoint(newServer: () => McpServer): { serve: (req: IncomingMessage, res: ServerResponse) => Promise<void>; close: () => Promise<void> } {
+  const modern = createMcpHandler(newServer, { legacy: "reject", responseMode: "json" });
+  const serveModern = toNodeHandler(modern);
+  async function serve(req: IncomingMessage, res: ServerResponse) {
+    const body = req.method === "POST" ? await readMcpBody(req, res) : undefined;
+    if (body === null) return;
+    if (req.method === "POST" && !(await isLegacyRequest(await toWebRequest(req, body), body))) return serveModern(req, res, body);
+    const server = newServer();
+    const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on("close", () => {
+      transport.close().catch(() => {});
+      server.close().catch(() => {});
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, body);
+  }
+  return { serve, close: () => modern.close() };
+}
+
+/** The MCP SDK's limit on a request's body. */
+const MAX_MCP_BODY = 4 << 20;
+
+/** An MCP POST's JSON body; null once it's answered (too large, or not JSON), as the MCP SDK's transport answers them. */
+async function readMcpBody(req: IncomingMessage, res: ServerResponse): Promise<unknown | null> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const c of req) {
+    size += (c as Buffer).length;
+    if (size > MAX_MCP_BODY) {
+      res.writeHead(413, { "Content-Type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Request too large" }, id: null }));
+      return null;
+    }
+    chunks.push(c as Buffer);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null }));
+    return null;
+  }
 }
 
 /** What a player took from a hand's pots. */

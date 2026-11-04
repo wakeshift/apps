@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/wakeshift/wakeshift-go/appkit/internal/adapt"
 	"github.com/wakeshift/wakeshift-go/internal/mcpevents/event"
 )
 
@@ -49,12 +50,13 @@ type AttachOptions struct {
 	// names (the TokenInfo's UserID), and the agent from ActAs for an app
 	// acting for its agents. Nil: no request has a user.
 	Identify func(context.Context, *auth.TokenInfo) (Identity, error)
-	// Tools names which of Attach's own tools it adds: SubscribeEventsTool,
-	// UnsubscribeEventsTool and ListSubscriptionsTool. Nil adds all three;
-	// an empty list adds none. Leave out unsubscribe_events or
-	// list_subscriptions only if your own tools let a person see and stop
-	// their subscriptions. Attach panics on a name that isn't one of them.
-	Tools []string
+	// Tools picks which of Attach's own tools it adds. The zero value is
+	// the default: subscribe_events, unsubscribe_events and
+	// list_subscriptions, and not the wait tool. Turn the wait tool on with
+	// Tools: appkit.Tools{Wait: appkit.Wait{Enabled: true}}, and leave one
+	// of the others out with, e.g., Tools: appkit.Tools{Subscribe:
+	// appkit.Tool{Disabled: true}}.
+	Tools Tools
 	// Events configures the event features.
 	Events EventsOptions
 }
@@ -72,9 +74,13 @@ type EventsOptions struct {
 type Attachment struct {
 	app      *App
 	identify func(context.Context, *auth.TokenInfo) Identity
-	events   EventsOptions
-	warned   sync.Map // warnOnce's keys
-	schemas  sync.Map // *mcp.Tool → its input schema, decoded (undeclared.go)
+	native   func(context.Context, adapt.Request) bool // EventsOptions.Native, for any library's request
+	wait     bool                                      // Tools.Wait: Wrap serves the wait tool (tasks.go)
+	warned   sync.Map                                  // warnOnce's keys
+	schemas  sync.Map                                  // *mcp.Tool → its input schema, decoded (undeclared.go)
+
+	declMu sync.Mutex
+	decls  declarations // the wrapped tools' Subscribes (subscribes.go)
 }
 
 // Attach attaches Wakeshift to the app's MCP server: the one call that
@@ -99,7 +105,8 @@ type Attachment struct {
 //     one (unsubscribe_events): a headless app's users have no other way.
 //
 // AttachOptions.Tools picks which of the three tools it adds (all three by
-// default).
+// default), and Tools.Wait adds Wakeshift's wait tool for Claude Code (off
+// by default).
 //
 // Call it once per server, after the last DefineEvent (with none defined it
 // panics: it would serve nothing; calling it again replaces the tools, as
@@ -119,10 +126,14 @@ type Attachment struct {
 //	h := mcp.NewStreamableHTTPHandler(…, &mcp.StreamableHTTPOptions{Stateless: true})
 //	mux.Handle("/mcp", requireAuth(attached.Wrap(h)))
 func (a *App) Attach(srv *mcp.Server, opts AttachOptions) *Attachment {
-	if len(a.events()) == 0 {
-		panic("appkit: Attach needs at least one event (DefineEvent) defined first")
+	var native func(context.Context, adapt.Request) bool
+	if f := opts.Events.Native; f != nil {
+		native = func(ctx context.Context, r adapt.Request) bool {
+			req, _ := r.Lib.(*mcp.CallToolRequest)
+			return req != nil && f(ctx, req)
+		}
 	}
-	at := &Attachment{app: a, events: opts.Events, identify: func(ctx context.Context, ti *auth.TokenInfo) Identity {
+	at := a.attach(func(ctx context.Context, ti *auth.TokenInfo) Identity {
 		if ti == nil || opts.Identify == nil {
 			return Identity{}
 		}
@@ -131,16 +142,30 @@ func (a *App) Attach(srv *mcp.Server, opts AttachOptions) *Attachment {
 			return Identity{}
 		}
 		return id
-	}}
-	a.addEventTools(srv, at.identify, builtinTools(opts.Tools))
+	}, native, opts.Tools.Wait.Enabled)
+	for _, t := range a.eventTools(at, opts.Tools.builtin()) {
+		srv.AddTool(goSDKTool(t))
+	}
 	// The MCP server's own pipeline: every request Wrap passes on comes
 	// through here. A wrapped tool's call (Events) gets its block here,
 	// after the MCP SDK has validated the output and filled
 	// structuredContent, and the subscriptions it made are rolled back here
 	// if the final result failed.
 	srv.AddReceivingMiddleware(at.middleware)
+	return at
+}
+
+// attach is Attach without the MCP library: the Attachment, and the app
+// marked as serving its tools. The MCP library's side (go-sdk's Attach, or
+// an adapter's) adds the tools and the per-call scope.
+func (a *App) attach(identify func(context.Context, *auth.TokenInfo) Identity, native func(context.Context, adapt.Request) bool, wait bool) *Attachment {
+	if len(a.events()) == 0 {
+		panic("appkit: Attach needs at least one event (DefineEvent) defined first")
+	}
+	at := &Attachment{app: a, identify: identify, native: native, wait: wait}
 	// A process that serves the app's tools sends the manifest
-	// automatically (manifest.go); one that only emits never does.
+	// automatically (manifest.go); one that only emits sends it only when
+	// Wakeshift doesn't know an event it emits.
 	a.mu.Lock()
 	a.attached = true
 	a.mu.Unlock()
@@ -148,9 +173,9 @@ func (a *App) Attach(srv *mcp.Server, opts AttachOptions) *Attachment {
 }
 
 // Wrap puts Wakeshift in front of the MCP endpoint's handler, after the
-// endpoint's authentication: MCP Events' methods and capability, and for
-// clients on protocol 2026-07-28 that take MCP tasks, Wakeshift's wait tool
-// and the tasks it answers with (tasks.go).
+// endpoint's authentication: MCP Events' methods and capability, and with
+// AttachOptions.Tools.Wait, for clients on protocol 2026-07-28 that take MCP
+// tasks, Wakeshift's wait tool and the tasks it answers with (tasks.go).
 func (at *Attachment) Wrap(next http.Handler) http.Handler {
 	a := at.app
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,8 +204,12 @@ func (at *Attachment) Wrap(next http.Handler) http.Handler {
 		}
 		switch req.Method {
 		case "server/discover":
-			// The tasks extension too: the wait tool (tasks.go).
-			rewrite(next, w, r, func(b []byte) []byte { return addTasksCapability(addEventsCapability(b)) })
+			// The tasks extension too, if Wrap serves the wait tool (tasks.go).
+			if at.wait {
+				rewrite(next, w, r, func(b []byte) []byte { return addTasksCapability(addEventsCapability(b)) })
+			} else {
+				rewrite(next, w, r, addEventsCapability)
+			}
 			return
 		case "initialize":
 			withEventsCapability(next, w, r)
@@ -194,7 +223,7 @@ func (at *Attachment) Wrap(next http.Handler) http.Handler {
 			if nativeClient(r, req.Params) {
 				drop = SubscribeEventsTool
 			}
-			if wait := takesTasks(p.Meta, r.Header); drop != "" || wait {
+			if wait := at.wait && takesTasks(p.Meta, r.Header); drop != "" || wait {
 				rewrite(next, w, r, editTools(drop, wait))
 				return
 			}
@@ -204,7 +233,7 @@ func (at *Attachment) Wrap(next http.Handler) http.Handler {
 			var p struct {
 				Name string `json:"name"`
 			}
-			if json.Unmarshal(req.Params, &p) == nil && p.Name == WaitTool {
+			if at.wait && json.Unmarshal(req.Params, &p) == nil && p.Name == WaitTool {
 				at.serveTask(w, r, req.ID, req.Method, req.Params)
 				return
 			}
@@ -215,7 +244,7 @@ func (at *Attachment) Wrap(next http.Handler) http.Handler {
 			var p struct {
 				TaskID string `json:"taskId"`
 			}
-			if json.Unmarshal(req.Params, &p) == nil && strings.HasPrefix(p.TaskID, TaskIDPrefix) {
+			if at.wait && json.Unmarshal(req.Params, &p) == nil && strings.HasPrefix(p.TaskID, TaskIDPrefix) {
 				at.serveTask(w, r, req.ID, req.Method, req.Params)
 				return
 			}

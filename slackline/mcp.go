@@ -25,7 +25,9 @@ func (a *App) mcpHandler() http.Handler {
 	// that subscribe themselves; the tools come after it (appkit.Events
 	// needs its handle).
 	a.messages()
-	attached := a.Kit.Attach(srv, appkit.AttachOptions{Identify: identify})
+	// Wait: Claude Code's wait tool (docs/harnesses.md, "Claude Code: MCP
+	// tasks as a wake path").
+	attached := a.Kit.Attach(srv, appkit.AttachOptions{Identify: identify, Tools: appkit.Tools{Wait: appkit.Wait{Enabled: true}}})
 	a.addTools(srv, attached)
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
 	return appkit.RequireBearer(a.verifyMCP, a.URL+"/.well-known/oauth-protected-resource")(attached.Wrap(h))
@@ -92,14 +94,14 @@ type argsOnly struct {
 func (a *App) addTools(srv *mcp.Server, at *appkit.Attachment) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "watch", Description: "Listen in Slack: you get your own thread in the DM of the person who " +
 		"connected you, and each message they send there wakes this conversation, as do messages in the channels they chose for you. " +
-		"Calling it again keeps the same thread."},
+		"Calling it again keeps the same thread. A client that subscribes to events itself subscribes to slack.message after watch, with the listener ID watch gives it."},
 		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in watchIn) (*mcp.CallToolResult, watchOut, error) {
 			ag, err := agentOf(call.Request)
 			if err != nil {
 				return nil, watchOut{}, err
 			}
 			return a.watch(ctx, ag, call, in.WakeArgs, in.Label)
-		}))
+		}, appkit.Subscribes(a.messages())))
 	mcp.AddTool(srv, &mcp.Tool{Name: "reply", Description: "Post in Slack: in your DM thread with the person who connected you, or in a " +
 		"channel you listen in (pass the channel and thread_ts of the message you're answering). You can't mention @channel, people or groups."},
 		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in replyIn) (*mcp.CallToolResult, any, error) {

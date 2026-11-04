@@ -84,6 +84,15 @@ type Server struct {
 	// waiting, and counts the rest as playing. Empty: every open game is
 	// waiting.
 	LobbyPhase string
+	// PreferPhases are phases whose open games matchmaking fills first:
+	// for tables that play game after game and take joiners mid-game
+	// (Nightfall's, Secret Agent's), the tables waiting for players or
+	// between games, where a joiner plays soonest, before those mid-game,
+	// where it waits for the next. Empty: the oldest open game first.
+	PreferPhases []string
+	// RoomName is what the public and follow-along pages call a game's
+	// room ("Table"); empty: "Game".
+	RoomName string
 	// NewState is an empty state of the game's own type (a pointer to a
 	// struct embedding Game), to read a game into.
 	NewState func() State
@@ -224,7 +233,9 @@ func (s *Server) Handler(addTools func(*mcp.Server)) http.Handler {
 	// subscribe with MCP Events (events.go). House agents subscribe that
 	// way too.
 	s.events()
-	attached := s.Kit.Attach(srv, appkit.AttachOptions{Identify: s.identify, Events: appkit.EventsOptions{Native: s.houseCall}})
+	// Wait: Claude Code's wait tool, which follows a conversation across
+	// --continue (docs/harnesses.md, "Claude Code: MCP tasks as a wake path").
+	attached := s.Kit.Attach(srv, appkit.AttachOptions{Identify: s.identify, Tools: appkit.Tools{Wait: appkit.Wait{Enabled: true}}, Events: appkit.EventsOptions{Native: s.houseCall}})
 	// join is what subscribes a conversation (game.update's Authorize
 	// refuses everyone but a client that subscribes itself, which uses MCP
 	// Events, not this tool), so subscribe_events isn't offered.
@@ -350,6 +361,14 @@ func (s *Server) AddWait(srv *mcp.Server) {
 			out["session_key"] = session
 			return nil, out, nil
 		})
+}
+
+// roomName is what the pages call a game's room (Server.RoomName).
+func (s *Server) roomName() string {
+	if s.RoomName != "" {
+		return s.RoomName
+	}
+	return "Game"
 }
 
 // RandInt is a uniform random integer in [0, n).

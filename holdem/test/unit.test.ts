@@ -4,11 +4,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { act as engineAct, chipsInPlay, createTable, sit, startHand, type TableState, toAct as engineToAct } from "../engine/src/index.js";
+import { act as engineAct, chipsInPlay, createTable, EngineError, type ErrorCode, sit, startHand, type TableState, toAct as engineToAct } from "../engine/src/index.js";
 import { Anon, archiveHand } from "../src/archive.js";
 import {
   Casino,
   DAILY_BANKROLL,
+  engineMessage,
   GameError,
   lastHandText,
   MIN_HANDS,
@@ -414,6 +415,69 @@ test("rejoining after a sit-out: seated and dealt in again, and the watch page n
   // Dealt into a hand again, and plays it in time.
   assert.deepEqual(await playSlow(casino, clock, ids, slow.id, ["act"]), ["act"]);
   assert.ok(await casino.tableOf(slow.id));
+});
+
+test("rejoining straight after a sit-out, while the hand they folded goes on: back at the same table, dealt in from the next hand", async (t) => {
+  const db = await testDb(t);
+  const { casino, clock, wakes } = room(db);
+  const ps = [await player(casino, 1), await player(casino, 2), await player(casino, 3)];
+  for (const p of ps) await casino.join(p.id, {});
+  const day = casino.today();
+  const slow = ps.find((p) => p.id === wakes[wakes.length - 1]!.player)!;
+  const ids = ps.map((p) => p.id);
+  const table = (await casino.tableOf(slow.id))!;
+  await playSlow(casino, clock, ids, slow.id, ["out", "out"]);
+  assert.equal(await casino.tableOf(slow.id), undefined);
+  const live = async () => (await db.query<{ state: TableState }>("SELECT state FROM tables WHERE id = $1", [table])).rows[0]!.state;
+  const hand = (await live()).hand!;
+  assert.notEqual(hand.street, "complete", "the hand they were taken out of goes on");
+  assert.ok(hand.players.some((p) => p.player === slow.id && p.left));
+
+  // Before, this was refused with "You is already at this table."
+  const back = await casino.join(slow.id, {});
+  assert.deepEqual([back.table, back.already], [table, false]);
+  assert.equal((await live()).hand!.id, hand.id, "joined during that same hand");
+  const s = await casino.state(slow.id);
+  assert.deepEqual(s.table?.you.cards, [], "not dealt into the hand they left");
+  assert.equal((await money(db, day)).total, 3 * DAILY_BANKROLL);
+
+  // Calling join again keeps the seat.
+  assert.equal((await casino.join(slow.id, {})).already, true);
+  // Dealt into the next hand, and plays it.
+  assert.deepEqual(await playSlow(casino, clock, ids, slow.id, ["act"]), ["act"]);
+  assert.equal(await casino.tableOf(slow.id), table);
+  assert.equal((await money(db, day)).total, 3 * DAILY_BANKROLL);
+});
+
+test("engine errors are worded to the caller, never with their ID or as \"You is\"", () => {
+  const id = "p_AbCdEfGhIjKl";
+  const said = (code: ErrorCode, message: string) => engineMessage(new EngineError(code, message));
+  assert.equal(
+    said("already_seated", `${id} is already at this table`),
+    "You're already at this table: you'll be dealt in at the next hand and woken when it's your move. Call state to see the table.",
+  );
+  assert.equal(said("not_seated", `${id} isn't at this table`), "You're not at this table. Call join to sit down.");
+  assert.equal(said("still_in_hand", `${id} is still in the hand: fold first`), "You're still in this hand. Fold when it's your move, or call leave to go when the hand ends.");
+  assert.equal(said("not_your_turn", `it's not ${id}'s turn`), "It's not your move. You'll be woken when it is; call state to see the table.");
+  assert.equal(said("hand_in_progress", "chips can be added between hands"), "Chips can be added between hands.");
+  assert.equal(said("bad_amount", `${id} has the wrong amount`), "A player has the wrong amount.");
+  // The engine's own refusals of a move, as it words them.
+  const s0 = startHand(sit(sit(createTable({ smallBlind: 1, bigBlind: 2, minBuyIn: 20, maxBuyIn: 200, seats: 6 }), 0, id, 100), 1, "p_OtherPlayer", 100));
+  const who = engineToAct(s0)!.player;
+  const refused = (a: Parameters<typeof engineAct>[2]) => {
+    try {
+      engineAct(s0, who, a);
+    } catch (err) {
+      return engineMessage(err as EngineError);
+    }
+    assert.fail("not refused");
+  };
+  assert.equal(refused({ type: "check" }), "There's no checking: 1 to call. Call state to see your choices.");
+  assert.equal(refused({ type: "raise", amount: 3 }), "Raise to an amount from 4 to 100. Call state to see your choices.");
+  assert.equal(refused({ type: "bet", amount: 4 }), "There's no betting now. Call state to see your choices.");
+  for (const m of [refused({ type: "check" }), refused({ type: "bet", amount: 4 }), refused({ type: "raise", amount: 3 })]) {
+    assert.doesNotMatch(m, /p_|\bYou (is|has|isn't)\b|\byou's\b/);
+  }
 });
 
 test("no strike when the turn's wake didn't go out: taken off the table as before, and it doesn't count against them", async (t) => {
@@ -861,7 +925,7 @@ test("holdem.turn: \"Your table\", its hand_result kind and last_hand in the sch
   };
   const d = turn.definition();
   assert.equal(d.title, "Your table");
-  assert.match(d.description, /\"turn\" is your move.*\"removed\".*a native seat.*\"hand_result\"/s);
+  assert.match(d.description, /^It's your move.*\(a \"turn\"\).*\"removed\".*a native seat.*\"hand_result\"/s);
   assert.ok(d.description.length <= 500, `the description is ${d.description.length} characters: Wakeshift takes at most 500`);
   assert.deepEqual(turn.manifest.payload.properties.type!.enum, ["turn", "removed", "hand_result"]);
   for (const k of ["number", "pot", "board", "winners", "net", "shown", "last_hand"]) assert.ok(k in turn.manifest.payload.properties, k);
@@ -899,6 +963,24 @@ test("a sign-in holds one seat at a table; pickTable names the table join would 
   const elsewhere = await casino.join(b.id, { private: true });
   assert.notEqual(elsewhere.table, picked);
   await assert.rejects(casino.pickTable({ table: "t000000000000" }), /There's no table with that ID/);
+});
+
+test("two conversations of one sign-in joining one table at once get one seat between them", async (t) => {
+  const db = await testDb(t);
+  const { casino } = room(db);
+  // Each round: a fresh table, and two players of one sign-in joining it at
+  // the same moment. The check runs under the table's lock, so the second
+  // sees the first's seat; before, both passed it and both sat (20/20).
+  for (let round = 0; round < 10; round++) {
+    const a = await casino.identify(`c_a${round}`, `guest:race${round}`, { harness: "claude-code" });
+    const b = await casino.identify(`c_b${round}`, `guest:race${round}`, { harness: "claude-code" });
+    const { id } = await casino.pickTable({ private: true });
+    const got = await Promise.allSettled([casino.join(a.id, { table: id }), casino.join(b.id, { table: id })]);
+    const seated = got.filter((r) => r.status === "fulfilled").length;
+    assert.equal(seated, 1, `round ${round}: ${seated} seats for one sign-in`);
+    const refused = got.find((r) => r.status === "rejected");
+    assert.match(String((refused as PromiseRejectedResult).reason), /already has a seat at that table/);
+  }
 });
 
 const cardWord = (c: string) => (c[0] === "T" ? "10" : c[0]!) + { s: "♠", h: "♥", d: "♦", c: "♣" }[c[1]!];

@@ -195,7 +195,7 @@ type queuedTurn struct {
 func (a *App) defineEvents() {
 	e, err := appkit.DefineEvent(a.Kit, "turn", appkit.EventDef[turnArgs, turnPayload]{
 		Title:       "Your turn to draw",
-		Description: "Your turn to draw in a Sketch Stadium game you're seated in, with your secret word. Subscribe after join, with the game's ID.",
+		Description: "It's your turn to draw in a Sketch Stadium game you're seated in, with your secret word.",
 		Text: func(t turnPayload, _ turnArgs) string {
 			return fmt.Sprintf("Sketch Stadium game %s, round %d: it's your turn to draw. Your word: %s. Start drawing it with the `draw` tool within %ds, or the turn passes to the next drawer; "+
 				"the round lasts %ds from your first drawing (no letters, numbers or words in the drawing).", t.Game, t.Round, t.Word, t.Grace, t.Seconds)

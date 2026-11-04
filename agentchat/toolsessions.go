@@ -135,7 +135,7 @@ func (a *App) addSessionTools(srv *mcp.Server, at *appkit.Attachment) {
 				out.URL, out.ExpiresAt = link.URL, link.ExpiresAt.Format(time.RFC3339)
 			}
 			return nil, out, nil
-		}))
+		}, appkit.Subscribes(a.notifications())))
 }
 
 // errDisconnected is a watch's error for an agent disconnected while it

@@ -38,19 +38,57 @@ type playerOut struct {
 	Voted  bool   `json:"voted,omitempty"`
 }
 
-// view is a game as one player sees it: its own role (and the codeword, for
-// a civilian), never anyone else's until it's over.
+// tableNote tells a player how the table goes on, in every view.
+func (a *App) tableNote() string {
+	return fmt.Sprintf("This table keeps playing: when a game ends, the next starts %s later with new roles and a new codeword, and you stay seated "+
+		"and are woken when it starts. Don't call `join` again; call `leave` when you want to stop playing.", gamekit.Human(a.pause()))
+}
+
+// errNextGame is a move by a player seated for the next game.
+var errNextGame = errors.New("you sat down while this game was on: you play from the next game, and you're woken when it starts")
+
+// view is a table as one player sees it: its own role (and the codeword,
+// for a civilian), never anyone else's until the game is over.
 func (a *App) view(g *game, me *player) map[string]any {
 	var ps []playerOut
 	for _, p := range g.Players {
-		ps = append(ps, playerOut{Handle: p.Handle, House: p.HouseLabel(), Voted: p.Vote != ""})
+		if !p.Left {
+			ps = append(ps, playerOut{Handle: p.Handle, House: p.HouseLabel(), Voted: p.Vote != ""})
+		}
 	}
-	out := map[string]any{"game": g.ID, "phase": g.Phase, "you": me.Handle, "players": ps,
+	out := map[string]any{"game": g.ID, "game_no": g.GameNo, "phase": g.Phase, "you": me.Handle, "players": ps,
+		"seated_next":       g.seatedNext(),
+		"table_note":        a.tableNote(),
+		"table_url":         a.srv.PublicURL() + "/games/" + g.ID,
 		"follow_along_url":  a.srv.FollowURL(g.ID, me.Player),
-		"follow_along_note": "Give this link to your user so they can follow the game live. It shows your role, so give it only to them."}
-	if g.Phase == waiting {
+		"follow_along_note": "Give this link to your user so they can follow the table live. It shows your role, so give it only to them."}
+	secondsLeft := max(0, int(time.Until(g.Deadline).Seconds()))
+	if g.Phase == next {
+		out["next_game_in_seconds"] = secondsLeft
+	}
+	if slices.Contains(g.Next, me) {
+		out["seated_for_next"] = true
+		when := "when this one ends"
+		if g.Phase == next {
+			when = fmt.Sprintf("in %ds", secondsLeft)
+		}
+		out["note"] = fmt.Sprintf("You're seated at this table and play from the next game, which starts %s. You'll be woken then.", when)
+		return out
+	}
+	if me.Leaving {
+		out["leaving"] = true
+		out["note"] = "You asked to leave: you play this game to its end (your vote still counts), then your seat goes."
+	}
+	switch g.Phase {
+	case waiting:
 		out["note"] = fmt.Sprintf("Waiting for %d more player(s). You'll be woken when the game starts.", players-len(g.Players))
 		return out
+	case over:
+		out["note"] = "This table has closed. Call the `join` tool to play again."
+		if g.Codeword == "" {
+			out["result"] = g.Result
+			return out
+		}
 	}
 	out["role"] = me.Role
 	switch me.Role {
@@ -61,17 +99,21 @@ func (a *App) view(g *game, me *player) map[string]any {
 		out["goal"] = "Blend in: you don't know the codeword. Work it out from what the others say, act like you know it, and don't get voted out."
 	}
 	if g.Phase == discussion || g.Phase == voting {
-		out["seconds_left"] = max(0, int(time.Until(g.Deadline).Seconds()))
+		out["seconds_left"] = secondsLeft
 	}
 	if me.Vote != "" {
 		out["your_vote"] = me.Vote
 	}
-	if g.Phase == over {
+	if g.Phase == next || g.Phase == over {
 		roles := map[string]string{}
 		for _, p := range g.Players {
 			roles[p.Handle] = p.Role
 		}
 		out["result"], out["roles"], out["codeword"] = g.Result, roles, g.Codeword
+		if g.Phase == next && !me.Leaving {
+			out["note"] = fmt.Sprintf("Game %d is over. The next game at this table starts in %ds, with new roles and a new codeword: you stay seated and you're woken when it starts.",
+				g.GameNo, secondsLeft)
+		}
 	}
 	return out
 }
@@ -79,26 +121,26 @@ func (a *App) view(g *game, me *player) map[string]any {
 func (a *App) addTools(srv *mcp.Server) {
 	a.srv.AddWait(srv)
 
-	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "join", Description: "Join a game of Secret Agent as this conversation. You're added to the next game with a free seat; " +
-		"it starts when three players have joined, and you're woken then. The result says how this conversation is woken, and gives its session_key: pass it to the game's tools."},
+	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "join", Description: "Join a Secret Agent table as this conversation. Tables play game after game: you're seated at a table with a free seat " +
+		"and stay seated from one game to the next until you call `leave`, so call `join` only once. A table's game starts when three players are there; " +
+		"you're woken then. The result says how this conversation is woken, and gives its session_key: pass it to the game's tools."},
 		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			gs, key, err := a.srv.Join(ctx, call, func(tx *gamekit.Tx, gs gamekit.State, p gamekit.Player) error {
-				g := gs.(*game)
-				g.Players = append(g.Players, &player{Player: p})
-				if len(g.Players) == players {
-					return a.start(tx, g)
-				}
-				return nil
+				return a.seated(tx, gs.(*game), p)
 			})
 			if err != nil {
 				return nil, nil, err
 			}
 			g := gs.(*game)
-			return nil, a.srv.Joined(call, a.view(g, g.player(key))), nil
-		})
+			me, _ := g.seat(key)
+			if me == nil {
+				return nil, nil, gamekit.ErrNotPlaying
+			}
+			return nil, a.srv.Joined(call, a.view(g, me)), nil
+		}, appkit.Subscribes(a.srv.Updates()))
 
-	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "game", Description: "Your current game: the phase, the players, and your secret role (with the codeword, if you're a civilian). " +
-		"Keep your role to yourself."},
+	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "game", Description: "Your table's current game: the phase, the players, and your secret role (with the codeword, if you're a civilian); " +
+		"between games, the last game's result and when the next starts. Keep your role to yourself."},
 		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			g, me, err := a.find(ctx, call)
 			if err != nil {
@@ -119,6 +161,8 @@ func (a *App) addTools(srv *mcp.Server) {
 				return nil, nil, err
 			}
 			switch {
+			case slices.Contains(g.Next, me):
+				return nil, nil, errNextGame
 			case g.Phase != discussion && g.Phase != voting:
 				return nil, nil, fmt.Errorf("you can't talk now: the game is %s", g.Phase)
 			case me.Role == civilian && saysWord(text, g.Codeword):
@@ -141,6 +185,8 @@ func (a *App) addTools(srv *mcp.Server) {
 				me = p
 				target := strings.TrimPrefix(strings.TrimSpace(in.Player), "@")
 				switch {
+				case slices.Contains(g.Next, me):
+					return errNextGame
 				case g.Phase != discussion && g.Phase != voting:
 					return fmt.Errorf("it's not time to vote: the game is %s", g.Phase)
 				case target == me.Handle:
@@ -158,6 +204,24 @@ func (a *App) addTools(srv *mcp.Server) {
 				return nil, nil, err
 			}
 			return nil, a.view(g, me), nil
+		})
+
+	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "leave", Description: "Leave your table when you're done playing. During a game you play it to its end (your vote still counts) " +
+		"and your seat goes then; otherwise it goes at once. Call `join` to play again later."},
+		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+			var left bool
+			_, err := gamekit.Move(ctx, a.srv, call, playerIn, func(tx *gamekit.Tx, g *game, me *player) (err error) {
+				left, err = a.leave(tx, g, me)
+				return err
+			})
+			if err != nil {
+				return nil, nil, err
+			}
+			if !left {
+				return nil, map[string]any{"left": false, "leaving": true,
+					"note": "You'll leave the table when this game ends: play it out (your vote still counts). Call `join` to play again later."}, nil
+			}
+			return nil, map[string]any{"left": true, "note": "You've left the table. Call `join` to play again."}, nil
 		})
 }
 

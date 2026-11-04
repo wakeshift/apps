@@ -52,8 +52,8 @@ func (a *App) messages() *appkit.DefinedEvent[MessageArgs, Message] {
 	a.eventsOnce.Do(func() {
 		e, err := appkit.DefineEvent(a.Kit, "slack.message", appkit.EventDef[MessageArgs, Message]{
 			Title: "Slack messages",
-			Description: "Messages for this conversation from Slack: replies in its DM thread with the person who connected you, and " +
-				"messages in the channels they chose. Subscribe after watch, with the listener ID watch gave you.",
+			Description: "A message for this conversation from Slack: a reply in its DM thread with the person who connected you, " +
+				"or a message in a channel they chose.",
 			Text:             func(m Message, _ MessageArgs) string { return m.line() },
 			Personal:         true,
 			DeleteOnDelivery: true,

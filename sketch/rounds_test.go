@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -399,9 +401,29 @@ func TestAwayPlayersAreRemoved(t *testing.T) {
 // updates, wrong guesses and all), not the moderator's messages, until the
 // round's over. The right guess that ends it shows, with a "got it" chip,
 // in the same change that reveals the word.
+// TestWordStaysSecret runs on pinned words, not the round's random pick:
+// "apple" (the page links its apple-touch-icon), and every word with an
+// apostrophe or hyphen, which pages escape ("doesn't" is "doesn&#39;t" in
+// HTML) and which a random pick reached only now and then.
 func TestWordStaysSecret(t *testing.T) {
+	pinned := []word{{Word: "apple", Tier: easy}}
+	for _, w := range words {
+		if strings.ContainsAny(w.Word, "'-") {
+			pinned = append(pinned, w)
+		}
+	}
+	if !slices.ContainsFunc(pinned, func(w word) bool { return strings.Contains(w.Word, "'") }) {
+		t.Fatalf("no word with an apostrophe: %v", pinned)
+	}
+	for _, w := range pinned {
+		t.Run(w.Word, func(t *testing.T) { testWordStaysSecret(t, w) })
+	}
+}
+
+func testWordStaysSecret(t *testing.T, w word) {
 	f := newFixture(t, 3)
-	g := f.step(nil)
+	f.step(nil)
+	g := f.move(nil, func(tx *gamekit.Tx, g *game) error { g.Word, g.Tier = w.Word, w.Tier; return nil })
 	word := g.Word
 	f.set(f.clock().Add(time.Second))
 	g = f.move(nil, func(tx *gamekit.Tx, g *game) error { f.a.drew(tx, g, []stroke{line(1, 1, 50, 50)}); return nil })
@@ -441,7 +463,7 @@ func TestWordStaysSecret(t *testing.T) {
 	}
 	// The page's text, not its markup: "apple" is a word, and the page links
 	// its apple-touch-icon.
-	text := regexp.MustCompile(`<[^>]*>`).ReplaceAllString(httpGet(t, f.a, "/games/"+f.id), " ")
+	text := pageText(t, f.a, "/games/"+f.id)
 	if page := text; has.MatchString(page) || !strings.Contains(page, "Round 1 ·") || !strings.Contains(page, "zzzz") || strings.Contains(page, "got it") {
 		t.Errorf("the public page's HTML has the word:\n%s", page)
 	}
@@ -450,7 +472,7 @@ func TestWordStaysSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	watch := "/watch/" + u[strings.LastIndex(u, "/")+1:]
-	if page := regexp.MustCompile(`<[^>]*>`).ReplaceAllString(httpGet(t, f.a, watch), " "); has.MatchString(page) || !strings.Contains(page, "zzzz") {
+	if page := pageText(t, f.a, watch); has.MatchString(page) || !strings.Contains(page, "zzzz") {
 		t.Errorf("a guesser's watch page has the word:\n%s", page)
 	}
 
@@ -484,11 +506,44 @@ func TestWordStaysSecret(t *testing.T) {
 	for _, path := range []string{"/games/" + f.id, watch} {
 		page := httpGet(t, f.a, path)
 		if !regexp.MustCompile(`(?s)<li class="right"><span class="by">`+regexp.QuoteMeta(winner)+` <em>guessed by its owner</em></span><span class="text">`+
-			regexp.QuoteMeta(typed)+` <span class="got">got it</span></span></li>`).MatchString(page) ||
+			regexp.QuoteMeta(html.EscapeString(typed))+` <span class="got">got it</span></span></li>`).MatchString(page) ||
 			!strings.Contains(page, `<span class="name">`+winner+`</span><span class="got">got it</span>`) || strings.Count(page, `class="got"`) != 2 {
 			t.Errorf("%s after the round: no right guess with its chip:\n%s", path, page)
 		}
 	}
+}
+
+// A viewer who leaves while its read of the game is in flight (a closed
+// tab, its stream's request canceled) ends only its own read: the next
+// viewer, within the cache's half second, still gets the game's page, not
+// "Something went wrong" from the canceled read cached for everyone.
+func TestLiveCacheKeepsNoCanceledRead(t *testing.T) {
+	f := newFixture(t, 2)
+	gone, cancel := context.WithCancel(bg)
+	cancel()
+	if _, err := f.a.liveGame(gone, f.id); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a read for a request that's gone: %v", err)
+	}
+	if g, err := f.a.liveGame(bg, f.id); err != nil || g.ID != f.id {
+		t.Fatalf("the next viewer's read: %v %v", g, err)
+	}
+	f.a.live.mu.Lock()
+	f.a.live.games = nil
+	f.a.live.mu.Unlock()
+	if _, err := f.a.canvasPNG(gone, f.id); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a canvas for a request that's gone: %v", err)
+	}
+	if page := httpGet(t, f.a, "/games/"+f.id); !strings.Contains(page, `data-live="/games/`+f.id+`/live"`) {
+		t.Errorf("the next viewer's page isn't the live game:\n%s", page)
+	}
+}
+
+// pageText is a page's text as a reader sees it: its markup dropped and
+// its entities unescaped, so a word with an apostrophe ("doesn&#39;t")
+// still matches.
+func pageText(t *testing.T, a *App, path string) string {
+	t.Helper()
+	return html.UnescapeString(regexp.MustCompile(`<[^>]*>`).ReplaceAllString(httpGet(t, a, path), " "))
 }
 
 // jsonText is v's string values as JSON has them, one a line: what a

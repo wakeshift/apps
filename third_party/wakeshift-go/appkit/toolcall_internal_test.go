@@ -158,16 +158,25 @@ func TestInFlightSubscribeIsWaitedFor(t *testing.T) {
 	}
 }
 
-// takeTrailer takes a beacon line (the core's beacon.Text) off the end of
-// a result's text, and nothing else.
-func TestTakeTrailer(t *testing.T) {
+// dropTrailers takes every beacon line (the core's beacon.Text) off the
+// end of a result's last text, past any content after it, and nothing else.
+func TestDropTrailers(t *testing.T) {
 	line := beaconLinePrefix + "aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
-	res := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "a\n\n" + line + "\n"}}}
-	if got := takeTrailer(res); got != line || res.Content[0].(*mcp.TextContent).Text != "a" {
-		t.Fatalf("takeTrailer: %q %q", got, res.Content[0].(*mcp.TextContent).Text)
+	other := beaconLinePrefix + "dddddddddd.eeeeeeeeee.ffffffffff)"
+	img := &mcp.ImageContent{Data: []byte("hi"), MIMEType: "image/png"}
+	res := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "a\n" + line}, &mcp.TextContent{Text: "b\n\n" + line + "\n" + other + "\n"}, img}}
+	dropTrailers(res)
+	if len(res.Content) != 3 || res.Content[1].(*mcp.TextContent).Text != "b" || res.Content[2] != img {
+		t.Fatalf("dropTrailers: %+v", res.Content)
+	}
+	res = &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "a\n" + line}, &mcp.TextContent{Text: other}}}
+	dropTrailers(res)
+	if len(res.Content) != 1 || res.Content[0].(*mcp.TextContent).Text != "a" {
+		t.Fatalf("dropTrailers, blocks of beacons only: %+v", res.Content)
 	}
 	res = &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: line + " and more"}}}
-	if got := takeTrailer(res); got != "" {
-		t.Fatalf("not a trailer: %q", got)
+	dropTrailers(res)
+	if res.Content[0].(*mcp.TextContent).Text != line+" and more" {
+		t.Fatalf("not a trailer: %q", res.Content[0].(*mcp.TextContent).Text)
 	}
 }

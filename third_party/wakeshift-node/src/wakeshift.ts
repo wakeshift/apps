@@ -1,7 +1,7 @@
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-import { WakeshiftError } from "./errors.js";
+import { IdReusedError, WakeshiftError } from "./errors.js";
+import type { AnySchema } from "./zod.js";
+import type { HostContext, McpServerLike } from "./mcp.js";
+import { v1Req, type Req } from "./host.js";
 import { WakeEvent, attachEvents, type AttachOptions, type EventOptions, type EventTypeManifest } from "./events.js";
 import type { Attached } from "./toolcall.js";
 import { parseKey, signAssertion, type AppKey, isTestKey } from "./key.js";
@@ -10,6 +10,13 @@ import { takesTasks } from "./discover.js";
 
 /** Wakeshift's production core, the default for every key but an older wst_test_ one. Override with `core` or WAKESHIFT_CORE. */
 export const DEFAULT_CORE = "https://app.wakeshift.ai";
+
+/**
+ * @internal How long tools/list waits for the app's name (GET /app) before
+ * saying "this app" (waitMs), and how long after a failed or unanswered
+ * fetch it doesn't ask again (retryMs). Tests shorten them.
+ */
+export const nameFetch = { waitMs: 3_000, retryMs: 60_000 };
 
 /** The tool argument an agent passes its session key in (a result gives it one). */
 export const SESSION_ARG = "session_key";
@@ -117,11 +124,15 @@ export type Recipient = { user: string; subscription: string } | { native: strin
 
 /** What an event's emit did. */
 export interface Emitted {
-  /** Conversations it woke (or will). */
+  /** Conversations it reached: each woken now, or as soon as its agent can take it. */
   matched: number;
-  /** An earlier emit had this occurrence's id. */
+  /**
+   * A retry: an earlier emit, the same as this one, had its id, and this is
+   * that emit's result (nothing new was sent). The id on a different emit
+   * throws IdReusedError instead.
+   */
   duplicate: boolean;
-  /** User and native recipients with no live subscription it reached (an emit to several recipients only). */
+  /** User and native recipients with no live subscription it reached, whether `to` names one or many. */
   unmatched: (string | Recipient)[];
   /** Subscription recipients no longer live (or not that user's). */
   ended: (string | Recipient)[];
@@ -201,13 +212,9 @@ export interface ToolExtra {
   requestInfo?: { headers?: Record<string, string | string[] | undefined> };
 }
 
-// userAgentOf is the User-Agent of the HTTP request a tool call came in
-// ("" if there's none, e.g. over stdio).
-function userAgentOf(extra: ToolExtra | undefined): string {
-  const headers = extra?.requestInfo?.headers;
-  if (!headers) return "";
-  const v = headers["user-agent"] ?? headers["User-Agent"];
-  return (Array.isArray(v) ? v[0] : v) ?? "";
+/** @internal The User-Agent of the HTTP request a tool call came in ("" if there's none, e.g. over stdio). */
+export function userAgentOf(req: Req): string {
+  return req.header("user-agent") || req.header("User-Agent");
 }
 
 /** @internal Packs a tool call as Wakeshift takes it: empty fields left out, the agent's claims trimmed. */
@@ -239,17 +246,18 @@ export function packCall(c: {
  * others): its _meta and User-Agent, the client's name, the user, and
  * session_key, harness and conversation_id from its arguments.
  */
-export function toolCallOf(extra: ToolExtra | undefined, client: string, user: string | undefined, args: Record<string, unknown>, tool: string): Call {
+export function toolCallOf(extra: Req | ToolExtra | undefined, client: string, user: string | undefined, args: Record<string, unknown>, tool: string, wait: boolean): Call {
+  const req = v1Req(extra); // a request already read passes through
   return packCall({
-    meta: extra?._meta,
+    meta: req.meta,
     clientName: client,
     user,
     session: str(args, SESSION_ARG),
-    userAgent: userAgentOf(extra),
+    userAgent: userAgentOf(req),
     harness: str(args, HARNESS_ARG),
     conversation: str(args, CONVERSATION_ARG),
     tool,
-    tasks: takesTasks(extra?._meta, extra),
+    tasks: wait && takesTasks(req.meta, req),
   });
 }
 
@@ -326,6 +334,34 @@ export class Wakeshift {
     return this.appInfo;
   }
 
+  // When the name fetch for tools/list last failed or went unanswered (ms).
+  private nameFailedAt: number | null = null;
+
+  /**
+   * @internal The app's name for tools/list (app()'s), or "" when Wakeshift
+   * doesn't answer within nameFetch.waitMs: tools/list doesn't wait longer
+   * for it, and after a failure doesn't ask again for nameFetch.retryMs, so a
+   * slow or failing Wakeshift neither stalls nor multiplies tools/list.
+   */
+  async appName(): Promise<string> {
+    if (this.nameFailedAt !== null && Date.now() - this.nameFailedAt < nameFetch.retryMs) return "";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), nameFetch.waitMs);
+      timer.unref?.();
+    });
+    try {
+      const info = await Promise.race([this.app(), late]);
+      if (info) return info.name.trim();
+    } catch {
+      // as unanswered
+    } finally {
+      clearTimeout(timer);
+    }
+    this.nameFailedAt = Date.now();
+    return "";
+  }
+
   /** @internal The app's ID if it's known yet (the key names it, or app() has answered), else null. */
   knownApp(): string | null {
     return this.knownAppId;
@@ -366,9 +402,11 @@ export class Wakeshift {
    * Tells Wakeshift what the app may do, replacing what it said before: m,
    * with the events you defined (defineEvent) after m's own events. An
    * event both defined and listed in m.events is an error, and nothing is
-   * sent. You needn't call it: a process that serves your tools (attach)
-   * sends the manifest automatically, merged into the one Wakeshift has.
-   * Call it to remove an event or clear a setting. Once called, m's
+   * sent. You needn't call it: the SDK sends the manifest automatically,
+   * merged into the one Wakeshift has (a process that serves your tools on
+   * its first call about events, any process on an emit of an event
+   * Wakeshift doesn't know yet). Call it to remove an event or clear a
+   * setting. Once called, m's
    * settings are what every automatic send carries (even if this one
    * failed), with the events defined by then. Returns the manifest as
    * Wakeshift keeps it.
@@ -377,7 +415,11 @@ export class Wakeshift {
     const version = this.manifestVersion; // before the body: a later defineEvent is sent again
     const body = this.manifestBody(m);
     this.manifestBase = m;
-    const run = this.serial(() => this.request<Manifest>("PUT", "/manifest", body));
+    const run = this.serial(async () => {
+      const out = await this.request<Manifest>("PUT", "/manifest", body);
+      this.sends++;
+      return out;
+    });
     this.track(run, version);
     return run;
   }
@@ -418,10 +460,9 @@ export class Wakeshift {
     return events.length > 0 ? { ...rest, events } : rest;
   }
 
-  // The automatic send, from a process that serves the app's tools: the
-  // settings the app last published (only those it set), with the defined
-  // events, merged into the manifest Wakeshift has, so it never removes an
-  // event or clears a setting another process sent.
+  // The automatic send: the settings the app last published (only those it
+  // set), with the defined events, merged into the manifest Wakeshift has,
+  // so it never removes an event or clears a setting another process sent.
   private async sendManifest(): Promise<void> {
     const body: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(this.manifestBody(this.manifestBase ?? {}))) {
@@ -430,6 +471,21 @@ export class Wakeshift {
     }
     if (!body.events) return; // nothing to add (attach refuses with no events, but never send an empty list)
     await this.request("POST", "/manifest/merge", body);
+    this.sends++;
+  }
+
+  // resendManifest is an emit's answer to unknown_event: Wakeshift doesn't
+  // have the event (no process has sent a manifest with it yet, or a
+  // publish since removed it), so this process sends its own, merged,
+  // unless a send finished since the emit went (seen: the sends then). One
+  // send at a time (serial), so emits that fail together send it once.
+  private resendManifest(seen: number): Promise<void> {
+    return this.serial(async () => {
+      if (this.sends !== seen) return;
+      const version = this.manifestVersion;
+      await this.sendManifest();
+      if (this.manifestVersion === version) this.published ??= Promise.resolve();
+    });
   }
 
   // ── Events (MCP Events, natively or bridged) ──────────────────────────
@@ -439,11 +495,13 @@ export class Wakeshift {
   // process serves the app's tools (attach: only then is the manifest sent
   // automatically); whether Wakeshift has the manifest for the events
   // defined now (the send; null: not yet, or a defineEvent since); and how
-  // many defineEvents there were.
+  // many defineEvents there were; and how many manifests Wakeshift has
+  // taken from this process.
   private manifestBase: Manifest | null = null;
   private serving = false;
   private published: Promise<void> | null = null;
   private manifestVersion = 0;
+  private sends = 0;
 
   /**
    * Defines one of the app's event types: what a subscriber picks (args),
@@ -459,9 +517,9 @@ export class Wakeshift {
    *   })
    *   await message.emit({ channel: "eng" }, { from: "ada", text: "shipped" })
    */
-  defineEvent<A extends AnySchema, P extends AnySchema>(name: string, opts: EventOptions<A, P>): WakeEvent<A, P> {
+  defineEvent<A extends AnySchema, P extends AnySchema, N extends string = string>(name: N, opts: EventOptions<A, P>): WakeEvent<A, P, N> {
     if (this.events.has(name)) throw new Error(`wakeshift: event ${name} is defined twice`);
-    const ev = new WakeEvent<A, P>(this, name, opts);
+    const ev = new WakeEvent<A, P, N>(this, name, opts);
     this.events.set(name, ev as unknown as WakeEvent);
     this.published = null; // the manifest changed: sent again when next needed
     this.manifestVersion++;
@@ -482,18 +540,33 @@ export class Wakeshift {
    * It returns the handle your own tools use to subscribe the conversation
    * calling them: wrap a tool's callback with attached.events, and give it
    * Wakeshift's arguments with attached.inputs.
+   *
+   * server is an McpServer from @modelcontextprotocol/server 2.x or
+   * @modelcontextprotocol/sdk 1.x; identify gets that SDK's own request
+   * context (2.x's ctx, 1.x's extra).
    */
-  attach(server: McpServer, opts: AttachOptions = {}): Attached {
+  attach<S extends McpServerLike>(server: S, opts: AttachOptions<HostContext<S>> = {}): Attached<HostContext<S>> {
     const attached = attachEvents(this, server, [...this.events.values()], opts);
     this.serving = true; // the manifest is sent automatically from now on
     return attached;
   }
 
   /**
+   * @internal For a framework adapter (@wakeshift/sdk/mastra, /xmcp): the
+   * defined events, and from now on this process serves the app's tools,
+   * so the manifest is sent automatically, as after attach.
+   */
+  serveEvents(): WakeEvent[] {
+    this.serving = true;
+    return [...this.events.values()];
+  }
+
+  /**
    * @internal Sends the manifest with the defined events, once (again after
    * a defineEvent), from a process that serves the app's tools (attach). A
-   * process that only emits never sends it: its events may be fewer, or
-   * older, than its server's.
+   * process that only emits sends it only when Wakeshift doesn't know an
+   * event it emits (emitEvent): its events may be fewer, or older, than its
+   * server's, and a merge never removes an event it leaves out.
    */
   ensureEvents(): Promise<void> {
     if (!this.serving) return Promise.resolve();
@@ -501,13 +574,32 @@ export class Wakeshift {
     return this.published!;
   }
 
-  /** @internal An event's emit. */
+  /**
+   * @internal An event's emit. If Wakeshift doesn't know the event
+   * (unknown_event: an emit before any process sent the manifest with it,
+   * such as at startup before an agent connects), this process sends its
+   * manifest, merged, and emits once more.
+   */
   async emitEvent(e: { name: string; arguments: unknown; payload: unknown; text: string; id?: string; to?: string | (string | Recipient)[] }): Promise<Emitted> {
     await this.ensureEvents();
     const body: Record<string, unknown> = { name: e.name, arguments: e.arguments, payload: e.payload, text: e.text };
     if (e.id) body.id = e.id;
     if (e.to) body.to = e.to;
-    const out = await this.request<{ matched: number; duplicate?: boolean; unmatched?: unknown; ended?: unknown }>("POST", "/events/emit", body);
+    type Out = { matched: number; duplicate?: boolean; unmatched?: unknown; ended?: unknown };
+    const seen = this.sends;
+    let out: Out;
+    try {
+      try {
+        out = await this.request<Out>("POST", "/events/emit", body);
+      } catch (err) {
+        if (!(err instanceof WakeshiftError && err.status === 404 && err.code === "unknown_event")) throw err;
+        await this.resendManifest(seen);
+        out = await this.request<Out>("POST", "/events/emit", body);
+      }
+    } catch (err) {
+      if (err instanceof WakeshiftError && err.status === 409 && err.code === "id_reused") throw new IdReusedError(err.detail, { cause: err });
+      throw err;
+    }
     return { matched: out.matched, duplicate: !!out.duplicate, unmatched: recipientsOf(out.unmatched), ended: recipientsOf(out.ended) };
   }
 

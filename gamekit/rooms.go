@@ -201,7 +201,7 @@ func (s *Server) join(ctx context.Context, j joining, seat func(tx *Tx, g State,
 		}
 		taken := true
 		g, err := s.Update(ctx, r.game, nil, func(tx *Tx, g State) error {
-			if !g.base().Open {
+			if b := g.base(); !b.Open && !b.Seating {
 				// It started or ended while this was subscribing: no seat
 				// here (the subscription goes on to the next game).
 				taken = false

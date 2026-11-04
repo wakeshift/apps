@@ -587,11 +587,13 @@ func Spectated(t testing.TB, base, id string) map[string]string {
 
 // Archive is the one archived game in store (game_archives), as JSON; it
 // fails the test unless there's exactly one. It checks that the record
-// names none of the game's seats: no handle, workspace, agent, session or
-// player key, in any case, and not the game's ID. Each is looked for as a
-// whole word, so a handle inside another word (yak in a codeword, kayak)
-// isn't a leak.
-func Archive(t testing.TB, store *gamekit.Store) string {
+// names none of the seats of game, the game archived: no handle,
+// workspace, agent, session or player key, in any case, and not the game's
+// ID. Each is looked for as a whole word, so a handle inside another word
+// (yak in a codeword, kayak) isn't a leak. Other games' seats aren't
+// checked: a player waiting at another table may be called what the
+// archived game's codeword is (walrus).
+func Archive(t testing.TB, store *gamekit.Store, game string) string {
 	t.Helper()
 	ctx := context.Background()
 	rows, _ := store.Pool.Query(ctx, `SELECT record::text FROM game_archives`)
@@ -603,13 +605,13 @@ func Archive(t testing.TB, store *gamekit.Store) string {
 		t.Fatalf("%d archived games, want 1: %v", len(records), records)
 	}
 	rec := records[0]
-	rows, _ = store.Pool.Query(ctx, `SELECT unnest(ARRAY[game_id, player, workspace, agent, session, coalesce(handle, '')]) FROM seats`)
+	rows, _ = store.Pool.Query(ctx, `SELECT unnest(ARRAY[game_id, player, workspace, agent, session, coalesce(handle, '')]) FROM seats WHERE game_id = $1`, game)
 	forbidden, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(forbidden) == 0 {
-		t.Fatal("no seats to check the archive against")
+		t.Fatalf("no seats in game %q to check the archive against", game)
 	}
 	// Its text as decoded, so a JSON escape (\n) doesn't adjoin a word.
 	var decoded any

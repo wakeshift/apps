@@ -41,36 +41,79 @@ func TestDocExamplesCompile(t *testing.T) {
 	pkg := strings.TrimSpace(string(self))
 	for _, doc := range docs {
 		t.Run(strings.TrimLeft(doc, "./"), func(t *testing.T) {
-			src, n := exampleProgram(t, doc, pkg)
+			src, n := exampleProgram(t, doc, pkg, goSDKExamples)
 			if n == 0 {
 				t.Fatalf("%s: no ```go blocks", doc)
 			}
-			dir, err := os.MkdirTemp(".", "_examples")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { os.RemoveAll(dir) })
-			if err := os.WriteFile(filepath.Join(dir, "main.go"), src, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			out, _ := exec.Command("go", "build", "-gcflags=-e", "-o", os.DevNull, "./"+dir).CombinedOutput()
-			var problems []string
-			for _, l := range strings.Split(string(out), "\n") {
-				switch {
-				case l == "", strings.HasPrefix(l, "# "),
-					strings.Contains(l, "declared and not used"), strings.Contains(l, "imported and not used"):
-				default:
-					problems = append(problems, strings.TrimPrefix(l, filepath.Clean(dir)+string(filepath.Separator)))
-				}
-			}
-			if len(problems) > 0 {
-				t.Errorf("%s: an example doesn't compile:\n%s", doc, strings.Join(problems, "\n"))
+			buildExample(t, doc, src)
+			// The mcp-go examples (```go mcp-go) are a program of their own:
+			// mcp-go's mcp package isn't go-sdk's.
+			if src, n := exampleProgram(t, doc, pkg, mcpgoExamples); n > 0 {
+				buildExample(t, doc, src)
 			}
 		})
 	}
 }
 
-var goBlockRE = regexp.MustCompile("(?ms)^```go[^\n]*\n(.*?)^```")
+// buildExample builds src, a program of doc's examples, and fails on any
+// error but an unused variable or import.
+func buildExample(t *testing.T, doc string, src []byte) {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", "_examples")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := exec.Command("go", "build", "-gcflags=-e", "-o", os.DevNull, "./"+dir).CombinedOutput()
+	var problems []string
+	for _, l := range strings.Split(string(out), "\n") {
+		switch {
+		case l == "", strings.HasPrefix(l, "# "),
+			strings.Contains(l, "declared and not used"), strings.Contains(l, "imported and not used"):
+		default:
+			problems = append(problems, strings.TrimPrefix(l, filepath.Clean(dir)+string(filepath.Separator)))
+		}
+	}
+	if len(problems) > 0 {
+		t.Errorf("%s: an example doesn't compile:\n%s", doc, strings.Join(problems, "\n"))
+	}
+}
+
+// exampleKind is one kind of a document's Go examples, and what their
+// program needs around them.
+type exampleKind struct {
+	block   *regexp.Regexp
+	imports []string // besides appkit's own path, and mcpgo's (sub)
+	sub     []string // appkit's subpackages, by name
+	prelude string
+	head    string // the function's signature, up to its {
+	tail    string // after the function
+}
+
+// goSDKExamples are the ```go blocks, on the official SDK.
+var goSDKExamples = exampleKind{
+	block:   regexp.MustCompile("(?ms)^```go[ \t]*\n(.*?)^```"),
+	imports: []string{"context", "net/http", "os", "github.com/modelcontextprotocol/go-sdk/auth", "github.com/modelcontextprotocol/go-sdk/mcp"},
+	prelude: examplePrelude,
+	head:    "func example(ctx context.Context, srv *mcp.Server, mux *http.ServeMux) {",
+	tail: "}\n\nfunc main() { example(context.Background(), nil, http.NewServeMux()) }\n\n" +
+		"var _ = os.Getenv\nvar _ auth.TokenInfo\nvar _ = appkit.Open\n",
+}
+
+// mcpgoExamples are the ```go mcp-go blocks, on mark3labs/mcp-go.
+var mcpgoExamples = exampleKind{
+	block: regexp.MustCompile("(?ms)^```go mcp-go[ \t]*\n(.*?)^```"),
+	imports: []string{"context", "net/http", "github.com/modelcontextprotocol/go-sdk/auth",
+		"github.com/mark3labs/mcp-go/mcp", "github.com/mark3labs/mcp-go/server"},
+	sub:     []string{"mcpgo"},
+	prelude: mcpgoPrelude,
+	head:    "func example(ctx context.Context, mux *http.ServeMux) {",
+	tail: "}\n\nfunc main() { example(context.Background(), http.NewServeMux()) }\n\n" +
+		"var _ auth.TokenInfo\nvar _ = appkit.Open\nvar _ mcp.Tool\nvar _ server.ServerTool\nvar _ mcpgo.AttachOptions\n",
+}
 
 // publishedPkg is appkit's import path in the published module, built so
 // the export's rewrite of import paths leaves it as it is.
@@ -81,7 +124,7 @@ const publishedPkg = "github.com/wakeshift/wakeshift" + "-go/appkit"
 // rewritten to this one's, and the rest
 // in one function, each block after a //line directive naming where it is
 // in doc.
-func exampleProgram(t *testing.T, doc, pkg string) ([]byte, int) {
+func exampleProgram(t *testing.T, doc, pkg string, kind exampleKind) ([]byte, int) {
 	t.Helper()
 	b, err := os.ReadFile(doc)
 	if err != nil {
@@ -90,7 +133,7 @@ func exampleProgram(t *testing.T, doc, pkg string) ([]byte, int) {
 	imports := map[string]bool{}
 	var body bytes.Buffer
 	n := 0
-	for _, m := range goBlockRE.FindAllSubmatchIndex(b, -1) {
+	for _, m := range kind.block.FindAllSubmatchIndex(b, -1) {
 		n++
 		line := bytes.Count(b[:m[2]], []byte("\n")) + 1
 		lines := strings.Split(string(b[m[2]:m[3]]), "\n")
@@ -120,16 +163,18 @@ func exampleProgram(t *testing.T, doc, pkg string) ([]byte, int) {
 	}
 	var src bytes.Buffer
 	src.WriteString("package main\n\nimport (\n")
-	for _, p := range []string{"context", "net/http", "os", "github.com/modelcontextprotocol/go-sdk/auth", "github.com/modelcontextprotocol/go-sdk/mcp", pkg} {
+	for _, p := range append(kind.imports, pkg) {
 		imports[`"`+p+`"`] = true
+	}
+	for _, sub := range kind.sub {
+		imports[`"`+pkg+"/"+sub+`"`] = true
 	}
 	for spec := range imports {
 		src.WriteString("\t" + spec + "\n")
 	}
-	src.WriteString(")\n\n" + examplePrelude + "\nfunc example(ctx context.Context, srv *mcp.Server, mux *http.ServeMux) {\n")
+	src.WriteString(")\n\n" + kind.prelude + "\n" + kind.head + "\n")
 	src.Write(body.Bytes())
-	src.WriteString("}\n\nfunc main() { example(context.Background(), nil, http.NewServeMux()) }\n\n" +
-		"var _ = os.Getenv\nvar _ auth.TokenInfo\nvar _ = appkit.Open\n")
+	src.WriteString(kind.tail)
 	return src.Bytes(), n
 }
 
@@ -163,4 +208,38 @@ var note *appkit.DefinedEvent[noteArgs, notification]
 type member struct{ User, ID string }
 
 var bo, cy member
+`
+
+// mcpgoPrelude declares what the mcp-go examples take from around them:
+// the rest of their document (its examples on the official SDK are
+// another program) and your own sign-in.
+const mcpgoPrelude = `
+var (
+	wake        *appkit.App
+	requireAuth = func(h http.Handler) http.Handler { return h }
+	verify      auth.TokenVerifier
+	metadataURL string
+)
+
+// The README's chat event, and its join tool's input.
+type channelArgs struct {
+	Channel string ` + "`json:\"channel\"`" + `
+}
+type message struct{ From, Text string }
+type joinIn struct {
+	Channel string ` + "`json:\"channel\"`" + `
+	appkit.WakeArgs
+}
+
+var msg *appkit.DefinedEvent[channelArgs, message]
+
+// The Go page's CI event, and its watch tool's input.
+type repoArgs struct{ Owner, Repo string }
+type ciRun struct{ Conclusion string }
+type watchIn struct {
+	Owner, Repo string
+	appkit.WakeArgs
+}
+
+var ciFinished *appkit.DefinedEvent[repoArgs, ciRun]
 `

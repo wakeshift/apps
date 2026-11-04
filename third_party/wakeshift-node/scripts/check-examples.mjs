@@ -1,5 +1,5 @@
 // Type-checks every TypeScript example people copy against this SDK: the
-// ```ts blocks in site/docs and this README, the landing page's sample
+// ```ts blocks in site/docs, site/llms/agents.md (/AGENTS.md) and this README, the landing page's sample
 // (site/templates/landing.html) and the console's "Try it" snippet
 // (web/src/pages/app/Overview.tsx). Each example becomes a module: its
 // imports at the top, the rest in an async function, so fragments (a
@@ -36,6 +36,8 @@ fromMarkdown(join(sdk, "README.md"));
 if (!readmeOnly) {
   const docs = join(repo, "site/docs");
   for (const f of readdirSync(docs).filter((f) => f.endsWith(".md")).sort()) fromMarkdown(join(docs, f));
+  // /AGENTS.md, the instructions for coding agents the site serves.
+  fromMarkdown(join(repo, "site/llms/agents.md"));
 }
 
 // The landing page's TypeScript sample: the <pre> in its tab, without its
@@ -79,15 +81,18 @@ for (const e of examples) {
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 copyFileSync(join(sdk, "scripts/examples/env.d.ts"), join(out, "env.d.ts"));
+copyFileSync(join(sdk, "scripts/examples/frameworks.d.ts"), join(out, "frameworks.d.ts"));
 const files = [];
 examples.forEach((e, i) => {
   const lines = e.code.split("\n");
   const imports = lines.filter((l) => /^import\s/.test(l));
   const rest = lines.filter((l) => !/^import\s/.test(l));
   const name = `${String(i).padStart(2, "0")}-${e.from.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "")}.ts`;
+  // A whole module (a Worker's `export default`) is checked as it is.
+  const whole = /^export default\b/m.test(e.code);
   writeFileSync(
     join(out, name),
-    `// ${e.from}\n${imports.join("\n")}\nexport {};\n\nexport async function example() {\n${rest.join("\n")}\n}\n`,
+    whole ? `// ${e.from}\n${e.code}` : `// ${e.from}\n${imports.join("\n")}\nexport {};\n\nexport async function example() {\n${rest.join("\n")}\n}\n`,
   );
   files.push(name);
 });
@@ -104,9 +109,9 @@ writeFileSync(
         strict: true,
         noEmit: true,
         skipLibCheck: true,
-        paths: { "@wakeshift/sdk": ["../src/index.ts"] },
+        paths: { "@wakeshift/sdk": ["../src/index.ts"], "@wakeshift/sdk/mastra": ["../src/mastra.ts"], "@wakeshift/sdk/xmcp": ["../src/xmcp.ts"] },
       },
-      files: ["env.d.ts", ...files],
+      files: ["env.d.ts", "frameworks.d.ts", ...files],
     },
     null,
     2,

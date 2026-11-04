@@ -164,6 +164,8 @@ export interface LinkPageData {
   error?: string;
   /** A line at the top when the page couldn't show everything (the server is busy). */
   notice?: string;
+  /** The open URL was just replaced ("Get a new URL"). */
+  rotated?: boolean;
   watchers: Watcher[];
   recent: Activity[];
   limits: PageLimits;
@@ -211,8 +213,10 @@ export function curlFor(check: Check, url: string, secret: string): string {
 }
 
 // What each tab says, and the line in the page's copy for it.
-const checkNotes: Record<Check, string> = {
-  open: "Open: anyone with this URL can post to your webhook. Turn on a check before you give it to a service.",
+const checkNotes = (l: PageLimits): Record<Check, string> => ({
+  open:
+    `Open: anyone with this URL can wake your agent, with up to ${l.perHour} posts an hour (${l.perDay} a day). ` +
+    "If the sender can sign its requests (GitHub, Stripe, Linear) or send a bearer token, give it a checked URL from the other tabs instead.",
   github:
     "Requests must carry GitHub's X-Hub-Signature-256: an HMAC of the body with the secret. In GitHub: Settings, Webhooks, Add webhook; Payload URL is this URL, Content type application/json, Secret the secret below.",
   bearer: "Requests must carry the header Authorization: Bearer and the secret below.",
@@ -220,7 +224,7 @@ const checkNotes: Record<Check, string> = {
     "Requests must carry Stripe's Stripe-Signature, made with your endpoint's signing secret, from the last 5 minutes. In Stripe, go to Developers, Webhooks, Add endpoint, and enter the open URL. Reveal the endpoint's signing secret (whsec_…) and paste it here. Then change the endpoint's URL to the one you get.",
   linear:
     "Requests must carry Linear's Linear-Signature, made with your webhook's signing secret, and a webhookTimestamp from the last minute. In Linear, go to Settings, API, Webhooks, New webhook, and enter the open URL. Copy the webhook's signing secret and paste it here. Then change the webhook's URL to the one you get.",
-};
+});
 
 /** What to ask the agent, whichever agent it is. */
 export const askLine = "Watch for webhooks and tell me when one arrives.";
@@ -241,8 +245,16 @@ export function linkPage(nonce: string, d: LinkPageData): string {
     <div class="row"><input id="pasted" name="secret" type="password" autocomplete="off" spellcheck="false" required maxlength="200" placeholder="${d.check === "stripe" ? "whsec_…" : "From the webhook's page in Linear"}"><button class="btn sm" type="submit">${d.webhookUrl ? "Make another URL" : "Make the URL"}</button></div>
   </form>${d.error ? `<p class="warn">${esc(d.error)}</p>` : ""}`
     : "";
+  // The open URL can be replaced, from this page only (the link is the capability).
+  const rotateForm =
+    d.check === "open" && d.webhookUrl
+      ? `<form method="post" action="/l/${esc(d.code)}/rotate" class="rotate"><button class="btn ghost sm" type="submit">Get a new URL</button><span class="note">If this URL got out: the old one stops working at once. Your agent keeps watching, and the history below stays.</span></form>` +
+        (d.error ? `<p class="warn">${esc(d.error)}</p>` : "")
+      : "";
   const urlBlock = d.webhookUrl
-    ? codeBlock("Webhook URL", d.webhookUrl, "url") +
+    ? (d.rotated && d.check === "open" ? `<p class="status on" role="status">Here's your new open URL. The old one no longer works.</p>` : "") +
+      codeBlock("Webhook URL", d.webhookUrl, "url") +
+      rotateForm +
       secretBlock +
       codeBlock(pasted ? `Try it (set ${d.check === "stripe" ? "STRIPE_SECRET" : "LINEAR_SECRET"} to the secret first)` : "Try it", curlFor(d.check, d.webhookUrl, d.secret ?? ""), "curl")
     : "";
@@ -251,7 +263,7 @@ export function linkPage(nonce: string, d: LinkPageData): string {
     notes.push(`This URL holds your ${service} secret, encrypted: this server can check signatures with it, but it isn't shown again. Making another URL doesn't turn this one off.`);
   }
   if (d.check !== "open" && d.webhookUrl) {
-    notes.push("This URL refuses requests without the check, and has its own hourly limit. The open URL keeps working for anyone who has it; if you've shared it, get a new link.");
+    notes.push("This URL refuses requests without the check, and has its own hourly limit. The open URL keeps working for anyone who has it; if you've shared it, get a new one on the Open tab.");
   }
   notes.push(
     d.check === "open" || d.check === "bearer"
@@ -275,7 +287,7 @@ export function linkPage(nonce: string, d: LinkPageData): string {
 <section class="sect">
   <h2><span class="n">ii.</span> Post to your webhook URL</h2>
   <div class="tabs">${tab("open", "Open")}${tab("github", "GitHub")}${tab("stripe", "Stripe")}${tab("linear", "Linear")}${tab("bearer", "Bearer token")}</div>
-  <p class="note">${esc(checkNotes[d.check])}</p>
+  <p class="note">${esc(checkNotes(d.limits)[d.check])}</p>
   ${pasteForm}
   ${urlBlock}
   ${also}
@@ -285,7 +297,7 @@ export function linkPage(nonce: string, d: LinkPageData): string {
   <h2><span class="n">iii.</span> Live</h2>
   <p class="status" id="livestatus" role="status" hidden></p>
   <ul class="live" id="live"><li class="empty">Nothing yet. Posts show up here as they arrive.</li></ul>
-  <p class="note">${esc(limitsLine(d.limits))} The list keeps the last 50, for a day after the webhook was last used (longer while an agent is watching).</p>
+  <p class="note">${esc(limitsLine(d.limits))} The list keeps the last 50, for a day after the webhook was last used (longer while an agent is watching). A wake brings your agent at most 20 posts: in a burst, the rest come in the next wake, as soon as it goes back to waiting.</p>
 </section>`;
   const initial = JSON.stringify({ watchers: d.watchers, recent: d.recent }).replace(/</g, "\\u003c");
   return layout("Your webhook · Wakeshift webhooks", body, nonce, liveScript(d.code, initial), pickerHead());
@@ -321,6 +333,82 @@ export function connectedText(s: Connection): string {
   );
 }
 
+/**
+ * The live view's line for n refused or rate-limited posts that weren't
+ * listed one by one in the minute from a time (as the page shows it),
+ * answered with codes. Its source goes into the page, like connectedText's.
+ */
+export function skippedText(n: number, codes: number[], from: string): string {
+  const limited = codes.includes(429);
+  const refused = codes.some((c) => c !== 429);
+  const what = refused && limited ? "refused or rate-limited" : limited ? "rate-limited" : "refused";
+  const list = codes.length > 1 ? codes.slice(0, -1).join(", ") + " or " + codes[codes.length - 1] : String(codes[0]);
+  return (
+    "…and " + n + " more " + what + " post" + (n === 1 ? "" : "s") + " in the minute from " + from +
+    (n === 1 ? " wasn't listed on its own; it was" : " weren't listed one by one; each was") + " answered with " + list + "."
+  );
+}
+
+/** What liveConnection needs from the page (and a test gives it instead). */
+export interface LiveDeps<T = unknown> {
+  /** An EventSource for the live view, from the line after seq after (0: the recent lines). */
+  open: (after: number) => { readyState: number; onopen: (() => void) | null; onmessage: ((m: { data: string }) => void) | null; onerror: (() => void) | null; close(): void };
+  /** EventSource.CLOSED: it gave up (an error status, such as 429 or 503). */
+  closed: number;
+  line: (a: any) => void;
+  /** The newest line's seq the page has. */
+  newest: () => number;
+  /** The line under the live view: a message, or undefined to hide it. */
+  status: (text: string | undefined) => void;
+  setTimeout: (fn: () => void, ms: number) => T;
+  clearTimeout: (t: T) => void;
+  random: () => number;
+}
+
+/**
+ * Keeps the page's live view connected. EventSource reconnects a dropped
+ * stream by itself, but gives up on an error status (429 when the webhook
+ * has its most live views open on an instance, 503 when the server or its
+ * database is busy). Then this tries again: after 2 seconds, doubling to
+ * 30 at most, a little randomized so pages don't all come back at once,
+ * and back to 2 once it's connected; at once on retryNow (the page is
+ * looked at again, the network is back, the server answers the status
+ * poll). Each new connection asks for the lines after the newest the page
+ * has, so what happened meanwhile is shown. Its source goes into the page,
+ * like connectedText's.
+ */
+export function liveConnection<T>(d: LiveDeps<T>): { retryNow(): void } {
+  const MIN = 2;
+  const MAX = 30;
+  let wait = MIN;
+  let timer: T | undefined;
+  function connect() {
+    timer = undefined;
+    const es = d.open(d.newest());
+    es.onopen = () => {
+      wait = MIN;
+      d.status(undefined);
+    };
+    es.onmessage = (m) => d.line(JSON.parse(m.data));
+    es.onerror = () => {
+      if (es.readyState !== d.closed) return;
+      es.close();
+      const s = Math.min(MAX, Math.max(1, Math.round(wait * (0.8 + 0.4 * d.random()))));
+      d.status("The live view lost its connection. Trying again in " + s + " seconds; posts still reach your agent.");
+      timer = d.setTimeout(connect, s * 1000);
+      wait = Math.min(wait * 2, MAX);
+    };
+  }
+  connect();
+  return {
+    retryNow() {
+      if (timer === undefined) return;
+      d.clearTimeout(timer);
+      connect();
+    },
+  };
+}
+
 // The live view: the activity so far, then each new line over SSE.
 // Only textContent: everything in an activity may come from whoever posted.
 function liveScript(code: string, initial: string): string {
@@ -328,7 +416,7 @@ function liveScript(code: string, initial: string): string {
 const state = ${initial};
 const live = document.getElementById("live");
 const watching = document.getElementById("watching");
-const labels = { post: "Received", refused: "Refused", limited: "Rate limited", failed: "Not sent", watch: "Watching", unwatch: "Stopped watching" };
+const labels = { post: "Received", refused: "Refused", limited: "Rate limited", failed: "Not sent", watch: "Watching", unwatch: "Stopped watching", skipped: "Not listed", rotated: "New URL" };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 // The agent's app, as people know it (MCP clients give themselves other names).
 const apps = { "claude-code": "Claude Code", "codex-mcp-client": "Codex", "Cursor": "Cursor", "cursor": "Cursor", "cursor-vscode": "Cursor", "opencode": "opencode", "antigravity-client": "Antigravity", "antigravity": "Antigravity", "copilot-cli": "Copilot CLI", "gemini-cli-mcp-client": "Gemini CLI", "Visual Studio Code": "VS Code" };
@@ -352,14 +440,11 @@ function detail(a) {
     return "Sent to " + a.matched + " watching conversation" + (a.matched === 1 ? "" : "s") + ".";
   }
   if (a.kind === "watch" || a.kind === "unwatch") return "A conversation in " + who(a);
+  if (a.kind === "skipped") return skippedText(a.count, a.codes || [], new Date(a.minute).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
   return a.reason || "";
 }
-function add(a) {
-  if (a.kind === "watch") state.watchers = state.watchers.filter((x) => x.conversation !== a.conversation).concat([{ conversation: a.conversation, client: a.client, harness: a.harness, since: a.at }]);
-  if (a.kind === "unwatch") state.watchers = state.watchers.filter((x) => x.conversation !== a.conversation);
-  showWatchers();
-  const empty = live.querySelector(".empty");
-  if (empty) empty.remove();
+const skippedText = ${skippedText.toString()};
+function item(a) {
   const li = el("li", "item " + a.kind);
   const head = el("div", "head");
   head.append(el("span", "badge", labels[a.kind] || a.kind), el("time", "", new Date(a.at).toLocaleTimeString()));
@@ -370,6 +455,15 @@ function add(a) {
   const d = detail(a);
   if (d) li.append(el("div", "detail", d));
   li.dataset.seq = String(a.seq);
+  return li;
+}
+function add(a) {
+  if (a.kind === "watch") state.watchers = state.watchers.filter((x) => x.conversation !== a.conversation).concat([{ conversation: a.conversation, client: a.client, harness: a.harness, since: a.at }]);
+  if (a.kind === "unwatch") state.watchers = state.watchers.filter((x) => x.conversation !== a.conversation);
+  showWatchers();
+  const empty = live.querySelector(".empty");
+  if (empty) empty.remove();
+  const li = item(a);
   const first = live.firstElementChild;
   if (first && Number(first.dataset.seq) > a.seq) {
     // Arrived late (from another instance, or a replay): put it in order.
@@ -387,9 +481,17 @@ function add(a) {
 // view, and it's dropped rather than shown again.
 const seen = new Set();
 let forgotten = -Infinity;
+let newest = 0;
+// A minute's line for the posts not listed one by one comes again, with
+// the same seq, as each instance adds its count: it replaces the one shown.
 const once = (a) => {
+  if (a.kind === "skipped" && seen.has(a.seq)) {
+    for (const li of live.children) if (li.dataset.seq === String(a.seq)) li.replaceWith(item(a));
+    return;
+  }
   if (seen.has(a.seq) || a.seq <= forgotten) return;
   seen.add(a.seq);
+  if (a.seq > newest) newest = a.seq;
   if (seen.size > 500) {
     const lowest = Math.min(...seen);
     seen.delete(lowest);
@@ -408,29 +510,33 @@ function showConnected(s) {
 async function poll() {
   try {
     const r = await fetch(location.pathname.replace(/\\/$/, "") + "/status", { cache: "no-store" });
-    if (r.ok) showConnected(await r.json());
+    if (r.ok) {
+      showConnected(await r.json());
+      // The server answers: a live view waiting to try again can now.
+      live$.retryNow();
+    }
   } catch {}
 }
 setInterval(poll, 10000);
 poll();
-// The live view. EventSource retries a dropped connection by itself, but
-// gives up on an error status (503 when the server is busy): then try
-// again later, and say so.
+// The live view (liveConnection): from the newest line shown, so what
+// happened while it was away comes first; again soon after an error, and
+// at once when the page is looked at again, the network is back or the
+// status poll gets through.
 const liveStatus = document.getElementById("livestatus");
-let wait = 5;
-function connect() {
-  const es = new EventSource(location.pathname.replace(/\\/$/, "") + "/live");
-  es.onopen = () => { wait = 5; liveStatus.hidden = true; };
-  es.onmessage = (m) => once(JSON.parse(m.data));
-  es.onerror = () => {
-    if (es.readyState !== EventSource.CLOSED) return;
-    liveStatus.hidden = false;
-    liveStatus.textContent = "The live view is busy. Trying again in " + wait + " seconds; posts still reach your agent.";
-    setTimeout(connect, wait * 1000);
-    wait = Math.min(wait * 2, 60);
-  };
-}
-connect();
+const liveConnection = ${liveConnection.toString()};
+const live$ = liveConnection({
+  open: (after) => new EventSource(location.pathname.replace(/\\/$/, "") + "/live" + (after > 0 ? "?after=" + after : "")),
+  closed: EventSource.CLOSED,
+  line: once,
+  newest: () => newest,
+  status: (text) => { liveStatus.hidden = !text; liveStatus.textContent = text || ""; },
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (t) => clearTimeout(t),
+  random: Math.random,
+});
+document.addEventListener("visibilitychange", () => { if (!document.hidden) live$.retryNow(); });
+addEventListener("online", () => live$.retryNow());
 for (const b of document.querySelectorAll("button.copy")) {
   b.addEventListener("click", async () => {
     const t = document.getElementById(b.dataset.copy).textContent;
@@ -505,11 +611,13 @@ a{color:inherit}
 .live time,.live .meta{font:12px var(--mono);color:var(--ink-3)}
 .badge{font:600 10px var(--mono);letter-spacing:.06em;text-transform:uppercase;padding:3px 8px;border-radius:999px;background:var(--paper-2);color:var(--ink-2)}
 .post .badge,.watch .badge{background:var(--sage-soft);color:var(--sage)}
-.refused .badge,.limited .badge,.failed .badge{background:var(--caution-bg);color:var(--caution)}
+.refused .badge,.limited .badge,.failed .badge,.skipped .badge{background:var(--caution-bg);color:var(--caution)}
 .live .text{font:13.5px/1.5 var(--mono);margin-top:6px;word-break:break-word;white-space:pre-wrap}
 .live .preview{font:12.5px/1.5 var(--mono);color:var(--ink-3);margin-top:4px;word-break:break-all;white-space:pre-wrap}
 .live .detail{color:var(--ink-2);margin-top:4px}
 .paste{margin-top:12px}
+.rotate{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.rotate .note{margin-top:0}
 .paste label{font:600 11px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
 .paste .row{display:flex;gap:10px;margin-top:6px}
 .paste input{flex:1;font:13.5px var(--mono);padding:8px 12px;border:1px solid var(--rule);border-radius:10px;background:var(--card);color:var(--ink)}

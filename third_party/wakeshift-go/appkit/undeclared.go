@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/wakeshift/wakeshift-go/appkit/internal/adapt"
 )
 
 // dropUndeclared removes from call's arguments every property the tool's
@@ -79,50 +81,5 @@ func (at *Attachment) inputSchema(ctx context.Context, next mcp.MethodHandler, c
 }
 
 // strip drops from v what schema closes off, reporting whether it dropped
-// anything.
-func strip(schema map[string]any, v any) bool {
-	changed := false
-	switch val := v.(type) {
-	case map[string]any:
-		props, _ := schema["properties"].(map[string]any)
-		closed := closedSchema(schema["additionalProperties"])
-		for k, sub := range val {
-			ps, declared := props[k].(map[string]any)
-			if !declared {
-				if _, has := props[k]; !has && closed {
-					delete(val, k)
-					changed = true
-				}
-				continue
-			}
-			if strip(ps, sub) {
-				changed = true
-			}
-		}
-	case []any:
-		items, _ := schema["items"].(map[string]any)
-		if items == nil {
-			return false
-		}
-		for _, sub := range val {
-			if strip(items, sub) {
-				changed = true
-			}
-		}
-	}
-	return changed
-}
-
-// closedSchema reports whether an additionalProperties value refuses every
-// other property: false, or {"not": {}}, which means the same.
-func closedSchema(v any) bool {
-	if b, ok := v.(bool); ok {
-		return !b
-	}
-	m, ok := v.(map[string]any)
-	if !ok || len(m) != 1 {
-		return false
-	}
-	not, ok := m["not"].(map[string]any)
-	return ok && len(not) == 0
-}
+// anything (adapt.Strip).
+func strip(schema map[string]any, v any) bool { return adapt.Strip(schema, v) }

@@ -19,10 +19,10 @@ import (
 // Env is what every game's command reads from its environment, for an app
 // whose ID is id: <ID>_URL, <ID>_KEY, <ID>_DATABASE_URL and
 // <ID>_TICK_ACCOUNT (with the ID in capitals), PROXY_HOPS,
-// GAMES_SHARED_SEAT_WORKSPACES, HOUSE_SECRET, GAMES_OPERATOR_NOTE and
-// ADMIN_DB_USER (the admin service's database login, granted joins:
-// joins.go). The
-// fields after Store are the game App's fields of the same names.
+// GAMES_SHARED_SEAT_WORKSPACES, HOUSE_SECRET, GAMES_OPERATOR_NOTE,
+// GAMES_NEXT_GAME_PAUSE and ADMIN_DB_USER (the admin service's database
+// login, granted joins: joins.go). The fields after Store are the game
+// App's fields of the same names.
 type Env struct {
 	id     string
 	Kit    *appkit.App
@@ -34,6 +34,24 @@ type Env struct {
 	SharedSeats  map[string]bool
 	HouseSecret  string
 	OperatorNote bool
+	// NextGamePause is GAMES_NEXT_GAME_PAUSE: how long a table that plays
+	// game after game shows a game's result before the next starts (a Go
+	// duration from 5s to 5m; unset: the game's default).
+	NextGamePause time.Duration
+}
+
+// NextGamePauseEnv reads GAMES_NEXT_GAME_PAUSE (Env.NextGamePause): 0 if
+// it's unset, an error if it isn't a duration from 5 seconds to 5 minutes.
+func NextGamePauseEnv() (time.Duration, error) {
+	v := strings.TrimSpace(os.Getenv("GAMES_NEXT_GAME_PAUSE"))
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 5*time.Second || d > 5*time.Minute {
+		return 0, fmt.Errorf("GAMES_NEXT_GAME_PAUSE must be a duration from 5s to 5m, not %q", v)
+	}
+	return d, nil
 }
 
 // LoadEnv reads the environment for the game whose app ID is id and opens
@@ -51,6 +69,10 @@ func LoadEnv(ctx context.Context, id string, migrate func(context.Context, *Stor
 		return nil, fmt.Errorf("GAMES_SHARED_SEAT_WORKSPACES: %w", err)
 	}
 	house, err := HouseSecretEnv()
+	if err != nil {
+		return nil, err
+	}
+	pause, err := NextGamePauseEnv()
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +94,7 @@ func LoadEnv(ctx context.Context, id string, migrate func(context.Context, *Stor
 	if err != nil {
 		return nil, err
 	}
-	e := &Env{id: id, Kit: kit, Public: public, Store: store, SharedSeats: shared, HouseSecret: house, OperatorNote: OperatorNoteEnv()}
+	e := &Env{id: id, Kit: kit, Public: public, Store: store, SharedSeats: shared, HouseSecret: house, OperatorNote: OperatorNoteEnv(), NextGamePause: pause}
 	e.ProxyHops, _ = strconv.Atoi(os.Getenv("PROXY_HOPS"))
 	if account := os.Getenv(prefix + "_TICK_ACCOUNT"); account != "" {
 		e.TickAuth = GoogleTickAuth(public+"/tick", account)

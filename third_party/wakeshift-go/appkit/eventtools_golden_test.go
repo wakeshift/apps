@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -195,4 +196,58 @@ func (a *App) manifestEvents() []ManifestEvent {
 		out = append(out, t.manifestEntry())
 	}
 	return out
+}
+
+// tool-annotations.json is the annotations of Attach's own tools and the
+// wait tool, and tools/list on a go-sdk server gives exactly those, for a
+// client that takes tasks (so the wait tool is listed).
+func TestToolAnnotationsGolden(t *testing.T) {
+	want := map[string]any{}
+	for name, a := range toolAnnotations {
+		want[name] = a.Wire()
+	}
+	golden(t, "tool-annotations.json", want)
+
+	app := sampleApp(t)
+	srv := mcp.NewServer(&mcp.Implementation{Name: "sample", Version: "1"}, nil)
+	attached := app.Attach(srv, AttachOptions{Tools: Tools{Wait: Wait{Enabled: true}}})
+	hs := httptest.NewServer(attached.Wrap(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
+		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})))
+	defer hs.Close()
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": map[string]any{
+		"_meta": map[string]any{"io.modelcontextprotocol/protocolVersion": tasksProtocol,
+			"io.modelcontextprotocol/clientCapabilities": map[string]any{"extensions": map[string]any{TasksExtension: map[string]any{}}}}}})
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", hs.URL, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Protocol-Version", tasksProtocol)
+	req.Header.Set("Mcp-Method", "tools/list")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Result struct {
+			Tools []map[string]any `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, tl := range out.Result.Tools {
+		got[tl["name"].(string)] = tl["annotations"]
+	}
+	var fixture map[string]any
+	b, err = os.ReadFile(filepath.Join(goldenDir, "tool-annotations.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if g, w := canonical(t, got), canonical(t, fixture); !reflect.DeepEqual(g, w) {
+		t.Fatalf("tools/list's annotations\n got %v\nwant %v", g, w)
+	}
 }

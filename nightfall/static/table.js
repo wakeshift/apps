@@ -14,7 +14,10 @@
   const arena = root.querySelector('.arena');
   const still = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const BUBBLE_MS = 10000; // table.go's bubbleFor
-  const names = { 'waiting for players': 'Gathering', night: 'Night', day: 'Day', voting: 'The vote', over: 'Dawn' };
+  const names = { 'waiting for players': 'Gathering', night: 'Night', day: 'Day', voting: 'The vote', 'next game': 'Next game', over: 'Dawn' };
+  // Between games a table shows the last game's cards, as at its end, with
+  // the countdown to the next.
+  const revealed = (p) => p === 'over' || p === 'next game';
   const svgNS = 'http://www.w3.org/2000/svg';
 
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -100,7 +103,7 @@
     if (!t) return;
     const was = phase;
     phase = t.phase;
-    root.className = 'nf-table phase-' + (t.phase === 'waiting for players' ? 'waiting' : t.phase);
+    root.className = 'nf-table phase-' + (t.phase === 'waiting for players' ? 'waiting' : t.phase === 'next game' ? 'over phase-next' : t.phase);
     root.dataset.phase = t.phase;
     arena.className = 'arena n' + t.seats.length;
 
@@ -174,8 +177,8 @@
       outcome.textContent = t.outcome;
     } else if (outcome) outcome.remove();
 
-    votes = t.phase === 'over' ? t.seats.filter((p) => p.voted_for) : [];
-    arrows(!first && was !== 'over' && t.phase === 'over' && !still);
+    votes = revealed(t.phase) ? t.seats.filter((p) => p.voted_for) : [];
+    arrows(!first && !revealed(was) && revealed(t.phase) && !still);
     first = false;
     root.dataset.live = '1';
   };

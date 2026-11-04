@@ -1,12 +1,13 @@
 // The manifest the three SDKs send, and when (test/manifest.json, which the
 // Go and Python SDKs test against too): an explicit publish replaces it;
-// the automatic send, only from a process that serves the app's tools
-// (attach), merges the settings the app published and its events, its
-// listed events then the defined ones, refusing a name in both.
+// the automatic send (from a process that serves the app's tools, attach,
+// or after an emit's unknown_event) merges the settings the app published
+// and its events, its listed events then the defined ones, refusing a name
+// in both.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "./mcp.js";
 import { z } from "zod";
 import { Wakeshift, type Manifest } from "../src/index.js";
 
@@ -18,6 +19,7 @@ const fixture = JSON.parse(readFileSync(new URL("../../test/manifest.json", impo
   cases: {
     name: string;
     define: string[];
+    unknown_emits?: number;
     steps: {
       attach?: boolean;
       emit?: boolean;
@@ -79,6 +81,7 @@ for (const c of fixture.cases) {
   test(`manifest.json: ${c.name}`, async () => {
     const got: { method: string; path: string; body?: unknown }[] = [];
     let answer: { status: number; body: unknown } | undefined;
+    let unknown = c.unknown_emits ?? 0;
     const unavailable = { status: 503, body: { error: { code: "unavailable", message: "try again" } } };
     const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
       const path = String(url).replace("http://core.test/api/apps/v1", "");
@@ -86,7 +89,14 @@ for (const c of fixture.cases) {
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       let status = 200;
       let out: unknown = { matched: 0, subscriptions: 0, connected: 0, forgotten: false };
-      if (path === "/manifest" || path.startsWith("/manifest/")) {
+      if (path === "/events/emit" && c.unknown_emits !== undefined) {
+        got.push({ method, path });
+        if (unknown > 0) {
+          unknown--;
+          status = 404;
+          out = { error: { code: "unknown_event", message: "no such event" } };
+        }
+      } else if (path === "/manifest" || path.startsWith("/manifest/")) {
         got.push(method === "GET" ? { method, path } : { method, path, body });
         out = method === "GET" ? { description: "" } : body;
         if (method !== "GET" && answer) {
@@ -141,3 +151,35 @@ for (const c of fixture.cases) {
     assert.deepEqual(sorted(JSON.parse(JSON.stringify(got))), sorted(want));
   });
 }
+
+// Emits that fail together, before Wakeshift has the event (an app emitting
+// at startup, before any agent has connected), send the manifest once.
+test("concurrent emits Wakeshift doesn't know the event for send one merge, then all succeed", async () => {
+  let known = false;
+  let merges = 0;
+  let emits = 0;
+  const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const path = String(url).replace("http://core.test/api/apps/v1", "");
+    let status = 200;
+    let out: unknown = { matched: 0 };
+    if (path === "/manifest/merge") {
+      merges++;
+      await new Promise((r) => setTimeout(r, 20));
+      known = true;
+      out = JSON.parse(String(init?.body));
+    } else if (path === "/events/emit") {
+      emits++;
+      if (!known) {
+        status = 404;
+        out = { error: { code: "unknown_event", message: "no such event" } };
+      }
+    }
+    return new Response(JSON.stringify(out), { status, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const wake = new Wakeshift({ key: KEY, core: "http://core.test", fetch: fakeFetch });
+  const chat = defineSample(wake, "chat.message") as any;
+  const results = await Promise.all(Array.from({ length: 5 }, () => chat.emit(fixture.emit.arguments, fixture.emit.payload)));
+  assert.equal(results.length, 5);
+  assert.equal(merges, 1);
+  assert.equal(emits, 10);
+});

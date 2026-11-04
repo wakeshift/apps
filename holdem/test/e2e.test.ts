@@ -13,9 +13,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { z } from "zod";
 import { Wakeshift } from "@wakeshift/sdk";
 import { Casino, type Notifier } from "../src/casino.js";
@@ -183,6 +181,45 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
     agents.push(agent);
   }
   assert.notEqual(agents[0]!.name, agents[1]!.name);
+
+  // A client on protocol 2026-07-28 (no initialize; Claude Code's
+  // server/discover probe) is served too. On the wire: server/discover and
+  // tools/list say they're complete, and how long they may be cached
+  // (Claude Code connects the old way without ttlMs and cacheScope).
+  {
+    const token = await signIn(base, "Claude Code");
+    const rpc = async (id: number, method: string) => {
+      const r = await fetch(base + "/mcp", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + token, "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": method },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          method,
+          params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "claude-code", version: "2.1.314" }, "io.modelcontextprotocol/clientCapabilities": {} } },
+        }),
+      });
+      assert.equal(r.status, 200, method);
+      return ((await r.json()) as { result: Record<string, any> }).result;
+    };
+    const discover = await rpc(1, "server/discover");
+    assert.equal(discover.resultType, "complete");
+    assert.ok(discover.supportedVersions.includes("2026-07-28"));
+    assert.equal(typeof discover.ttlMs, "number");
+    assert.equal(typeof discover.cacheScope, "string");
+    const list = await rpc(2, "tools/list");
+    assert.equal(list.resultType, "complete");
+    assert.equal(list.ttlMs, 0);
+    assert.equal(list.cacheScope, "private");
+    const modern = new Client({ name: "claude-code", version: "2.1.314" }, { versionNegotiation: { mode: { pin: "2026-07-28" } } });
+    await modern.connect(new StreamableHTTPClientTransport(new URL(base + "/mcp"), { requestInit: { headers: { Authorization: "Bearer " + token } } }));
+    t.after(() => modern.close());
+    assert.equal(modern.getProtocolEra(), "modern");
+    assert.ok((await modern.listTools()).tools.some((x) => x.name === "join"));
+    const board = (await modern.callTool({ name: "leaderboard", arguments: {} })) as CallToolResult;
+    assert.ok(!board.isError, textOf(board));
+  }
+
   // Joining again renews the conversation's subscription; it doesn't add another.
   const subs = async () => (await db.query<{ subscription: string }>("SELECT subscription FROM players ORDER BY name")).rows.map((r) => r.subscription);
   const before = await subs();
@@ -216,7 +253,9 @@ test("two agents sign in, join and play a hand over MCP; the one to act is woken
       z.any() as any,
     );
   await assert.rejects(subscribe(agentTable), /may not subscribe/, "not to a table it doesn't sit at");
-  assert.equal(((await subscribe(nativeTable)) as any).resultType, "complete");
+  // The MCP SDK 2.x's client hands back the result without its resultType
+  // (the server still sends it) on a connection that initialized.
+  assert.equal(typeof ((await subscribe(nativeTable)) as { id?: unknown }).id, "string");
 
   // The hand started when the second agent sat down: whoever is to act is woken.
   const call = (a: (typeof agents)[number], name: string, args: Record<string, unknown> = {}) =>

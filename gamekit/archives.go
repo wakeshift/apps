@@ -25,6 +25,29 @@ func (tx *Tx) Said(game string) ([]Entry, error) {
 	})
 }
 
+// SaidSince is Said from since on: what was said in one game of a table
+// that plays game after game. Called under the game's lock.
+func (tx *Tx) SaidSince(game string, since time.Time) ([]Entry, error) {
+	rows, _ := tx.Query(tx.Ctx, `SELECT at, from_handle, text FROM room_log WHERE game_id = $1 AND from_handle <> '' AND at >= $2 ORDER BY seq`, game, since)
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Entry, error) {
+		var e Entry
+		err := r.Scan(&e.At, &e.From, &e.Text)
+		return e, err
+	})
+}
+
+// Spoke is the handles of the players who said something in game from
+// since on (Say). Called under the game's lock.
+func (tx *Tx) Spoke(game string, since time.Time) (map[string]bool, error) {
+	rows, _ := tx.Query(tx.Ctx, `SELECT DISTINCT from_handle FROM room_log WHERE game_id = $1 AND from_handle <> '' AND at >= $2`, game, since)
+	handles, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	out := map[string]bool{}
+	for _, h := range handles {
+		out[h] = true
+	}
+	return out, err
+}
+
 // Archive keeps record (JSON) for good, dated with the UTC day the move
 // runs on (the day only). It must name no player: build it with Anon.
 func (tx *Tx) Archive(record any) error {

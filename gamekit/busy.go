@@ -72,8 +72,10 @@ func internal(err error) bool {
 // result. In embeds appkit.WakeArgs (session_key, harness,
 // conversation_id). The structured output carries Wakeshift's block too, as
 // wakeshift (appkit.WakeOutput), for hosts that show the model only
-// structuredContent.
-func AddTool[In appkit.WakeInput](s *Server, srv *mcp.Server, t *mcp.Tool, h func(ctx context.Context, call *appkit.ToolCall, in In) (*mcp.CallToolResult, map[string]any, error)) {
+// structuredContent. A tool that subscribes declares its events in opts
+// (appkit.Subscribes: join's are Updates and the game's own); AddTool names
+// the tool for them (appkit.ToolName), since game tools share input types.
+func AddTool[In appkit.WakeInput](s *Server, srv *mcp.Server, t *mcp.Tool, h func(ctx context.Context, call *appkit.ToolCall, in In) (*mcp.CallToolResult, map[string]any, error), opts ...appkit.EventsOption) {
 	if s.attached == nil {
 		panic("gamekit.AddTool: add the game's tools in the function Handler calls, after Wakeshift is attached")
 	}
@@ -88,7 +90,7 @@ func AddTool[In appkit.WakeInput](s *Server, srv *mcp.Server, t *mcp.Tool, h fun
 			return h(ctx, call, in)
 		})
 		return res, toolOut{fields: out}, err
-	}))
+	}, append([]appkit.EventsOption{appkit.ToolName(t.Name)}, opts...)...))
 }
 
 // toolOut is a game tool's structured output: the fields its handler

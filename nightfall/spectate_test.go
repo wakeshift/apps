@@ -25,7 +25,7 @@ func spectated(t *testing.T) (*httptest.Server, map[string]*game) {
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)
 	games := map[string]*game{}
-	for i, phase := range []string{waiting, night, day, voting, over} {
+	for i, phase := range []string{waiting, night, day, voting, next, over} {
 		g := table([]string{vampire, lamplighter, changeling, gravedigger}, [centerSize]string{townsperson, watchman, vampire})
 		g.ID, g.Phase, g.Deadline, g.Open = fmt.Sprintf("nf%d", i), phase, time.Now().Add(time.Minute), phase == waiting
 		for j, p := range g.Players {
@@ -46,14 +46,15 @@ func spectated(t *testing.T) (*httptest.Server, map[string]*game) {
 			g.Players[2].Action = &action{Players: []string{"busy-bee"}}
 			g.Players[3].Action = &action{Players: []string{"wolfish-fox", "seeing-owl"}}
 		}
-		if phase == day || phase == voting || phase == over {
+		if phase == day || phase == voting || phase == next || phase == over {
 			g.resolveNight()
 		}
-		if phase == voting || phase == over {
+		if phase == voting || phase == next || phase == over {
 			g.Players[1].Vote, g.Players[2].Vote = "busy-bee", "busy-bee"
 		}
-		if phase == over {
+		if phase == next || phase == over {
 			g.tally()
+			g.GameNo = 1
 		}
 		said := []gamekit.Entry{{Text: "Nightfall game " + g.ID + " has started."}, {From: "seeing-owl", Text: "I looked at someone's card, " + phase + "."}}
 		gametest.Put(t, app.Store, g.ID, phase, g.Open, phase == over, g, said...)
@@ -73,7 +74,7 @@ func spectated(t *testing.T) (*httptest.Server, map[string]*game) {
 // over, on every page and response a spectator can read.
 func TestSpectatorsSeeNoSecrets(t *testing.T) {
 	srv, games := spectated(t)
-	for _, phase := range []string{waiting, night, day, voting, over} {
+	for _, phase := range []string{waiting, night, day, voting, next, over} {
 		g := games[phase]
 		pages := gametest.Spectated(t, srv.URL, g.ID)
 		var secrets []string // what the players learned at night, as text and as HTML
@@ -96,7 +97,7 @@ func TestSpectatorsSeeNoSecrets(t *testing.T) {
 					t.Errorf("%s game: %s shows %q", phase, name, secret)
 				}
 			}
-			over := phase == over && (name == "page" || name == "state")
+			over := (phase == next || phase == over) && (name == "page" || name == "state")
 			for _, s := range secrets {
 				if strings.Contains(body, s) {
 					t.Errorf("%s game: %s shows what a player learned: %q", phase, name, s)
@@ -124,7 +125,7 @@ func TestSpectatorsSeeNoSecrets(t *testing.T) {
 				}
 			}
 		}
-		for _, want := range []string{"Game " + g.ID, "wolfish-fox", "busy-bee", "someone&#39;s card, " + phase, `<noscript><meta http-equiv="refresh"`} {
+		for _, want := range []string{"Table " + g.ID, "wolfish-fox", "busy-bee", "someone&#39;s card, " + phase, `<noscript><meta http-equiv="refresh"`} {
 			if !strings.Contains(pages["page"], want) {
 				t.Errorf("%s game: the page has no %q", phase, want)
 			}
@@ -146,7 +147,7 @@ func TestSpectatorsSeeNoSecrets(t *testing.T) {
 	for _, g := range l.Finished {
 		finished = append(finished, g.ID)
 	}
-	if strings.Join(live, " ") != "nf3 nf2 nf1" || strings.Join(finished, " ") != "nf4" {
+	if strings.Join(live, " ") != "nf4 nf3 nf2 nf1" || strings.Join(finished, " ") != "nf5" {
 		t.Errorf("live %v, finished %v", live, finished)
 	}
 	landing := gametest.Spectated(t, srv.URL, "nf1")["landing"]

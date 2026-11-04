@@ -109,16 +109,14 @@ func TestAgreementLines(t *testing.T) {
 // Outside the apps, Wakeshift itself has one agreement line, written once:
 // the console's sign-in page (consoleAgree, linking the site's /terms and
 // /privacy). The wakeshift program has none: no agent relays a notice
-// before it installs, and nothing says "By installing, you agree". Its
-// installers print instead that the Connector Terms and the Privacy Policy
-// apply (connectorLine, Connector Terms Section 3.1), written once in
-// internal/harnesses. The published apps have neither, so there the test is
-// skipped.
+// before it installs, nothing says "By installing, you agree", and its
+// installers print no terms notice (connectorPhrase): an app's own terms
+// carry the Connector Terms and the Privacy Policy to its users (Terms of
+// Service Section 6.6). The published apps have neither, so there the test
+// is skipped.
 const (
 	consoleLogin    = "../../web/src/pages/Login.tsx"
 	consoleAgree    = "By signing in, you agree to Wakeshift's"
-	connectorFile   = "../../internal/harnesses/harnesses.go"
-	connectorLine   = `"Wakeshift's Connector Terms (https://wakeshift.ai/connector-terms) and Privacy Policy (https://wakeshift.ai/privacy) apply to this connector."`
 	connectorPhrase = "apply to this connector"
 	installAgree    = "By installing, you agree"
 )
@@ -140,13 +138,6 @@ func TestWakeshiftAgreementLines(t *testing.T) {
 		if !bytes.Contains(login, []byte(link)) {
 			t.Errorf("%s lacks the link %s", consoleLogin, link)
 		}
-	}
-	h, err := os.ReadFile(connectorFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := bytes.Count(h, []byte(connectorLine)); n != 1 {
-		t.Errorf("%s defines the installers' terms line %d times, want once: %s", connectorFile, n, connectorLine)
 	}
 	walk := func(root, phrase, home string) {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -182,7 +173,7 @@ func TestWakeshiftAgreementLines(t *testing.T) {
 		}
 	}
 	walk("../../web/src", consoleAgree, consoleLogin)
-	walk("../../internal", connectorPhrase, connectorFile)
+	walk("../../internal", connectorPhrase, "")
 	walk("../../internal", installAgree, "")
 	walk("../../web/src", installAgree, "")
 }

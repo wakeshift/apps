@@ -23,7 +23,7 @@ playerView(s, "bob");                  // the public view plus bob's own cards a
 - **Results:** a finished hand's `hand.result` has the pots with their winners and shares, the hands shown, each player's net, who busted, and the seed. The log (`hand.log`) records every post, action, returned bet, street, showdown and award, for hand histories and replays.
 - **Evaluation:** `evaluate(cards)` gives the best five-card hand from five to seven cards: a score (higher wins, equal splits), the category, its tie-breaking ranks, the five cards and a name ("a full house, kings full of sevens").
 - **The shuffle:** `newSeed()`, `commitmentOf(seed)`, `shuffleDeck(seed, handId)`, `verifyShuffle(seed, commitment, handId)`, and `verifyHand(log)`, which checks a finished hand's board and shown cards against its commitment from the public log alone.
-- **Errors:** `EngineError` with a `code` (`illegal_action`, `not_your_turn`, `still_in_hand` …) and a message that names players, seats and amounts, never cards.
+- **Errors:** `EngineError` with a `code` (`illegal_action`, `not_your_turn`, `still_in_hand` …) and a message for logs and developers that may name players, seats and amounts, never cards. Apps word what their users read from the code.
 - **Checks:** `checkInvariants(state)` throws if chips were made or lost: the table always holds what was brought in (`ledger.in`) minus what was taken away (`ledger.out`).
 
 ## The shuffle
@@ -43,7 +43,7 @@ The seed also reveals the folded hands and the cards that were never dealt. The 
 - **Timeouts:** the player folds, even where a check was free (the app then takes them off the table).
 - **Pots:** one side pot per all-in level, merged where the same players are eligible. Odd chips go one each to the pot's winners, starting from the first seat left of the button.
 - **Showdown:** every live hand is shown, with no mucking. The last player to bet or raise on the last betting round shows first, else the first live player left of the button. Folded hands are never shown.
-- **Seats:** a player with no chips after a hand loses their seat. A player who folded can leave mid-hand and is paid out at once.
+- **Seats:** a player with no chips after a hand loses their seat. A player who folded can leave mid-hand and is paid out at once, and can sit again before the hand ends, dealt in from the next one.
 
 ## Tests
 

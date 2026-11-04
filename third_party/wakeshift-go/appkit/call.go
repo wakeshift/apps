@@ -2,12 +2,12 @@ package appkit
 
 import (
 	"context"
-	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/wakeshift/wakeshift-go/appkit/internal/adapt"
 	"github.com/wakeshift/wakeshift-go/internal/harnesses"
 )
 
@@ -46,40 +46,56 @@ type wireCall struct {
 	// result.
 	Tool string `json:"tool,omitempty"`
 	// Tasks: the client takes MCP tasks (protocol 2026-07-28 with the tasks
-	// extension), and Wrap serves the wait tool for it (tasks.go).
+	// extension), and Wrap serves the wait tool for it (Tools.Wait,
+	// tasks.go): never set without Wait.
 	Tasks bool `json:"tasks,omitempty"`
 }
 
 // callFrom packs a tool call: user (the app's ID for the person, or "") and
 // session (the tool's session_key argument).
 func callFrom(req *mcp.CallToolRequest, user, session string) wireCall {
-	c := wireCall{User: user, Session: session}
+	return wireOf(requestOf(req), user, session)
+}
+
+// requestOf is a go-sdk tool call's request as the wrapper reads it, from
+// whichever MCP library serves it (adapt.Request).
+func requestOf(req *mcp.CallToolRequest) adapt.Request {
 	if req == nil {
-		return c
+		return adapt.Request{}
 	}
-	c.Client = clientName(req, "")
+	r := adapt.Request{Lib: req}
+	if info := req.ClientInfo(); info != nil {
+		r.Client = info.Name
+	}
+	if caps := req.ClientCapabilities(); caps != nil {
+		r.Extensions = caps.Extensions
+	}
 	if req.Params != nil {
-		c.Meta = req.Params.GetMeta()
-		c.Tool = req.Params.Name
+		r.Meta = req.Params.GetMeta()
+		r.Tool = req.Params.Name
 	}
-	var header http.Header
-	if req.Extra != nil && req.Extra.Header != nil {
-		header = req.Extra.Header
-		c.UserAgent = header.Get("User-Agent")
+	if req.Extra != nil {
+		r.Header = req.Extra.Header
+		r.Token = req.Extra.TokenInfo
 	}
-	c.Tasks = takesTasks(c.Meta, header)
+	return r
+}
+
+// wireOf packs a tool call's request: user (the app's ID for the person,
+// or "") and session (the tool's session_key argument).
+func wireOf(r adapt.Request, user, session string) wireCall {
+	c := wireCall{User: user, Session: session, Client: r.Client, Meta: r.Meta, Tool: r.Tool}
+	if r.Header != nil {
+		c.UserAgent = r.Header.Get("User-Agent")
+	}
+	c.Tasks = takesTasks(c.Meta, r.Header)
 	return c
 }
 
-// clientName is the calling client's name: the request's (its _meta's, or
-// initialize's), else identified (Identity.Client), else "".
-func clientName(req *mcp.CallToolRequest, identified string) string {
-	if req != nil {
-		if info := req.ClientInfo(); info != nil && info.Name != "" {
-			return info.Name
-		}
-	}
-	return identified
+// tasksIf is the call with Tasks only if Wrap serves the wait tool (wait).
+func (c wireCall) tasksIf(wait bool) wireCall {
+	c.Tasks = c.Tasks && wait
+	return c
 }
 
 // withArgs is the call with the harness and conversation_id the agent
@@ -121,24 +137,10 @@ type addition struct {
 	Agent Recognized `json:"agent"`
 }
 
-// apply adds the addition to an MCP tool result: text (the app's own, then
+// result is a built-in tool's reply: text (the app's own, then
 // Wakeshift's) as a text block, and the _meta.
-func (t addition) apply(res *mcp.CallToolResult, text string) *mcp.CallToolResult {
-	if res == nil {
-		res = &mcp.CallToolResult{}
-	}
-	if s := strings.TrimSpace(strings.TrimSpace(text) + "\n\n" + t.Text); s != "" {
-		res.Content = append(res.Content, &mcp.TextContent{Text: s})
-	}
-	if len(t.Meta) > 0 {
-		if res.Meta == nil {
-			res.Meta = mcp.Meta{}
-		}
-		for k, v := range t.Meta {
-			res.Meta[k] = v
-		}
-	}
-	return res
+func (t addition) result(text string) adapt.Result {
+	return adapt.Result{Text: strings.TrimSpace(strings.TrimSpace(text) + "\n\n" + t.Text), Meta: t.Meta}
 }
 
 // How a conversation is connected (EventStatus.Via,

@@ -11,8 +11,7 @@
 //   LOAD_PARALLEL   posts in flight at once (default 50)
 //   LOAD_SESSIONS   MCP sessions, each initialize + 3 tool calls (default 50)
 //   LOAD_BURST      posts fired at once at the end, to see overload (default 2000)
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { roundRobin, testDatabase } from "./testdb.js";

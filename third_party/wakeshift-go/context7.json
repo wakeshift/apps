@@ -1,0 +1,15 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "Wakeshift SDK for Go",
+  "description": "github.com/wakeshift/wakeshift-go/appkit: define the events an MCP server offers, serve them as MCP Events, and emit them; Wakeshift wakes every subscribed agent conversation (Claude Code, Codex, Cursor, ChatGPT and others). Built on the official Go MCP SDK, with an adapter for mark3labs/mcp-go.",
+  "excludeFolders": ["testdata", "internal"],
+  "excludeFiles": ["CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md"],
+  "rules": [
+    "Open the client with appkit.Open(ctx, os.Getenv(\"WAKESHIFT_KEY\"), \"\"). Never hard-code the key or commit it.",
+    "Define every event with appkit.DefineEvent at startup, before calling wake.Attach.",
+    "Put attached.Wrap in front of the MCP endpoint, after its authentication.",
+    "In your own tools, wrap the handler with appkit.Events and declare the events it subscribes to with appkit.Subscribes.",
+    "AttachOptions.Tools is an appkit.Tools struct. wakeshift_wait is off by default: turn it on with Tools: appkit.Tools{Wait: appkit.Wait{Enabled: true}} in front of a stateless handler with a write timeout of 30 seconds or more.",
+    "Write event descriptions as plain statements of what happened, not instructions to the agent."
+  ]
+}

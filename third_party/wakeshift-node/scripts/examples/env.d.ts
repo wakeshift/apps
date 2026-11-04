@@ -2,7 +2,7 @@
 // scripts/check-examples.mjs. An example that declares one of these itself
 // shadows it.
 import type { IncomingMessage } from "node:http";
-import type { McpServer as McpServerClass } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer as McpServerClass, ServerContext } from "@modelcontextprotocol/server";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -13,15 +13,18 @@ declare global {
   // Imports an example leaves out.
   const Wakeshift: typeof SDK.Wakeshift;
   const isCode: typeof SDK.isCode;
+  const notifies: typeof SDK.notifies;
   const McpServer: typeof McpServerClass;
   const z: typeof zod;
 
-  // The app around a tool.
+  // The app around a tool: an @modelcontextprotocol/server 2.x server, as the
+  // docs use. Examples for 1.x import and make their own.
   const wake: SDK.Wakeshift;
   const server: McpServerClass;
-  // The quickstart's per-session server, which its serving block connects.
+  // The quickstart's server factory, which its serving block hands createMcpHandler.
   function newServer(): McpServerClass;
-  // Inside a tool callback.
+  // Inside a tool callback: 2.x's request context, and 1.x's.
+  const ctx: ServerContext;
   const extra: RequestHandlerExtra<ServerRequest, ServerNotification>;
   const args: { session_key?: string; harness?: string; conversation_id?: string };
   const call: SDK.ToolCall;
