@@ -1,7 +1,7 @@
 {
   "name": "@wakeshift/sdk",
-  "version": "0.10.2",
-  "description": "Let agents subscribe to things in your app: Wakeshift wakes them when you emit an event.",
+  "version": "0.11.0",
+  "description": "Wakeshift lets an MCP server wake the AI agents that use it. The TypeScript SDK: define events, serve them as MCP Events, and emit them.",
   "license": "Apache-2.0",
   "author": "Clawvisor Inc. <support@wakeshift.ai>",
   "keywords": [
@@ -17,8 +17,7 @@
     "webhooks",
     "notifications",
     "wakeshift",
-    "mastra",
-    "xmcp"
+    "mastra"
   ],
   "homepage": "https://github.com/wakeshift/wakeshift-node#readme",
   "repository": {
@@ -31,19 +30,46 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "typesVersions": {
+    "*": {
+      "mastra": [
+        "./dist/mastra.d.ts"
+      ],
+      "tools": [
+        "./dist/tools.d.ts"
+      ],
+      "testing": [
+        "./dist/testing.d.ts"
+      ]
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./mastra": {
       "types": "./dist/mastra.d.ts",
-      "import": "./dist/mastra.js"
+      "import": "./dist/mastra.js",
+      "require": "./dist/mastra.js",
+      "default": "./dist/mastra.js"
     },
-    "./xmcp": {
-      "types": "./dist/xmcp.d.ts",
-      "import": "./dist/xmcp.js"
-    }
+    "./tools": {
+      "types": "./dist/tools.d.ts",
+      "import": "./dist/tools.js",
+      "require": "./dist/tools.js",
+      "default": "./dist/tools.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js",
+      "require": "./dist/testing.js",
+      "default": "./dist/testing.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -51,7 +77,7 @@
     "NOTICE"
   ],
   "engines": {
-    "node": ">=22"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "publishConfig": {
     "access": "public"
@@ -63,14 +89,17 @@
     "examples": "node scripts/check-examples.mjs",
     "prepack": "npm run build",
     "pack-check": "sh scripts/pack-check.sh",
-    "test:v2": "tsc -p tsconfig.test.json && WAKESHIFT_TEST_MCP=v2 node --test 'build-test/test/*.test.js'"
+    "test:v2": "tsc -p tsconfig.test.json && WAKESHIFT_TEST_MCP=v2 node --test 'build-test/test/*.test.js'",
+    "bundle-check": "node scripts/bundle-check.mjs"
+  },
+  "dependencies": {
+    "zod-to-json-schema": "^3.25.2"
   },
   "peerDependencies": {
-    "@modelcontextprotocol/sdk": "^1.23.0",
-    "@modelcontextprotocol/server": "^2.3.0",
-    "zod": "^3.25.0 || ^4.0.0",
     "@mastra/mcp": "^2.7.0",
-    "xmcp": "^1.9.0"
+    "@modelcontextprotocol/sdk": ">=1.0.0 <2",
+    "@modelcontextprotocol/server": "^2.3.0",
+    "zod": "^3.25.28 || ^4.0.0"
   },
   "peerDependenciesMeta": {
     "@modelcontextprotocol/sdk": {
@@ -81,9 +110,6 @@
     },
     "@mastra/mcp": {
       "optional": true
-    },
-    "xmcp": {
-      "optional": true
     }
   },
   "devDependencies": {
@@ -92,6 +118,7 @@
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@modelcontextprotocol/server": "^2.4.0",
     "@types/node": "^22.20.5",
+    "esbuild": "^0.25.12",
     "expect-type": "^1.4.0",
     "typescript": "^7.0.2",
     "zod": "^4.6.7"

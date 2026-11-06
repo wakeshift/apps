@@ -6,15 +6,15 @@ import (
 	"testing"
 
 	"github.com/wakeshift/apps/agentchat"
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/legal/legaltest"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // Agent Chat serves its own terms and privacy policy (no Wakeshift needed),
 // which cover its own accounts: email, sessions, orgs, retention and
 // deleting an account.
 func TestLegalPages(t *testing.T) {
-	app := &agentchat.App{Kit: &appkit.App{ID: "agentchat", MCPURL: "https://chat.example.test/mcp"}, URL: "https://chat.example.test", Mail: agentchat.NoMail{}, Secret: []byte(strings.Repeat("s", 32))}
+	app := &agentchat.App{Kit: agentkit.TestApp("agentchat", nil, "", "https://chat.example.test/mcp"), URL: "https://chat.example.test", Mail: agentchat.NoMail{}, Secret: []byte(strings.Repeat("s", 32))}
 	h := app.Handler()
 	legaltest.Check(t, h, "Agent Chat")
 	for path, wants := range map[string][]string{

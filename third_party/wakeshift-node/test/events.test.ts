@@ -6,18 +6,21 @@ import { InMemoryTransport } from "./mcp.js";
 import { McpError, type CallToolResult } from "./mcp.js";
 import { z } from "zod";
 import { readFileSync } from "node:fs";
-import {
-  BUILTIN_TOOLS,
-  EVENT_TOOL_TEXT,
-  EXTENSION_KEY,
-  LIST_TOOL_DESCRIPTION,
-  SUBSCRIBE_TOOL_DESCRIPTION,
-  UNSUBSCRIBE_TOOL_DESCRIPTION,
-  Wakeshift,
-  WakeshiftError,
-  type BuiltinTool,
-} from "../src/index.js";
-import { speaksEvents, toolChoice, type AttachOptions } from "../src/events.js";
+import { Wakeshift, UsageError, type AttachOptions } from "../src/index.js";
+import { EVENT_TOOL_TEXT } from "../src/events.js";
+import { EXTENSION_KEY, dialectOf } from "../src/spec.js";
+import { OUTPUT_SCHEMAS as TOOL_OUTPUT_SCHEMAS } from "../src/wording.js";
+
+const BUILTIN_TOOLS = ["subscribe_events", "unsubscribe_events", "list_subscriptions"] as const;
+type BuiltinTool = (typeof BUILTIN_TOOLS)[number];
+const SUBSCRIBE_TOOL_DESCRIPTION = EVENT_TOOL_TEXT.subscribe_description;
+const UNSUBSCRIBE_TOOL_DESCRIPTION = EVENT_TOOL_TEXT.unsubscribe_description;
+const LIST_TOOL_DESCRIPTION = EVENT_TOOL_TEXT.list_description;
+import { quiet, warningsInto } from "./logs.js";
+import { WAKE_ARGS_JSON, withWakeArgsJson } from "../src/toolcall.js";
+import * as z3 from "zod/v3";
+import { speaksEvents, toolChoice } from "../src/events.js";
+import { nativeOf } from "../src/toolcall.js";
 import { TOOL_ANNOTATIONS } from "../src/tasks.js";
 
 const seed = Buffer.alloc(32, 9).toString("base64url");
@@ -34,14 +37,14 @@ interface Req {
 function fakeCore(replies: Record<string, (body: any) => { status?: number; json: any }> = {}) {
   const reqs: Req[] = [];
   const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
-    const path = String(url).replace("http://core.test/api/apps/v1", "");
+    const path = String(url).replace("https://core.test/api/apps/v1", "");
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     reqs.push({ method: init?.method ?? "GET", path, body });
     const r = replies[path]?.(body) ?? { json: {} };
     return new Response(JSON.stringify(r.json), { status: r.status ?? 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
   const warnings: string[] = [];
-  return { reqs, warnings, wake: new Wakeshift({ key: KEY, core: "http://core.test", fetch: fakeFetch, onWarning: (m) => warnings.push(m) }) };
+  return { reqs, warnings, wake: new Wakeshift({ key: KEY, core: "https://core.test", fetch: fakeFetch, logger: warningsInto(warnings) }) };
 }
 
 function chatEvent(wake: Wakeshift) {
@@ -126,10 +129,10 @@ test("emit checks the payload, merges the manifest first from a process that ser
   const { wake, reqs } = fakeCore({ "/events/emit": () => ({ json: { matched: 2, duplicate: false } }) });
   const chat = chatEvent(wake);
   wake.attach(new McpServer({ name: "chat", version: "1.0.0" }));
-  await assert.rejects(chat.emit({ channel: "eng" }, { from: "ada" } as any), (e: unknown) => e instanceof WakeshiftError && e.code === "bad_arguments" && e.detail.startsWith("payload for"));
-  await assert.rejects(chat.emit({ channel: "eng" }, { from: "ada", text: "hi" }, { to: "u1" }), /isn't personal/);
+  await assert.rejects(chat.emit({ channel: "eng" }, { from: "ada" } as any), (e: unknown) => e instanceof UsageError && e.code === "bad_arguments" && e.message.replace("wakeshift: ", "").startsWith("payload for"));
+  await assert.rejects((chat.emit as any)({ channel: "eng" }, { from: "ada", text: "hi" }, { to: "u1" }), /isn't personal/);
   const out = await chat.emit({ channel: "eng" }, { from: "ada", text: "shipped" }, { id: "m1" });
-  assert.deepEqual(out, { matched: 2, duplicate: false, unmatched: [], ended: [] });
+  assert.deepEqual(out, { matched: 2, duplicate: false, unmatched: [], ended: [], textTrimmed: false });
   assert.deepEqual(
     reqs.map((r) => `${r.method} ${r.path}`),
     ["POST /manifest/merge", "POST /events/emit"],
@@ -172,7 +175,7 @@ test("a process that only emits sends no manifest while Wakeshift knows the even
 test("a personal event is emitted to one subscriber", async () => {
   const { wake, reqs } = fakeCore({ "/events/emit": () => ({ json: { matched: 1 } }) });
   const turn = turnEvent(wake);
-  await assert.rejects(turn.emit({ table: "juniper" }, { hole: ["As", "Kd"], toCall: 2 }), /personal: pass \{ to \}/);
+  await assert.rejects((turn.emit as any)({ table: "juniper" }, { hole: ["As", "Kd"], toCall: 2 }), /personal: pass \{ to \}/);
   await turn.emit({ table: "juniper" }, { hole: ["As", "Kd"], toCall: 2 }, { to: "user-abc" });
   assert.equal(reqs.at(-1)!.body.to, "user-abc");
   assert.deepEqual(reqs.at(-1)!.body.payload, { hole: ["As", "Kd"], toCall: 2 });
@@ -193,7 +196,7 @@ test("a personal event is emitted to many: a plain user alone stays a string, an
   const out = await turn.emit({ table: "juniper" }, p, { to: [{ user: "u1", subscription: "es_1" }, "u2", { native: "u3" }], id: "h1" });
   assert.deepEqual(reqs.at(-1)!.body.to, [{ user: "u1", subscription: "es_1" }, "u2", { native: "u3" }]);
   assert.equal(reqs.at(-1)!.body.id, "h1");
-  assert.deepEqual(out, { matched: 1, duplicate: false, unmatched: ["u2", { native: "u3" }], ended: [{ user: "u1", subscription: "es_1" }] });
+  assert.deepEqual(out, { matched: 1, duplicate: false, unmatched: ["u2", { native: "u3" }], ended: [{ user: "u1", subscription: "es_1" }], textTrimmed: false });
   const sent = reqs.length;
   await assert.rejects(turn.emit({ table: "juniper" }, p, { to: [] }), /personal: pass \{ to \}/);
   await assert.rejects(turn.emit({ table: "juniper" }, p, { to: ["u1", " "] }), /user is empty/);
@@ -201,19 +204,74 @@ test("a personal event is emitted to many: a plain user alone stays a string, an
   await assert.rejects(turn.emit({ table: "juniper" }, p, { to: [{ user: "u1", subscription: "" }] }), /subscription is empty/);
   await assert.rejects(turn.emit({ table: "juniper" }, p, { to: [{ user: "u1" } as any] }), /a recipient is a user/);
   const chat = chatEvent(wake);
-  await assert.rejects(chat.emit({ channel: "eng" }, { from: "ada", text: "hi" }, { to: [{ native: "u1" }] }), /isn't personal/);
+  await assert.rejects((chat.emit as any)({ channel: "eng" }, { from: "ada", text: "hi" }, { to: [{ native: "u1" }] }), /isn't personal/);
   assert.equal(reqs.length, sent, "nothing refused is sent");
 });
 
 test("publishUrl takes exactly one plain user", async () => {
-  const { wake, reqs } = fakeCore({ "/events/publish-urls": () => ({ json: { id: "u1", event: "game.turn", url: "http://core.test/x" } }) });
+  const { wake, reqs } = fakeCore({ "/events/publish-urls": () => ({ json: { id: "u1", event: "game.turn", url: "https://core.test/x" } }) });
   const turn = turnEvent(wake);
-  await turn.publishUrl({ table: "juniper" }, { to: "user-abc" });
+  await turn.createPublishUrl({ table: "juniper" }, { to: "user-abc" });
   assert.equal(reqs.at(-1)!.body.to, "user-abc");
   const sent = reqs.length;
-  await assert.rejects(turn.publishUrl({ table: "juniper" }, { to: ["a", "b"] as any }), /exactly one user/);
-  await assert.rejects(turn.publishUrl({ table: "juniper" }, { to: { native: "a" } as any }), /exactly one user/);
+  await assert.rejects(turn.createPublishUrl({ table: "juniper" }, { to: ["a", "b"] as any }), /exactly one user/);
+  await assert.rejects(turn.createPublishUrl({ table: "juniper" }, { to: { native: "a" } as any }), /exactly one user/);
   assert.equal(reqs.length, sent);
+});
+
+test("publishUrl passes a signing secret, and reads the fingerprint back, never the secret", async () => {
+  const { wake, reqs } = fakeCore({
+    "/events/publish-urls": (b) => ({
+      json: { id: "pu1", event: "chat.message", url: "https://core.test/x", ...(b.signing_secret ? { signing: { fingerprint: "abc123def456", set_at: "2026-11-04T00:00:00Z" } } : {}) },
+    }),
+  });
+  const chat = chatEvent(wake);
+  const secret = "whsec_" + Buffer.alloc(32, 1).toString("base64");
+  const url = await chat.createPublishUrl({ channel: "eng" }, { signingSecret: secret });
+  assert.equal(reqs.at(-1)!.body.signing_secret, secret);
+  assert.deepEqual(url, { id: "pu1", event: "chat.message", url: "https://core.test/x", signing: { fingerprint: "abc123def456", setAt: "2026-11-04T00:00:00Z" } });
+  assert.ok(!JSON.stringify(url).includes(secret));
+  const plain = await chat.createPublishUrl({ channel: "eng" });
+  assert.equal(reqs.at(-1)!.body.signing_secret, undefined);
+  assert.equal(plain.signing, undefined);
+  const sent = reqs.length;
+  await assert.rejects(chat.createPublishUrl({ channel: "eng" }, { signingSecret: " " }), (err: UsageError) => err.code === "bad_signing_secret" && !err.message.includes("whsec_A"));
+  assert.equal(reqs.length, sent);
+});
+
+test("a zod 3 payload takes fields a sender adds: no additionalProperties: false unless the object is strict", () => {
+  const { wake } = fakeCore();
+  const ev = wake.defineEvent("hook.done", {
+    description: "A webhook arrived",
+    args: z3.object({ job: z3.string() }),
+    payload: z3.object({
+      id: z3.string(),
+      data: z3.object({ n: z3.number() }).optional(),
+      items: z3.array(z3.object({ k: z3.string() })),
+      either: z3.union([z3.object({ a: z3.string() }), z3.object({ b: z3.string() }).strict()]),
+      strict: z3.object({ s: z3.string() }).strict(),
+      nullable: z3.object({ x: z3.string() }).nullable(),
+    }),
+    text: (p) => p.id,
+  });
+  const p = ev.manifest.payload as any;
+  assert.equal(p.additionalProperties, undefined);
+  assert.equal(p.properties.data.additionalProperties, undefined);
+  assert.equal(p.properties.items.items.additionalProperties, undefined);
+  assert.equal(p.properties.either.anyOf[0].additionalProperties, undefined);
+  assert.equal(p.properties.either.anyOf[1].additionalProperties, false, "a strict object still refuses");
+  assert.equal(p.properties.strict.additionalProperties, false);
+  assert.ok(!JSON.stringify(p.properties.nullable).includes('"additionalProperties":false'), JSON.stringify(p.properties.nullable));
+  // Arguments aren't a sender's: they render as before.
+  assert.equal((ev.manifest.arguments as any).additionalProperties, false);
+});
+
+test("Wakeshift's arguments as tools/list adds them are every SDK's (test/wake-args.json), added to a copy", () => {
+  assert.deepEqual(sorted(JSON.parse(JSON.stringify(WAKE_ARGS_JSON))), sorted(goldenFile("wake-args.json").compact.subscribing.properties));
+  const mine = { type: "object", properties: { job: { type: "string" } }, required: ["job"], additionalProperties: false };
+  const got = withWakeArgsJson(mine);
+  assert.deepEqual(got, { ...mine, properties: { ...WAKE_ARGS_JSON, job: { type: "string" } } });
+  assert.deepEqual(mine.properties, { job: { type: "string" } }, "the schema given stays as it was");
 });
 
 test("status counts by arguments; statusOf reads subscriptions by ID", async () => {
@@ -233,16 +291,28 @@ test("status counts by arguments; statusOf reads subscriptions by ID", async () 
   assert.deepEqual(reqs.at(-1)!.body, { name: "game.turn", subscriptions: [{ user: "u1", id: "s1" }, { user: "u2", id: "s2" }] });
   const sent = reqs.length;
   assert.deepEqual(await turn.statusOf([]), []);
-  await assert.rejects(turn.status({ table: "juniper" }), /personal/);
+  await assert.rejects((turn.status as any)({ table: "juniper" }), /personal/);
   await assert.rejects(turn.status({ table: "juniper" }, { to: ["a"] as any }), /exactly one user/);
-  await assert.rejects(chatEvent(wake).status({ channel: "eng" }, { to: "a" }), /isn't personal/);
+  await assert.rejects((chatEvent(wake).status as any)({ channel: "eng" }, { to: "a" }), /isn't personal/);
   await assert.rejects(turn.statusOf([{ user: "", subscription: "s1" }]), /user and subscription/);
   await assert.rejects(turn.statusOf(Array.from({ length: 1001 }, () => ({ user: "u", subscription: "s" }))), /at most 1000/);
   assert.equal(reqs.length, sent, "nothing refused is sent");
 });
 
+test("dialectOf: ChatGPT by name, or by User-Agent, through Codex too", () => {
+  // Work chats send tools/call and events/* as "openai-mcp/1.0.0 (Codex)", events/list as "openai-mcp/1.0.0".
+  assert.equal(dialectOf("", "openai-mcp/1.0.0 (Codex)"), "chatgpt");
+  assert.equal(dialectOf("", "openai-mcp/1.0.0"), "chatgpt");
+  assert.equal(dialectOf("openai-mcp", ""), "chatgpt");
+  assert.equal(dialectOf("", "codex-mcp-client/0.166.0"), "draft");
+});
+
 test("speaksEvents: the extension, or ChatGPT; not the older top-level key", () => {
   assert.equal(speaksEvents({ extensions: { [EXTENSION_KEY]: {} } }, "x"), true);
+  assert.equal(speaksEvents({ extensions: { [EXTENSION_KEY]: {} } }, "claude-code"), false, "a harness Wakeshift wakes itself: its name wins");
+  assert.equal(speaksEvents({ extensions: { [EXTENSION_KEY]: {} } }, "Cursor"), false);
+  assert.equal(speaksEvents({ extensions: { [EXTENSION_KEY]: {} } }, "capy"), false, "Capy, woken by its webhook watch or a command");
+  assert.equal(speaksEvents({ extensions: { [EXTENSION_KEY]: {} } }, "muse-custom-connector"), false, "Muse, woken by a one-shot command");
   assert.equal(speaksEvents({ events: {} }, "x"), false);
   assert.equal(speaksEvents({}, "openai-mcp"), true);
   assert.equal(speaksEvents({}, "claude-code"), false);
@@ -332,6 +402,43 @@ test("attach: bridged clients get subscribe_events; every client gets unsubscrib
   await client.close();
 });
 
+test("attach's own tools have every SDK's output schemas (test/tool-output-schemas.json), and answer with matching structuredContent", async () => {
+  const schemas = Object.fromEntries(Object.entries(goldenFile("tool-output-schemas.json")).filter(([k]) => !k.startsWith("_")));
+  assert.deepEqual(sorted(JSON.parse(JSON.stringify(TOOL_OUTPUT_SCHEMAS))), sorted(schemas));
+  const { wake } = fakeCore({
+    "/event-subscriptions": () => ({ json: { event_subscription: { id: "es1", created: true }, addition: { text: "Start the Monitor tool now.", meta: { "wakeshift/connector": "tok" } } } }),
+    "/event-subscriptions/list": () => ({
+      json: { subscriptions: [{ id: "es1", event: "chat.message", arguments: { channel: "eng" }, destination: "conversation", created_at: "2026-10-21T10:00:00.123456Z" }] },
+    }),
+    "/event-subscriptions/end": () => ({ json: { ended: false } }),
+    "/event-subscriptions/unsubscribe": () => ({ json: { ended: true } }),
+  });
+  chatEvent(wake);
+  const server = new McpServer({ name: "chat", version: "1.0.0" });
+  wake.attach(server, { identify: () => ({ user: "u1" }) });
+  // The MCP SDK's client checks each result's structuredContent against the tool's listed output schema.
+  const client = await connect(server, "claude-code");
+  const { tools } = await client.listTools();
+  for (const t of tools) assert.deepEqual(t.outputSchema, schemas[t.name], t.name);
+  const sub = (await client.callTool({ name: "subscribe_events", arguments: { event: "chat.message", arguments: { channel: "eng" } } })) as CallToolResult;
+  assert.deepEqual(sub.structuredContent, { subscribed: { event: "chat.message", arguments: { channel: "eng" }, created: true }, wakeshift: "Start the Monitor tool now." });
+  assert.equal(text(sub), 'Subscribed to chat.message {"channel":"eng"}.\n\nStart the Monitor tool now.');
+  assert.deepEqual(sub._meta, { "wakeshift/connector": "tok" });
+  const listed = (await client.callTool({ name: "list_subscriptions", arguments: {} })) as CallToolResult;
+  assert.deepEqual(listed.structuredContent, {
+    subscriptions: [{ id: "es1", event: "chat.message", arguments: { channel: "eng" }, destination: "conversation", since: "2026-10-21T10:00:00Z" }],
+  });
+  assert.deepEqual(((await client.callTool({ name: "unsubscribe_events", arguments: { id: "es9" } })) as CallToolResult).structuredContent, { ended: false });
+  assert.deepEqual(
+    ((await client.callTool({ name: "unsubscribe_events", arguments: { event: "chat.message", arguments: { channel: "eng" } } })) as CallToolResult).structuredContent,
+    { ended: true },
+  );
+  const refused = (await client.callTool({ name: "subscribe_events", arguments: { event: "chat.message", arguments: { channel: "secret" } } })) as CallToolResult;
+  assert.equal(refused.isError, true);
+  assert.equal(refused.structuredContent, undefined);
+  await client.close();
+});
+
 // The other SDKs echo arguments as Wakeshift keeps them (keys in name
 // order), whatever order the event defines them in.
 test("attach: the tools echo arguments in name order", async () => {
@@ -344,6 +451,7 @@ test("attach: the tools echo arguments in name order", async () => {
     args: z.object({ repo: z.string(), pr: z.number().int(), branch: z.string().optional() }),
     payload: z.object({ status: z.string(), branch: z.string() }),
     text: (r) => r.status,
+    public: true,
   });
   const server = new McpServer({ name: "ci", version: "1.0.0" });
   wake.attach(server, { identify: () => ({ user: "u1" }) });
@@ -363,8 +471,6 @@ test("attach: a personal event needs a known subscriber", async () => {
   const r = (await client.callTool({ name: "subscribe_events", arguments: { event: "game.turn", arguments: { table: "juniper" } } })) as CallToolResult;
   assert.equal(r.isError, true);
   assert.match(text(r), /personal/);
-  const l = (await client.callTool({ name: "list_subscriptions", arguments: {} })) as CallToolResult;
-  assert.equal(l.isError, true);
   await client.close();
 });
 
@@ -377,8 +483,36 @@ test("attach: without identify, requests have no user", async () => {
   const r = (await client.callTool({ name: "subscribe_events", arguments: { event: "game.turn", arguments: { table: "juniper" } } })) as CallToolResult;
   assert.equal(r.isError, true);
   assert.match(text(r), /personal/);
-  const l = (await client.callTool({ name: "list_subscriptions", arguments: {} })) as CallToolResult;
-  assert.equal(l.isError, true);
+  await client.close();
+});
+
+test("list_subscriptions and unsubscribe_events by id, with no user: the calling conversation's, by its session_key", async () => {
+  const { wake, reqs } = fakeCore({
+    "/event-subscriptions/list": () => ({
+      json: { subscriptions: [{ id: "es1", event: "crawl.finished", arguments: { job: "j1" }, destination: "conversation", created_at: "2026-10-21T10:00:00Z" }] },
+    }),
+    "/event-subscriptions/end": () => ({ json: { ended: true } }),
+  });
+  const crawl = wake.defineEvent("crawl.finished", { description: "A crawl finished", args: z.object({ job: z.string() }), payload: z.object({ pages: z.number() }) });
+  const server = new McpServer({ name: "crawler", version: "1.0.0" });
+  const attached = wake.attach(server);
+  attached.registerTool("start_crawl", { description: "Crawl.", inputSchema: z.object({ url: z.string() }), subscribes: [crawl] }, async () => "ok");
+  const client = await connect(server, "claude-code");
+  const listedTool = (await client.listTools()).tools.find((t) => t.name === "list_subscriptions")!;
+  assert.deepEqual(Object.keys(listedTool.inputSchema.properties ?? {}), ["session_key"]);
+  const l = (await client.callTool({ name: "list_subscriptions", arguments: { session_key: "wsc_test_key" } })) as CallToolResult;
+  assert.equal(l.isError, undefined);
+  assert.match(text(l), /- es1: crawl\.finished \{"job":"j1"\}, wakes a conversation/);
+  const listBody = reqs.find((q) => q.path === "/event-subscriptions/list")!.body;
+  assert.equal(listBody.user, undefined);
+  assert.equal(listBody.call.session, "wsc_test_key");
+  assert.equal(listBody.call.tool, "list_subscriptions");
+  const u = (await client.callTool({ name: "unsubscribe_events", arguments: { id: "es1", session_key: "wsc_test_key" } })) as CallToolResult;
+  assert.match(text(u), /Stopped subscription es1/);
+  const endBody = reqs.find((q) => q.path === "/event-subscriptions/end")!.body;
+  assert.equal(endBody.id, "es1");
+  assert.equal(endBody.user, undefined);
+  assert.equal(endBody.call.session, "wsc_test_key");
   await client.close();
 });
 
@@ -513,7 +647,7 @@ test("an authorize that throws refuses, on both paths, and the app hears why", a
     reqs.push(String(url));
     return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
-  const wake = new Wakeshift({ key: KEY, core: "http://core.test", fetch: fakeFetch, onWarning: (m) => warnings.push(m) });
+  const wake = new Wakeshift({ key: KEY, core: "https://core.test", fetch: fakeFetch, logger: warningsInto(warnings) });
   wake.defineEvent("chat.message", {
     description: "A message",
     args: { channel: z.string() },
@@ -545,59 +679,53 @@ test("an authorize that throws refuses, on both paths, and the app hears why", a
   const again = await connect(server, "claude-code");
   assert.ok((await again.listTools()).tools.some((t) => t.name === "subscribe_events"));
   await again.close();
-  assert.equal(warnings.length, 2);
-  assert.match(warnings[0], /authorize for chat\.message threw.*ACL service is down/);
+  // Rate-limited (warnings.json authorize_failed): one line for both, without the error's message.
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /authorize for chat\.message threw/);
+  assert.ok(!warnings[0].includes("ACL service is down"), warnings[0]);
   assert.equal(reqs.filter((u) => u.includes("subscribe")).length, 0, "nothing reached the core");
 });
 
-test("attach's tools option picks which of its own tools it adds: all three by default, each { enabled }, or (deprecated) the ones a list names", async () => {
-  assert.deepEqual([...BUILTIN_TOOLS], ["subscribe_events", "unsubscribe_events", "list_subscriptions"]);
-  const listed = async (tools?: AttachOptions["tools"]) => {
+test("builtinTools picks which of Wakeshift's own tools attach adds: all three by default; unknown keys and values throw (disabled-client.json option_checks)", async () => {
+  const listed = async (builtinTools?: AttachOptions["builtinTools"]) => {
     const { wake, warnings } = fakeCore();
     chatEvent(wake);
     const server = new McpServer({ name: "chat", version: "1.0.0" });
     server.registerTool("ping", { inputSchema: {} }, async () => ({ content: [] }));
-    wake.attach(server, { identify: () => ({ user: "u1" }), tools });
+    wake.attach(server, { identify: () => ({ user: "u1" }), builtinTools });
     const client = await connect(server, "claude-code");
     return { names: (await client.listTools()).tools.map((t) => t.name).sort(), warnings };
   };
   const all = ["list_subscriptions", "ping", "subscribe_events", "unsubscribe_events"];
-  // The object form: each on unless disabled; no warning.
-  for (const tools of [undefined, {}, { subscribe: {} }, { list: { enabled: true } }, { wait: { enabled: false } }]) {
-    const { names, warnings } = await listed(tools);
-    assert.deepEqual(names, all, JSON.stringify(tools));
-    assert.deepEqual(warnings, [], JSON.stringify(tools));
+  for (const b of [undefined, {}, { subscribe: true }, { wait: false }]) {
+    const { names, warnings } = await listed(b);
+    assert.deepEqual(names, all, JSON.stringify(b));
+    assert.deepEqual(warnings, [], JSON.stringify(b));
   }
-  assert.deepEqual((await listed({ subscribe: { enabled: false } })).names, ["list_subscriptions", "ping", "unsubscribe_events"]);
-  assert.deepEqual((await listed({ subscribe: { enabled: false }, list: { enabled: false }, unsubscribe: { enabled: false } })).names, ["ping"]);
-  // The list form, deprecated: the tools it names, and a warning, once.
-  const named = await listed(["list_subscriptions", "unsubscribe_events"]);
-  assert.deepEqual(named.names, ["list_subscriptions", "ping", "unsubscribe_events"]);
-  assert.equal(named.warnings.length, 1);
-  assert.match(named.warnings[0], /tools as a list of names is deprecated/);
-  assert.deepEqual((await listed([])).names, ["ping"]);
+  assert.deepEqual((await listed({ subscribe: false })).names, ["list_subscriptions", "ping", "unsubscribe_events"]);
+  assert.deepEqual((await listed({ subscribe: false, list: false, unsubscribe: false })).names, ["ping"]);
   const { wake } = fakeCore();
   chatEvent(wake);
   const server = () => new McpServer({ name: "x", version: "1.0.0" });
-  assert.throws(() => wake.attach(server(), { tools: ["subscribe" as BuiltinTool] }), /"subscribe"/);
-  assert.throws(() => wake.attach(server(), { tools: { subscribe_events: { enabled: false } } as any }), /tools has "subscribe_events"/);
-  assert.throws(() => wake.attach(server(), { tools: { wait: true } as any }), /tools\.wait is an object/);
-  assert.throws(() => wake.attach(server(), { tools: { wait: { enabled: "yes" } } as any }), /tools\.wait\.enabled is true or false/);
-  assert.throws(() => wake.attach(server(), { tools: { wait: { holdSeconds: 5 } } as any }), /tools\.wait has "holdSeconds"/);
+  const config = (says: string) => (e: unknown) => e instanceof UsageError && e.code === "config" && e.message.includes(says);
+  assert.throws(() => wake.attach(server(), { builtinTools: { subcribe: false } as any }), config("subcribe"));
+  assert.throws(() => wake.attach(server(), { builtinTools: { wait: "yes" } as any }), config("wait"));
+  assert.throws(() => wake.attach(server(), { requireUsr: true } as any), config("requireUsr"));
+  assert.throws(() => wake.attach(server(), { tools: { wait: { enabled: true } } } as any), config("tools"));
 });
 
-test("toolChoice: the object form and the deprecated list form, and the wait tool only when enabled", () => {
-  assert.deepEqual(toolChoice(undefined), { builtin: new Set(BUILTIN_TOOLS), wait: false });
-  assert.deepEqual(toolChoice({ wait: { enabled: true } }), { builtin: new Set(BUILTIN_TOOLS), wait: true });
-  assert.deepEqual(toolChoice({ list: { enabled: false } }), { builtin: new Set(["subscribe_events", "unsubscribe_events"]), wait: false });
-  // A list never turns the wait tool on.
-  assert.deepEqual(toolChoice(["subscribe_events"]), { builtin: new Set(["subscribe_events"]), wait: false });
+test("toolChoice: all three unless false, and the wait tool only when true", () => {
+  const all = ["subscribe_events", "list_subscriptions", "unsubscribe_events"];
+  assert.deepEqual(toolChoice(undefined), { builtin: new Set(all), wait: false });
+  assert.deepEqual(toolChoice({ wait: true }), { builtin: new Set(all), wait: true });
+  assert.deepEqual(toolChoice({ list: false }), { builtin: new Set(["subscribe_events", "unsubscribe_events"]), wait: false });
 });
 
-test("attach needs events, and must come before connecting", async () => {
-  const { wake } = fakeCore();
+test("attach with no events logs no_events (warnings.json attach_no_events); it must come before connecting", async () => {
+  const { wake, warnings } = fakeCore();
   const server = new McpServer({ name: "x", version: "1.0.0" });
-  assert.throws(() => wake.attach(server), /at least one event/);
+  wake.attach(server);
+  assert.match(warnings.join("\n"), /came before any defineEvent/);
   chatEvent(wake);
   const late = new McpServer({ name: "y", version: "1.0.0" });
   late.registerTool("ping", { inputSchema: {} }, async () => ({ content: [] }));
@@ -632,23 +760,27 @@ test("attach says what it got, when it isn't an McpServer, and what to do for a 
   class FastMCPSession {
     server = {};
   }
-  const low = new McpServer({ name: "x", version: "1.0.0" }).server;
+  // Something shaped like a low-level Server, keeping its handlers where Wakeshift can't wrap them.
+  class Server {
+    setRequestHandler() {}
+    connect() {}
+  }
   for (const [server, want] of [
     [new MCPServer(), /got a MCPServer\. This looks like Mastra's MCPServer \(@mastra\/mcp\).*use attachMastra from @wakeshift\/sdk\/mastra/],
     [new FastMCP(), /got a FastMCP\. This looks like fastmcp's FastMCP \(punkpeye\).*2026-07-28/],
     [new FastMCPSession(), /This looks like a fastmcp session/],
-    [low, /This is a low-level MCP Server: pass the McpServer instead/],
     [undefined, /got undefined\. Frameworks/],
     [null, /got null\./],
     ["server", /got a string\./],
     [{}, /got an object\./],
   ] as const) {
     const msg = refused(server);
-    assert.match(msg, /^wakeshift: attach takes an McpServer, from @modelcontextprotocol\/server 2\.x or @modelcontextprotocol\/sdk 1\.x/);
+    assert.match(msg, /^wakeshift: attach takes an McpServer or a low-level Server, from @modelcontextprotocol\/server 2\.x or @modelcontextprotocol\/sdk 1\.x/);
     assert.match(msg, want);
     assert.match(msg, docs);
     assert.doesNotMatch(msg, /before connecting/);
   }
+  assert.match(refused(new Server()), /this low-level Server keeps its request handlers where Wakeshift can't wrap them/);
 });
 
 test("attach blames connecting only when the server is connected", () => {
@@ -679,8 +811,8 @@ test("an event's end: ends one of a user's subscriptions by ID, outside a tool",
   );
 });
 
-// The Go SDK (pkg/appkit) writes test/event-tools.json and
-// test/events-list.json (WAKESHIFT_UPDATE_GOLDEN=1 go test ./pkg/appkit)
+// The Go SDK (pkg/wakeshift) writes test/event-tools.json and
+// test/events-list.json (WAKESHIFT_UPDATE_GOLDEN=1 go test ./pkg/wakeshift)
 // and tests against them too, so the two SDKs can't drift.
 function goldenFile(name: string): any {
   return JSON.parse(readFileSync(new URL(`../../test/${name}`, import.meta.url), "utf8"));
@@ -696,29 +828,34 @@ function sorted(v: any): any {
 // inputShape is what the golden file keeps of a tool's input schema: each
 // property's type, description and enum, and what's required (the rest is
 // each MCP SDK's own rendering; the Go test does the same).
+// inputShape is a JSON Schema as the fixtures compare it (README.md): type,
+// properties (each type, description, enum; left out when none), required
+// sorted (left out when empty).
 function inputShape(s: any): any {
   const properties = Object.fromEntries(
-    Object.entries((s.properties ?? {}) as Record<string, any>).map(([k, p]) => [k, { type: p.type, description: p.description, ...(p.enum ? { enum: p.enum } : {}) }]),
+    Object.entries((s.properties ?? {}) as Record<string, any>).map(([k, p]) => [k, { type: p.type, ...(p.description !== undefined ? { description: p.description } : {}), ...(p.enum ? { enum: p.enum } : {}) }]),
   );
-  return { properties, ...(s.required ? { required: s.required } : {}) };
+  return { type: s.type, ...(Object.keys(properties).length ? { properties } : {}), ...(s.required?.length ? { required: [...s.required].sort() } : {}) };
 }
 
 test("the built-in tools' annotations are every SDK's (test/tool-annotations.json)", () => {
   assert.deepEqual(sorted(JSON.parse(JSON.stringify(TOOL_ANNOTATIONS))), goldenFile("tool-annotations.json"));
 });
 
-test("the event tools' wording is the Go SDK's (test/event-tools.json)", () => {
-  assert.deepEqual(sorted({ ...EVENT_TOOL_TEXT }), goldenFile("event-tools.json"));
+test("the event tools' wording is every SDK's (test/event-tools.json)", () => {
+  const want = Object.fromEntries(Object.entries(goldenFile("event-tools.json")).filter(([k]) => !k.startsWith("_")));
+  assert.deepEqual(sorted({ ...EVENT_TOOL_TEXT }), sorted(want));
 });
 
-test("events/list, tools/list and the manifest match the Go SDK's for the same events (test/events-list.json)", async () => {
-  const { wake } = fakeCore();
+// sampleEvents defines events-list.json's sample events on wake.
+function sampleEvents(wake: Wakeshift) {
   const chat = wake.defineEvent("chat.message", {
     title: "Chat message",
     description: "A new message in a channel.",
     args: z.object({ channel: z.string().describe("The channel, lowercase"), from: z.string().optional().describe("Only messages from this person") }),
     payload: z.object({ from: z.string().describe("Who wrote it"), text: z.string().describe("The message") }),
     text: (m) => `${m.from}: ${m.text}`,
+    public: true,
   });
   const turn = wake.defineEvent("game.turn", {
     description: "It's your move at a table.",
@@ -728,7 +865,7 @@ test("events/list, tools/list and the manifest match the Go SDK's for the same e
     personal: true,
   });
   // Defined out of alphabetical order: arguments and required fields are
-  // listed in name order, as the other SDKs list them.
+  // listed in name order, as the other SDKs list them. Tools-only: the default.
   const run = wake.defineEvent("ci.run", {
     description: "A CI run on a pull request finished.",
     args: z.object({
@@ -739,19 +876,50 @@ test("events/list, tools/list and the manifest match the Go SDK's for the same e
     payload: z.object({ status: z.string().describe("How it ended"), branch: z.string().describe("The branch it ran on") }),
     text: (r) => `CI ${r.status}`,
   });
+  const deploy = wake.defineEvent("deploy.finished", {
+    description: "A deploy finished.",
+    args: z.object({ env: z.string().describe("The environment") }),
+    payload: z.object({ status: z.string().describe("How it ended") }),
+    authorize: () => true,
+  });
+  return { chat, turn, run, deploy };
+}
+
+test("events/list, tools/list and the manifest match every SDK's for the same events (test/events-list.json)", async () => {
+  const { wake } = fakeCore();
+  const { chat, turn, run, deploy } = sampleEvents(wake);
   const server = new McpServer({ name: "sample", version: "1" });
   wake.attach(server, {});
   const client = await connect(server, "claude-code");
   const list = (await client.request({ method: "events/list", params: {} } as any, z.any() as any)) as any;
   const { tools } = await client.listTools();
-  const got = {
-    events: list.events,
-    manifest: [chat.manifest, turn.manifest, run.manifest],
-    tools: tools
-      .map((t) => ({ name: t.name, description: t.description, inputSchema: inputShape(t.inputSchema), ...(t.annotations ? { annotations: t.annotations } : {}) }))
-      .sort((a, b) => (a.name < b.name ? -1 : 1)),
-  };
-  assert.deepEqual(sorted(JSON.parse(JSON.stringify(got))), goldenFile("events-list.json"));
+  const want = goldenFile("events-list.json");
+  assert.deepEqual(sorted(JSON.parse(JSON.stringify({ events: list.events, manifest: [chat.manifest, turn.manifest, run.manifest, deploy.manifest] }))), sorted({ events: want.events, manifest: want.manifest }));
+  // The built-ins, shape-normalized (README.md), without output schemas (tool-output-schemas.json pins those).
+  const got = tools
+    .map((t: any) => ({ name: t.name, ...(t.title ? { title: t.title } : {}), description: t.description, inputSchema: inputShape(t.inputSchema), ...(t.annotations ? { annotations: t.annotations } : {}) }))
+    .sort((a: any, b: any) => (a.name < b.name ? -1 : 1));
+  assert.deepEqual(sorted(JSON.parse(JSON.stringify(got))), sorted(want.tools));
+  for (const name of ["subscribe_events", "unsubscribe_events"]) {
+    const t: any = tools.find((x: any) => x.name === name);
+    assert.deepEqual(t.inputSchema.properties.arguments, want.builtin_arguments_schema, `${name}'s arguments`);
+  }
+});
+
+test("events/list to a native request with subscribe vouchers lists the tools-only sample with a required wakeshift_voucher (test/events-list.json vouchers)", async () => {
+  const want = goldenFile("events-list.json");
+  const { wake } = fakeCore({ "/manifest/merge": () => ({ json: { features: ["subscribe_vouchers"] } }), "/app": () => ({ json: { id: "sample", name: want.vouchers.app } }) });
+  sampleEvents(wake);
+  const server = new McpServer({ name: "sample", version: "1" });
+  wake.attach(server, {});
+  const native = await connect(server, "openai-mcp");
+  const list = (await native.request({ method: "events/list", params: {} } as any, z.any() as any)) as any;
+  assert.deepEqual(sorted(JSON.parse(JSON.stringify(list.events))), sorted(want.vouchers.events_native));
+  const server2 = new McpServer({ name: "sample", version: "1" });
+  wake.attach(server2, {});
+  const bridged = await connect(server2, "claude-code");
+  const list2 = (await bridged.request({ method: "events/list", params: {} } as any, z.any() as any)) as any;
+  assert.deepEqual(sorted(JSON.parse(JSON.stringify(list2.events))), sorted(want.events), "a bridged request gets the list without tools-only events");
 });
 
 // test/mcp-events-wire.json: the wire format every SDK serves to a draft
@@ -826,6 +994,10 @@ test("attach: a stateless server answers protocol 2026-07-28 clients", async () 
   assert.ok(tools.tools.some((t: any) => t.name === "subscribe_events"), "a client that doesn't declare the extension is offered it");
   const nativeTools = (await rpc("tools/list", as2026({ extensions: { [EXTENSION_KEY]: {} } }))).result;
   assert.deepEqual(nativeTools.tools.map((t: any) => t.name).sort(), ["list_subscriptions", "ping", "unsubscribe_events"]);
+  // A harness Wakeshift wakes itself (Claude Code) isn't native, whatever it declares: its name wins.
+  const claude = as2026({ extensions: { [EXTENSION_KEY]: {} } });
+  claude._meta["io.modelcontextprotocol/clientInfo"] = { name: "claude-code", version: "2.1.316" };
+  assert.ok((await rpc("tools/list", claude)).result.tools.some((t: any) => t.name === "subscribe_events"), "Claude Code declaring the extension still gets subscribe_events");
   const call = (await rpc("tools/call", { name: "ping", arguments: {}, ...as2026() })).result;
   assert.equal(call.resultType, "complete");
   assert.equal(call.content[0].text, "pong");
@@ -835,6 +1007,69 @@ test("attach: a stateless server answers protocol 2026-07-28 clients", async () 
   // An older client's results are as they were.
   const old = (await rpc("tools/list", {})).result;
   assert.equal(old.resultType, undefined);
+});
+
+// A vendor that answers server/discover itself, before attach or after:
+// its answer stays, with Wakeshift's events capability added.
+for (const when of ["before", "after"] as const) {
+  test(`attach: a server/discover handler the vendor sets ${when} attach keeps its answer and gains the events capability`, async () => {
+    const { wake } = fakeCore();
+    chatEvent(wake);
+    const vendorDiscover = async () => ({
+      ...(MCP === 1 ? { resultType: "complete", ttlMs: 0, cacheScope: "public" } : {}),
+      supportedVersions: ["2026-07-28"],
+      capabilities: { tools: { listChanged: true }, logging: {}, extensions: { "com.example/own": {} } },
+      _meta: { "io.modelcontextprotocol/serverInfo": { name: "vendor", version: "9" } },
+      instructions: "The vendor's own.",
+    });
+    const set = (server: McpServer) => {
+      const low = server.server as any;
+      if (MCP === 1) low.setRequestHandler(z.object({ method: z.literal("server/discover"), params: z.any().optional() }), vendorDiscover);
+      else low.setRequestHandler("server/discover", vendorDiscover);
+    };
+    const make = () => {
+      const server = new McpServer({ name: "chat", version: "1.0.0" });
+      if (when === "before") set(server);
+      wake.attach(server, { identify: () => ({ user: "u1" }) });
+      if (when === "after") set(server);
+      server.registerTool("ping", { description: "Ping" }, async () => ({ content: [{ type: "text", text: "pong" }] }));
+      return server;
+    };
+    const rpc = await rawRpc(make);
+    const d = (await rpc("server/discover", as2026())).result;
+    assert.ok(d, "server/discover answered");
+    // 2.x installs its own server/discover when it serves (over the vendor's), from the same capabilities.
+    if (MCP === 2) return assert.deepEqual(d.capabilities.events, { listChanged: false });
+    assert.equal(d.instructions, "The vendor's own.", "the vendor's answer");
+    assert.deepEqual(d._meta["io.modelcontextprotocol/serverInfo"], { name: "vendor", version: "9" });
+    assert.deepEqual(d.capabilities.tools, { listChanged: true }, "the vendor's capabilities stay as it gave them");
+    assert.deepEqual(d.capabilities.logging, {});
+    assert.deepEqual(d.capabilities.extensions["com.example/own"], {});
+    assert.deepEqual(d.capabilities.events, { listChanged: false }, "Wakeshift's events capability is added");
+    assert.deepEqual(d.capabilities.extensions[EXTENSION_KEY], { listChanged: false });
+  });
+}
+
+test("attach: the events capability is advertised with any event, tools-only ones included (subscribe vouchers: docs/subscribe-vouchers.md §4.3); none without events", async () => {
+  for (const kind of ["none", "tools-only", "open"] as const) {
+    const { wake } = fakeCore();
+    if (kind !== "none") wake.defineEvent("crawl.finished", { description: "A crawl finished", args: z.object({ job: z.string() }), payload: z.object({ pages: z.number() }) });
+    if (kind === "open") wake.defineEvent("chat.message", { description: "A message", args: z.object({ channel: z.string() }), payload: z.object({ text: z.string() }), public: true });
+    const make = () => {
+      const server = new McpServer({ name: "crawl", version: "1.0.0" });
+      wake.attach(server, { identify: () => ({ user: "u1" }) });
+      server.registerTool("ping", { description: "Ping" }, async () => ({ content: [{ type: "text", text: "pong" }] }));
+      return server;
+    };
+    const rpc = await rawRpc(make);
+    const caps = (await rpc("server/discover", as2026())).result.capabilities;
+    const want = kind !== "none";
+    assert.equal(caps.events !== undefined, want, `events capability with ${kind}`);
+    assert.equal(caps.extensions?.[EXTENSION_KEY] !== undefined, want);
+    assert.ok(caps.tools, "the tools capability either way");
+    const init = (await rpc("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "codex", version: "1" } })).result;
+    assert.equal(init.capabilities.events !== undefined, want, "initialize says the same");
+  }
 });
 
 test("attach: a tools/list cache hint the app set stays, scoped to the client (MCP SDK 2.x)", { skip: MCP !== 2 }, async () => {
@@ -849,4 +1084,24 @@ test("attach: a tools/list cache hint the app set stays, scoped to the client (M
   const tools = (await rpc("tools/list", as2026())).result;
   assert.equal(tools.ttlMs, 60000);
   assert.equal(tools.cacheScope, "private");
+});
+
+test("nativeOf: a harness Wakeshift wakes itself is never native, whatever it declares", () => {
+  const caps = { extensions: { [EXTENSION_KEY]: {} } };
+  const at = (client: string, ua = "", metaCaps = false) => ({
+    host: {
+      servesEvents: true,
+      req: () => ({ meta: metaCaps ? { "io.modelcontextprotocol/clientCapabilities": caps } : {}, header: (n: string) => (n.toLowerCase() === "user-agent" ? ua : "") }),
+      clientCapabilities: () => (metaCaps ? undefined : caps),
+    },
+    clientOf: () => client,
+    native: undefined,
+    servesEvents: undefined,
+  });
+  assert.equal(nativeOf(at("acme-agent") as any, {}).native, true, "another client that declares the extension is native");
+  assert.equal(nativeOf(at("claude-code") as any, {}).native, false, "initialize's capabilities");
+  assert.equal(nativeOf(at("claude-code", "", true) as any, {}).native, false, "_meta's capabilities (2026-07-28)");
+  assert.equal(nativeOf(at("", "claude-code/2.1.316 (sdk-cli)", true) as any, {}).native, false, "a stateless server: the User-Agent");
+  assert.equal(nativeOf(at("codex-mcp-client") as any, {}).native, false);
+  assert.equal(nativeOf(at("openai-mcp") as any, {}).native, true, "ChatGPT stays native");
 });

@@ -14,7 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/internal/framing"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Pull delivery: for a harness nothing can wake (or that can't hold a
@@ -75,10 +75,10 @@ const (
 // Wait long-polls one of the agent's sessions: it returns as soon as there
 // are deliveries, or after WaitSeconds with none. A newer Wait (or a link's
 // poll) for the same session ends this one with APIError "replaced".
-func Wait(ctx context.Context, ag *appkit.Agent, r WaitRequest) (Waited, error) {
+func Wait(ctx context.Context, ag *wakeshift.Agent, r WaitRequest) (Waited, error) {
 	r.WaitSeconds = min(max(r.WaitSeconds, 0), MaxWaitSeconds)
 	// A deadline on ctx bounds the call in place of the HTTP client's
-	// timeout (appkit.Agent.Request): the wait, and time to answer.
+	// timeout (wakeshift.Agent.Request): the wait, and time to answer.
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(r.WaitSeconds)*time.Second+20*time.Second)
 	defer cancel()
 	var out Waited
@@ -88,7 +88,7 @@ func Wait(ctx context.Context, ag *appkit.Agent, r WaitRequest) (Waited, error) 
 
 // Ack records that the session's consumer has deliveries; it returns the
 // IDs recorded (repeats included).
-func Ack(ctx context.Context, ag *appkit.Agent, session string, ids []string) ([]string, error) {
+func Ack(ctx context.Context, ag *wakeshift.Agent, session string, ids []string) ([]string, error) {
 	var out struct {
 		Acked []string `json:"acked"`
 	}
@@ -103,7 +103,7 @@ func Ack(ctx context.Context, ag *appkit.Agent, session string, ids []string) ([
 // those not already on their way (pending, or held by a connector that
 // wakes the session between turns, which is told); it returns the
 // delivery IDs acknowledged.
-func Seen(ctx context.Context, ag *appkit.Agent, session string, ids []string) ([]string, error) {
+func Seen(ctx context.Context, ag *wakeshift.Agent, session string, ids []string) ([]string, error) {
 	var out struct {
 		Acked []string `json:"acked"`
 	}
@@ -121,7 +121,7 @@ type Inbox struct {
 
 // InboxOf says what's waiting for one of the agent's sessions, without
 // delivering it.
-func InboxOf(ctx context.Context, ag *appkit.Agent, session string) (Inbox, error) {
+func InboxOf(ctx context.Context, ag *wakeshift.Agent, session string) (Inbox, error) {
 	var out Inbox
 	err := ag.Request(ctx, "GET", "/api/apps/v1/agent/sessions/"+url.PathEscape(session)+"/inbox", nil, &out)
 	return out, err
@@ -135,7 +135,7 @@ func InboxOf(ctx context.Context, ag *appkit.Agent, session string) (Inbox, erro
 // a tool can use it.
 type WaitTool struct {
 	// Agent returns the calling agent (as the app's tools do).
-	Agent func(ctx context.Context, req *mcp.CallToolRequest) (*appkit.Agent, error)
+	Agent func(ctx context.Context, req *mcp.CallToolRequest) (*wakeshift.Agent, error)
 	Name  string // default wait_for_messages
 	// App names what's delivered in the description, e.g. "Agent Chat", and
 	// is the app the messages come through.
@@ -191,15 +191,15 @@ func (t WaitTool) Add(srv *mcp.Server) {
 			}
 			r := WaitRequest{Session: in.Session, WaitSeconds: wait}
 			if req.Params != nil {
-				if thread := appkit.CodexThread(req.Params.GetMeta()); thread != "" {
+				if thread := CodexThread(req.Params.GetMeta()); thread != "" {
 					r = WaitRequest{Conversation: thread, WaitSeconds: wait}
 				}
 			}
 			w, err := Wait(ctx, ag, r)
 			switch {
-			case appkit.IsCode(err, "replaced"):
+			case wakeshift.IsCode(err, "replaced"):
 				return nil, map[string]any{"messages": []any{}, "note": "Another wait for this conversation took over, so this one stopped."}, nil
-			case appkit.IsCode(err, "unknown_session"):
+			case wakeshift.IsCode(err, "unknown_session"):
 				return nil, nil, errors.New("you have no session " + in.Session + "; call watch to start one, or leave session out")
 			case err != nil:
 				return nil, nil, friendly(err)
@@ -333,14 +333,14 @@ func DefaultFormat(d Delivery) any {
 // stay queued (for the wait tool, a stream, or a connector) until one of
 // those delivers them, and acks follow that delivery.
 //
-// Add it before appkit's Attach, so it runs inside Attach's middleware: it
-// reads a wrapped tool's session from the call (appkit.ToolCallFrom), and
+// Add it before wakeshift's Attach, so it runs inside Attach's middleware: it
+// reads a wrapped tool's session from the call (wakeshift.ToolCallFrom), and
 // the block a wrapped tool's reply gets stays last.
 //
 // waitTool is the wait tool's name (default wait_for_messages); results of
 // that tool get no note. It changes only the results of the tools named
 // (AllTools: every tool's), and needs at least one.
-func InboxNotes(agent func(ctx context.Context, req *mcp.CallToolRequest) (*appkit.Agent, error), waitTool string, tools ...string) mcp.Middleware {
+func InboxNotes(agent func(ctx context.Context, req *mcp.CallToolRequest) (*wakeshift.Agent, error), waitTool string, tools ...string) mcp.Middleware {
 	applies := forTools("InboxNotes", tools)
 	if waitTool == "" {
 		waitTool = "wait_for_messages"
@@ -359,7 +359,7 @@ func InboxNotes(agent func(ctx context.Context, req *mcp.CallToolRequest) (*appk
 				return res, err
 			}
 			session := ""
-			if thread := appkit.CodexThread(call.Params.GetMeta()); thread != "" {
+			if thread := CodexThread(call.Params.GetMeta()); thread != "" {
 				key := ag.Workspace + "/" + ag.ID + "/" + thread
 				if h, ok := handles.Load(key); ok && time.Since(h.(cachedHandle).at) < time.Minute {
 					session = h.(cachedHandle).handle
@@ -367,8 +367,8 @@ func InboxNotes(agent func(ctx context.Context, req *mcp.CallToolRequest) (*appk
 					session = s.Handle
 					handles.Store(key, cachedHandle{handle: s.Handle, at: time.Now()})
 				}
-			} else if tc := appkit.ToolCallFrom(ctx); tc != nil && tc.Session != "" {
-				session = tc.Session // a wrapped tool's call, after it resolved its session
+			} else if tc := wakeshift.ToolCallFrom(ctx); tc != nil && tc.Session() != "" {
+				session = string(tc.Session()) // a wrapped tool's call, after it resolved its session
 			} else {
 				var args struct {
 					Session    string `json:"session"`
@@ -440,7 +440,7 @@ func forTools(what string, tools []string) func(string) bool {
 
 // beaconLinePrefix starts the line a text-carried beacon is on (the core's
 // beacon.Text), which a harness's hook reads only as the last line of a
-// result's text: InboxNotes keeps it last, as appkit's block does.
+// result's text: InboxNotes keeps it last, as wakeshift's block does.
 const beaconLinePrefix = "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: "
 
 // takeTrailer takes a beacon line off the end of res's text (dropping its

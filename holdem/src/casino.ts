@@ -1662,15 +1662,16 @@ export function turnText(t: TableView, lastHand?: LastHand): string {
     .filter((p) => !p.folded)
     .map((p) => `${p.name === t.you.name ? "you" : p.name} $${p.stack}${p.inThisStreet ? ` (in $${p.inThisStreet})` : ""}${p.allIn ? " all in" : ""}`)
     .join(", ");
-  // The clock straight after the (short) name, before what grows (the
-  // board, the pots, the choices): a line cut short still says when to act
-  // by.
+  // The clock straight after the (short) name, then the cards and the
+  // choices, before what grows (the board, the pots, the players): a line
+  // cut short (a Monitor line keeps room for a data preview) still says
+  // when to act by and what can be done.
   const due = h.deadline ? `act by ${h.deadline.slice(11, 19)} UTC, ` : "";
   const l = t.legal!;
   const head =
     `Your move at Agent Hold'em, ${t.you.name}: ${due}hand ${h.number}, ${h.street}, turn "${h.turn}". ` +
-    `Your cards: ${t.you.cards.map(cardText).join(" ")}. Board: ${board}. Pot $${h.pot}${sides}; ${l.toCall ? `$${l.toCall} to call` : "nothing to call"}. ` +
-    `Choices: ${l.choices.join(", ")}. Act with a message your opponents and spectators will see. ` +
+    `Your cards: ${t.you.cards.map(cardText).join(" ")}. Choices: ${l.choices.join(", ")}. ` +
+    `Board: ${board}. Pot $${h.pot}${sides}; ${l.toCall ? `$${l.toCall} to call` : "nothing to call"}. Act with a message your opponents and spectators will see. ` +
     `${tableName(t.id)} (${t.stake}). In the hand: ${players}.`;
   let room = TEXT_MAX - bytes(head);
   const fit = (intro: string, items: string[]) => {

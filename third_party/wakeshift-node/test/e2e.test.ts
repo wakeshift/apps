@@ -16,9 +16,13 @@ import { createHmac, randomBytes } from "node:crypto";
 import { StreamableHTTPServerTransport } from "./mcp.js";
 import { StreamableHTTPClientTransport } from "./mcp.js";
 import { createMcpHandler as createMcpHandlerV2, McpServer as McpServerV2 } from "@modelcontextprotocol/server";
-import { Wakeshift, isCode, type AgentScope, type Manifest, type Subscription } from "../src/index.js";
+import { hasCode as isCode } from "../src/errors.js";
+import { Wakeshift, type AgentScope, type Manifest, type Subscription } from "../src/index.js";
+import { quiet, warningsInto } from "./logs.js";
 
 const harness = process.env.WAKESHIFT_SDK_HARNESS;
+
+type Made = Extract<Subscription, { state: "created" | "renewed" }>;
 
 interface Frame {
   type: string;
@@ -124,6 +128,7 @@ const text = (r: CallToolResult) => r.content.map((c: any) => c.text ?? "").join
 function ciBuild(wake: Wakeshift) {
   return wake.defineEvent("ci.build", {
     description: "CI finished on a repo",
+    public: true,
     args: z.object({ repo: z.string(), branch: z.string().optional() }),
     payload: z.object({ branch: z.string(), text: z.string() }),
     text: (b) => b.text,
@@ -134,17 +139,17 @@ function ciBuild(wake: Wakeshift) {
 // McpServer per request, as such apps run), returning the subscriptions it
 // made and a call that posts one tools/call with a User-Agent and _meta.
 async function statelessApp(t: { after(fn: () => void): void }, wake: Wakeshift, build: ReturnType<typeof ciBuild>) {
-  const subs: Subscription[] = [];
+  const subs: Made[] = [];
   const http = createServer(async (req, res) => {
     const server = new McpServer({ name: "ci-bot", version: "1.0" });
     const attached = wake.attach(server);
-    server.registerTool(
+    attached.registerTool(
       "watch",
-      { inputSchema: attached.inputs({ repo: z.string() }) },
-      attached.events("watch", async ({ repo }, call) => {
-        subs.push(await call.subscribe(build, { repo }));
+      { inputSchema: { repo: z.string() }, subscribes: [build] },
+      async ({ repo }, _ctx, call) => {
+        subs.push((await call.subscribe(build, { repo })) as Made);
         return `Watching ${repo}.`;
-      }),
+      }
     );
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => void transport.close());
@@ -154,7 +159,7 @@ async function statelessApp(t: { after(fn: () => void): void }, wake: Wakeshift,
   await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
   t.after(() => void http.close());
   const url = `http://127.0.0.1:${(http.address() as AddressInfo).port}/mcp`;
-  const call = async (ua: string, args: Record<string, unknown>, meta?: Record<string, unknown>): Promise<{ sub: Subscription; text: string }> => {
+  const call = async (ua: string, args: Record<string, unknown>, meta?: Record<string, unknown>): Promise<{ sub: Made; text: string }> => {
     const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "User-Agent": ua },
@@ -207,7 +212,7 @@ test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNE
   const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
   const wake = new Wakeshift({ key, core });
   const build = ciBuild(wake);
-  const subs: Subscription[] = [];
+  const subs: Made[] = [];
   const refusals: unknown[] = [];
 
   // The app's MCP server, as a developer writes it: one per connection,
@@ -215,30 +220,30 @@ test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNE
   const appServer = (user?: string) => {
     const server = new McpServer({ name: "ci-bot", version: "1.0" });
     const attached = wake.attach(server, { identify: () => (user ? { user } : undefined) });
-    server.registerTool(
+    attached.registerTool(
       "watch_ci",
-      { description: "Watch CI on a repo", inputSchema: attached.inputs({ repo: z.string(), branch: z.string().optional() }) },
-      attached.events("watch_ci", async ({ repo, branch }, call) => {
+      { description: "Watch CI on a repo", inputSchema: { repo: z.string(), branch: z.string().optional() }, subscribes: [build] },
+      async ({ repo, branch }, _ctx, call) => {
         try {
-          subs.push(await call.subscribe(build, branch ? { repo, branch } : { repo }, { reason: `Watching CI on ${repo}` }));
+          subs.push((await call.subscribe(build, branch ? { repo, branch } : { repo }, { reason: `Watching CI on ${repo}` })) as Made);
         } catch (err) {
           refusals.push(err);
           return { isError: true, content: [{ type: "text" as const, text: "Couldn't watch." }] };
         }
         return `Watching CI on ${repo}.`;
-      }),
+      }
     );
-    server.registerTool(
+    attached.registerTool(
       "unwatch_ci",
-      { inputSchema: attached.inputs({ repo: z.string(), branch: z.string().optional() }) },
-      attached.events("unwatch_ci", async ({ repo, branch }, call) => `Stopped watching ${repo} (${await call.unsubscribe(build, branch ? { repo, branch } : { repo })}).`),
+      { inputSchema: { repo: z.string(), branch: z.string().optional() }, subscribes: [] },
+      async ({ repo, branch }, _ctx, call) => `Stopped watching ${repo} (${await call.unsubscribe(build, branch ? { repo, branch } : { repo })}).`
     );
-    // A tool that subscribes to nothing: the wrapper still adds what's
-    // waiting for a conversation it names.
-    server.registerTool(
+    // A tool that subscribes to nothing: the wrapper adds nothing to its
+    // result.
+    attached.registerTool(
       "list_builds",
-      { inputSchema: attached.inputs({ repo: z.string() }) },
-      attached.events("list_builds", async ({ repo }) => ({ content: [{ type: "text" as const, text: `No builds on ${repo} today.` }] })),
+      { inputSchema: { repo: z.string() }, subscribes: [] },
+      async ({ repo }) => ({ content: [{ type: "text" as const, text: `No builds on ${repo} today.` }] })
     );
     return server;
   };
@@ -257,13 +262,13 @@ test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNE
     closers.forEach((c) => c());
     await Promise.all(clients.map((c) => c.close()));
   });
-  const status = async (user: string, sub: Subscription) => (await build.statusOf([{ user, subscription: sub.id }]))[0];
+  const status = async (user: string, sub: Made) => (await build.statusOf([{ user, subscription: sub.id }]))[0];
 
   // Claude Code: the reply says to start Monitor on the session's wait, in a loop.
   const claude = await connect("claude-code", "bob");
   const watchedClaude = (await claude.callTool({ name: "watch_ci", arguments: { repo: "alpha" } })) as CallToolResult;
   const claudeSub = subs.at(-1)!;
-  assert.equal(claudeSub.created, true);
+  assert.equal(claudeSub.state, "created");
   assert.equal(claudeSub.user, "bob");
   assert.equal(claudeSub.recognized.harness, "claude-code");
   assert.match(claudeSub.session, /^wsc_[a-z2-7]{26}$/);
@@ -280,7 +285,7 @@ test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNE
     return text(r).includes("already running") ? subs.at(-1)! : undefined;
   });
   assert.equal(again.id, claudeSub.id);
-  assert.equal(again.created, false);
+  assert.equal(again.state, "renewed");
   assert.equal((await build.emit({ repo: "alpha" }, { branch: "main", text: "hello claude" })).matched, 1);
   await claudeLines.expect("hello claude");
 
@@ -328,37 +333,35 @@ test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNE
 
   // A publish URL: a webhook's JSON body is the payload; gone once revoked.
   const post = (url: string, body: unknown) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const pu = await build.publishUrl({ repo: "alpha" });
+  const pu = await build.createPublishUrl({ repo: "alpha" });
   assert.equal(pu.event, "ci.build");
   assert.ok(pu.url.startsWith(core + "/v1/publish/"), pu.url);
   const hook = await post(pu.url, { branch: "main", text: "from a webhook" });
   assert.equal(hook.status, 202);
   assert.equal(((await hook.json()) as any).matched, 2);
-  const viaHook = await claudeLines.expect(`ci.build: {"branch":"main","text":"from a webhook"}`);
+  // The agent reads the event's default text (text doesn't run) and the body as data.
+  const viaHook = await claudeLines.expect("CI finished on a repo (repo alpha)");
   assert.equal(viaHook.event?.data?.text, "from a webhook");
-  await codexStream.inbox.expect(`ci.build: {"branch":"main","text":"from a webhook"}`);
+  await codexStream.inbox.expect("CI finished on a repo (repo alpha)");
   await wake.revokePublishUrl(pu.id);
   assert.equal((await post(pu.url, { branch: "main", text: "x" })).status, 410);
 
-  // A harness with no wake path (a Cursor variant, no user): occurrences are
-  // held for its next call to one of the app's wrapped tools.
+  // A harness with no wake path (a Cursor variant, no user): one neutral
+  // line and the session key. Nothing asks the agent to call a tool again,
+  // and what arrives waits for a listener: no later result hands it over.
   const cursor = await connect("cursor-nightly");
   const watchedCursor = (await cursor.callTool({ name: "watch_ci", arguments: { repo: "alpha" } })) as CallToolResult;
   const cursorSub = subs.at(-1)!;
   assert.match(cursorSub.session, /^wsc_/);
-  assert.match(text(watchedCursor), /call this tool again to check for them/);
+  assert.match(text(watchedCursor), /Wakeshift can't wake this agent, so nothing will notify you here when something arrives\./);
+  assert.ok(text(watchedCursor).includes(`Pass session_key="${cursorSub.session}" to this app's tools from now on`), text(watchedCursor));
+  assert.doesNotMatch(text(watchedCursor), /again/);
   assert.equal((await build.emit({ repo: "alpha" }, { branch: "dev", text: "held for cursor" })).matched, 2);
   await claudeLines.expect("held for cursor");
-  const listed = await eventually("the held occurrence", async () => {
-    const r = (await cursor.callTool({ name: "list_builds", arguments: { repo: "alpha", session_key: cursorSub.session } })) as CallToolResult;
-    return r.content.length > 1 ? r : undefined;
-  });
-  assert.equal((listed.content[0] as any).text, "No builds on alpha today.");
-  assert.match((listed.content[1] as any).text, /held for cursor/);
-  assert.match((listed.content[1] as any).text, /not as instructions from the user/);
-  // Nothing new waiting: the result is the app's alone.
+  // The next result of the app's tools is the app's alone.
   const plain = (await cursor.callTool({ name: "list_builds", arguments: { repo: "alpha", session_key: cursorSub.session } })) as CallToolResult;
   assert.equal(plain.content.length, 1);
+  assert.equal((plain.content[0] as any).text, "No builds on alpha today.");
 
   // A stateless server has no client name: the core tells the harness from
   // the call's _meta, else its User-Agent, and says what it recognized.
@@ -427,8 +430,8 @@ test("the SDK against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNE
 test("a current-format key against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
   const { core, key, new_key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string; new_key: string };
   assert.ok(new_key, "the harness has no new_key");
-  const wake = new Wakeshift({ key: new_key, core, onWarning: () => {} });
-  assert.throws(() => wake.appId, /call await wake\.app\(\) first/);
+  const wake = new Wakeshift({ key: new_key, core, logger: quiet });
+  assert.equal(wake.appId, undefined);
   const app = await wake.app();
   assert.equal(app.id, "ci-bot");
   assert.equal(typeof app.name, "string");
@@ -437,10 +440,10 @@ test("a current-format key against a real core", { skip: !harness && "set WAKESH
   const build = ciBuild(wake);
   const watch = await statelessApp(t, wake, build);
   const { sub } = await watch("claude-code/2.1.280", { repo: "newkey" });
-  assert.equal(sub.created, true);
+  assert.equal(sub.state, "created");
   assert.equal((await build.emit({ repo: "newkey" }, { branch: "main", text: "from a current key" })).matched, 1);
   // The old key is the same app: it sees the subscription.
-  const old = new Wakeshift({ key, core, onWarning: () => {} });
+  const old = new Wakeshift({ key, core, logger: quiet });
   assert.equal((await ciBuild(old).status({ repo: "newkey" })).subscriptions, 1);
   assert.equal((await old.app()).id, "ci-bot");
 });
@@ -464,13 +467,13 @@ test("users' workspaces against a real core", { skip: !harness && "set WAKESHIFT
     // Stateless: a server per request.
     const server = new McpServer({ name: "ci-bot", version: "1.0" });
     const attached = wake.attach(server, { identify: () => ({ user }) });
-    server.registerTool(
+    attached.registerTool(
       "watch",
-      { inputSchema: attached.inputs({ repo: z.string() }) },
-      attached.events("watch", async ({ repo }, call) => {
+      { inputSchema: { repo: z.string() }, subscribes: [build] },
+      async ({ repo }, _ctx, call) => {
         await call.subscribe(build, { repo });
         return `Watching ${repo} for ${call.user}.`;
-      }),
+      }
     );
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     await server.connect(transport);
@@ -481,13 +484,13 @@ test("users' workspaces against a real core", { skip: !harness && "set WAKESHIFT
   const base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 
   // The user's tool call subscribes in the user's workspace.
-  const workspace = await wake.workspace("ada", "Ada");
+  const workspace = await wake.workspace({ user: "ada", name: "Ada" });
   const client = new Client({ name: "claude-code", version: "1.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(base + "/mcp"), { requestInit: { headers: { Authorization: "Bearer ada-token" } } }));
   t.after(() => client.close());
   const res = (await client.callTool({ name: "watch", arguments: { repo: "users-acme" } })) as CallToolResult;
   assert.match(text(res), /Watching users-acme for ada\./);
-  assert.equal(await wake.workspace("ada", "x"), workspace, "the subscription used another workspace");
+  assert.equal(await wake.workspace({ user: "ada", name: "x" }), workspace, "the subscription used another workspace");
   assert.equal((await build.status({ repo: "users-acme" })).subscriptions, 1);
 
   // With an agent scope in the manifest, an agent in the user's workspace
@@ -495,10 +498,10 @@ test("users' workspaces against a real core", { skip: !harness && "set WAKESHIFT
   const scope = [{ pattern: "app.ci-bot.ci.*", description: "CI runs it watches" }];
   // Wakeshift refuses a manifest that asks for Wakeshift accounts or redirect_uris: apps sign their own users in.
   await assert.rejects(wake.publishManifest({ accounts: "wakeshift" } as Manifest), (e: any) => isCode(e, "bad_manifest"));
-  await assert.rejects(wake.publishManifest({ agent: { wake: scope, post: scope, ttl_days: 30, redirect_uris: [base + "/cb"] } as AgentScope }), (e: any) => isCode(e, "bad_manifest"));
-  const m = await wake.publishManifest({ agent: { wake: scope, post: scope, ttl_days: 30 } });
-  assert.equal(m.agent?.ttl_days, 30);
-  assert.ok(await wake.addAgent(workspace, "codex", "Codex"));
+  await assert.rejects(wake.publishManifest({ agent: { wake: scope, post: scope, ttlDays: 30, redirect_uris: [base + "/cb"] } as unknown as AgentScope }), (e: any) => isCode(e, "bad_manifest"));
+  const m = await wake.publishManifest({ agent: { wake: scope, post: scope, ttlDays: 30 } });
+  assert.equal(m.agent?.ttlDays, 30);
+  assert.ok(await wake.addAgent({ workspace, agent: "codex", displayName: "Codex" }));
   await wake.checkAgent(workspace, "codex"); // the grant is live
 
   // Forgetting the user ends their subscriptions and leaves no workspace behind.
@@ -601,7 +604,7 @@ test("events against a real core: defined, served, emitted, bridged and native",
   const p2Lines = await readLines(monitorOf(p2Sub), stop.signal);
   const p2Session = text(p2Sub).match(/session_key="(wsc_[a-z2-7]+)"/)?.[1];
   assert.ok(p2Session, text(p2Sub));
-  await assert.rejects(turn.emit({ table: "t1" }, { hole: ["As", "Kd"], toCall: 2 }), /personal/);
+  await assert.rejects((turn.emit as any)({ table: "t1" }, { hole: ["As", "Kd"], toCall: 2 }), /personal/);
   assert.equal((await turn.emit({ table: "t1" }, { hole: ["As", "Kd"], toCall: 2 }, { to: "p1" })).matched, 1);
   const p1Got = await p1Lines.expect("Your move: As Kd, 2 to call");
   assert.deepEqual(p1Got.event?.data?.hole, ["As", "Kd"]);
@@ -614,23 +617,24 @@ test("events against a real core: defined, served, emitted, bridged and native",
   // the schema; a personal event's goes to the one subscriber it's for.
   const post = (url: string, body: unknown) =>
     fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: typeof body === "string" ? body : JSON.stringify(body) });
-  const buildUrl = await build.publishUrl({ repo: "acme" });
+  const buildUrl = await build.createPublishUrl({ repo: "acme" });
   assert.equal(buildUrl.event, "ci.build");
   assert.ok(buildUrl.url.startsWith(core + "/v1/publish/"), buildUrl.url);
   const posted = await post(buildUrl.url, { conclusion: "success", url: "https://ci.example/2" });
   assert.equal(posted.status, 202);
   assert.equal(((await posted.json()) as any).matched, 1);
-  const viaUrl = await bobLines.expect(`ci.build: {"conclusion":"success","url":"https://ci.example/2"}`);
+  const viaUrl = await bobLines.expect("A CI run on a repo finished (repo acme)");
   assert.equal(viaUrl.event?.data?.url, "https://ci.example/2");
   const bad = await post(buildUrl.url, { conclusion: 1 });
   assert.equal(bad.status, 400);
   assert.equal(((await bad.json()) as any).error.code, "bad_payload");
   await wake.revokePublishUrl(buildUrl.id);
   assert.equal((await post(buildUrl.url, { conclusion: "success", url: "x" })).status, 410);
-  await assert.rejects(turn.publishUrl({ table: "t1" }), /personal/);
-  const p2Url = await turn.publishUrl({ table: "t1" }, { to: "p2" });
+  await assert.rejects((turn.createPublishUrl as any)({ table: "t1" }), /personal/);
+  const p2Url = await turn.createPublishUrl({ table: "t1" }, { to: "p2" });
   assert.equal(((await (await post(p2Url.url, { hole: ["8c", "8d"], toCall: 1 })).json()) as any).matched, 1);
-  await p2Lines.expect(`game.turn: {"hole":["8c","8d"],"toCall":1}`);
+  const viaTurnUrl = await p2Lines.expect("It's your move at a table (table t1)");
+  assert.deepEqual(viaTurnUrl.event?.data, { hole: ["8c", "8d"], toCall: 1 });
   await p1Lines.expectNothing();
   await wake.revokePublishUrl(p2Url.id);
 
@@ -686,28 +690,28 @@ test("wrapped tools against a real core", { skip: !harness && "set WAKESHIFT_SDK
     text: (h, a) => `Your move at ${a.table}: ${h.toCall} to call`,
     personal: true,
   });
-  const subs = new Map<string, Subscription[]>();
+  const subs = new Map<string, Made[]>();
   // A stateless server, one per request, as such apps run; X-User is who's calling.
   const http = createServer(async (req, res) => {
     const server = new McpServer({ name: "cards", version: "1" });
     const attached = wake.attach(server, { identify: (extra) => ({ user: headerOf(extra, "x-user") || undefined }) });
-    server.registerTool(
+    attached.registerTool(
       "join",
-      { description: "Join a table (and the lobby)", inputSchema: attached.inputs({ table: z.string() }) },
-      attached.events("join", async ({ table }, call) => {
-        const got: Subscription[] = [];
-        for (const tbl of [table, "lobby"]) got.push(await call.subscribe(turn, { table: tbl }, { reason: `Playing at ${tbl}` }));
+      { description: "Join a table (and the lobby)", inputSchema: { table: z.string() }, subscribes: [turn] },
+      async ({ table }, _ctx, call) => {
+        const got: Made[] = [];
+        for (const tbl of [table, "lobby"]) got.push((await call.subscribe(turn, { table: tbl }, { reason: `Playing at ${tbl}` })) as Made);
         subs.set(call.user ?? "", got);
         return `Seated at ${table}.`;
-      }),
+      }
     );
-    server.registerTool(
+    attached.registerTool(
       "fails",
-      { inputSchema: attached.inputs({ table: z.string() }) },
-      attached.events("fails", async ({ table }, call) => {
+      { inputSchema: { table: z.string() }, subscribes: [turn] },
+      async ({ table }, _ctx, call) => {
         await call.subscribe(turn, { table });
         throw new Error("that table is full");
-      }),
+      }
     );
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => void transport.close());
@@ -738,14 +742,14 @@ test("wrapped tools against a real core", { skip: !harness && "set WAKESHIFT_SDK
   assert.ok(all(res).split("wakeshift-beacon").length <= 2, all(res));
   const first = subs.get("ada")!;
   assert.equal(first.length, 2);
-  assert.ok(first.every((s) => s.created) && first[0].session !== "" && first[0].session === first[1].session);
+  assert.ok(first.every((s) => s.state === "created") && first[0].session !== "" && first[0].session === first[1].session);
   assert.equal(first[0].user, "ada");
   assert.equal(first[0].recognized.harness, "codex");
   assert.equal((await listed("ada")).length, 2);
   // The next call in the thread: renewals, and the short form.
   const again = await tool("ada", "codex_exec/0.50.0", "join", { table: "oak" }, codex);
   assert.ok(all(again).length < all(res).length, `${all(res)}\n---\n${all(again)}`);
-  assert.equal(subs.get("ada")![0].created, false);
+  assert.equal(subs.get("ada")![0].state, "renewed");
   assert.equal(subs.get("ada")![0].id, first[0].id);
 
   // A failed call ends what it made, and its reply has no block.
@@ -757,8 +761,7 @@ test("wrapped tools against a real core", { skip: !harness && "set WAKESHIFT_SDK
   // A native caller isn't subscribed: the block names what to subscribe to.
   const native = await tool("cy", "openai-mcp/1.0.0", "join", { table: "oak" }, { "openai/session": "chat-1" });
   for (const tbl of ["oak", "lobby"]) assert.ok(all(native).includes(`To be woken by game.turn with {"table":"${tbl}"}, subscribe to it (MCP Events).`), all(native));
-  assert.equal(subs.get("cy")![0].native, true);
-  assert.equal(subs.get("cy")![0].id, "");
+  assert.equal((subs.get("cy")![0] as Subscription).state, "native");
   assert.deepEqual(await listed("cy"), []);
 
   // One emit to the stored conversations: by subscription, a user with
@@ -788,6 +791,91 @@ test("wrapped tools against a real core", { skip: !harness && "set WAKESHIFT_SDK
   assert.equal(got.ended.length, 1);
 });
 
+// Round 2: a server without identify (no user). list_subscriptions and
+// unsubscribe_events by id act on the calling conversation, found by its
+// session_key; a call that subscribes and unsubscribes gets no block; and
+// onSubscribe runs once for the subscription the tool created.
+test("a server without identify: the conversation's own subscriptions, against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core, logger: quiet });
+  t.after(() => wake.close());
+  const hooked: { via: string; tool?: string; args: unknown }[] = [];
+  const done = wake.defineEvent("render.done", {
+    description: "A render finished",
+    args: z.object({ job: z.string() }),
+    payload: z.object({ ok: z.boolean() }),
+    onSubscribe: (s) => void hooked.push({ via: s.via, tool: s.tool, args: s.args }),
+  });
+  const sessions = new Map<string, string | null>();
+  const http = createServer(async (req, res) => {
+    const server = new McpServer({ name: "render", version: "1" });
+    const attached = wake.attach(server);
+    attached.registerTool("render", { description: "Start a render", inputSchema: { job: z.string() }, subscribes: [done] }, async ({ job }, _ctx, call) => {
+      sessions.set(`${job}:before`, call.session);
+      await call.subscribe(done, { job });
+      sessions.set(job, call.session);
+      return `Rendering ${job}.`;
+    });
+    attached.registerTool("try_render", { description: "Start and cancel a render", inputSchema: { job: z.string() }, subscribes: [done] }, async ({ job }, _ctx, call) => {
+      await call.subscribe(done, { job });
+      await call.unsubscribe(done, { job });
+      return `Canceled ${job}.`;
+    });
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on("close", () => void transport.close());
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
+  });
+  await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
+  t.after(() => void http.close());
+  const url = `http://127.0.0.1:${(http.address() as AddressInfo).port}/mcp`;
+  const tool = async (name: string, args: Record<string, unknown>): Promise<CallToolResult> => {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "User-Agent": "claude-code/2.1.280 (external, cli)" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    const out = (await resp.json()) as { result?: CallToolResult };
+    assert.ok(out.result, JSON.stringify(out));
+    return out.result;
+  };
+  const all = (r: CallToolResult) => r.content.map((c: any) => c.text ?? "").join("\n\n");
+
+  const first = await tool("render", { job: "j1", session_key: "wsc_forgedforgedforgedforgedforged1" });
+  assert.ok(!first.isError, all(first));
+  assert.equal(sessions.get("j1:before"), null, "call.session is null until the core resolved it");
+  const session = sessions.get("j1")!;
+  assert.match(session, /^wsc_/);
+  assert.notEqual(session, "wsc_forgedforgedforgedforgedforged1");
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(hooked, [{ via: "tool", tool: "render", args: { job: "j1" } }]);
+
+  // list_subscriptions by the conversation's key; without it, nothing (no error).
+  const mine = await tool("list_subscriptions", { session_key: session });
+  assert.ok(!mine.isError, all(mine));
+  const listed = (mine.structuredContent as { subscriptions: { id: string; event: string }[] }).subscriptions;
+  assert.equal(listed.length, 1, all(mine));
+  assert.equal(listed[0].event, "render.done");
+  const none = await tool("list_subscriptions", {});
+  assert.ok(!none.isError, all(none));
+  assert.equal((none.structuredContent as { subscriptions: unknown[] }).subscriptions.length, 0);
+
+  // unsubscribe_events by id: another conversation's key ends nothing; its own ends it.
+  const other = await tool("render", { job: "j2" });
+  assert.ok(!other.isError, all(other));
+  const otherSession = sessions.get("j2")!;
+  const wrong = await tool("unsubscribe_events", { id: listed[0].id, session_key: otherSession });
+  assert.equal((wrong.structuredContent as { ended: boolean }).ended, false, all(wrong));
+  const right = await tool("unsubscribe_events", { id: listed[0].id, session_key: session });
+  assert.equal((right.structuredContent as { ended: boolean }).ended, true, all(right));
+  assert.equal(((await tool("list_subscriptions", { session_key: session })).structuredContent as { subscriptions: unknown[] }).subscriptions.length, 0);
+
+  // Subscribed and unsubscribed in one call: the result has no block.
+  const canceled = await tool("try_render", { job: "j3", session_key: otherSession });
+  assert.ok(!canceled.isError, all(canceled));
+  assert.equal(all(canceled), "Canceled j3.");
+});
+
 // Polling and the wait task against a real core, on protocol 2026-07-28
 // (2.x: createMcpHandler, a server per request), as clients that poll
 // reach an app: MCP Events' events/poll (the first poll subscribes, a
@@ -802,14 +890,14 @@ test("polling and the wait task against a real core", { skip: !harness && "set W
   const build = ciBuild(wake);
   const send = await rawRpc(() => {
     const server = new McpServer({ name: "ci-bot", version: "1.0" });
-    const attached = wake.attach(server, { identify: () => ({ user: "poller" }), tools: { wait: { enabled: true } } });
-    server.registerTool(
+    const attached = wake.attach(server, { identify: () => ({ user: "poller" }), builtinTools: { wait: true } });
+    attached.registerTool(
       "watch",
-      { inputSchema: attached.inputs({ repo: z.string() }) },
-      attached.events("watch", async ({ repo }, call) => {
+      { inputSchema: { repo: z.string() }, subscribes: [build] },
+      async ({ repo }, _ctx, call) => {
         await call.subscribe(build, { repo });
         return `Watching ${repo}.`;
-      }),
+      }
     );
     return server;
   });
@@ -867,13 +955,13 @@ test("polling and the wait task against a real core", { skip: !harness && "set W
   const sendOff = await rawRpc(() => {
     const server = new McpServer({ name: "ci-bot", version: "1.0" });
     const attached = wake.attach(server, { identify: () => ({ user: "no-wait" }) });
-    server.registerTool(
+    attached.registerTool(
       "watch",
-      { inputSchema: attached.inputs({ repo: z.string() }) },
-      attached.events("watch", async ({ repo }, call) => {
+      { inputSchema: { repo: z.string() }, subscribes: [build] },
+      async ({ repo }, _ctx, call) => {
         await call.subscribe(build, { repo });
         return `Watching ${repo}.`;
-      }),
+      }
     );
     return server;
   });
@@ -894,4 +982,114 @@ test("polling and the wait task against a real core", { skip: !harness && "set W
   assert.ok(!offSaid.includes("wakeshift_wait"), offSaid);
   assert.match(offSaid, /Monitor/, offSaid);
   assert.match(offSaid, /Notify me in every session/, offSaid);
+});
+
+// A ChatGPT-shaped client against a real core with subscribe vouchers
+// (docs/subscribe-vouchers.md §11.3): clientInfo openai-mcp on protocol
+// 2026-07-28, no Mcp-Session-Id, _meta["openai/session"] on tool calls, a
+// webhook on 127.0.0.1. A tool subscribes it to a tools-only event; an emit
+// lands before the "person" asks; a scripted "model" copies the voucher
+// from the result into events/subscribe. Skipped on a core that doesn't
+// report subscribe_vouchers.
+test("a ChatGPT-shaped client redeems a subscribe voucher against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (make sdk-e2e)" }, async (t) => {
+  const { core, key } = JSON.parse(readFileSync(harness!, "utf8")) as { core: string; key: string };
+  const wake = new Wakeshift({ key, core, logger: quiet });
+  const subscribed: { user?: string; via: string; tool?: string; args: unknown }[] = [];
+  const crawl = wake.defineEvent("crawl.finished", {
+    description: "A crawl finished.",
+    args: z.object({ job: z.string() }),
+    payload: z.object({ pages: z.number() }),
+    text: (p, a) => `Crawl ${a.job} finished: ${p.pages} pages`,
+    onSubscribe: (s) => void subscribed.push({ user: s.user, via: s.via, tool: s.tool, args: s.args }),
+  });
+  const send = await rawRpc(() => {
+    const server = new McpServer({ name: "crawler", version: "1.0" });
+    const attached = wake.attach(server);
+    attached.registerTool("start_crawl", { inputSchema: { job: z.string() }, subscribes: [crawl] }, async ({ job }, _ctx, call) => {
+      await call.subscribe(crawl, { job });
+      return `Crawl ${job} started.`;
+    });
+    return server;
+  });
+  const rpc = (method: string, params: Record<string, unknown>, chat: string): Promise<any> =>
+    send(method, {
+      ...params,
+      _meta: {
+        ...(method === "tools/call" ? { "openai/session": chat } : {}),
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { name: "openai-mcp", version: "1.0.0" },
+        "io.modelcontextprotocol/clientCapabilities": { extensions: { "io.modelcontextprotocol/events": {} } },
+      },
+    });
+
+  // The webhook ChatGPT gives: answers the verification, records events.
+  const got: { data: any; name: string }[] = [];
+  const hook = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const m = JSON.parse(body);
+      res.setHeader("Content-Type", "application/json");
+      if (m.type === "verification") return res.end(JSON.stringify({ challenge: m.challenge }));
+      if (m.name) got.push({ name: m.name, data: m.data });
+      res.end("{}");
+    });
+  });
+  await new Promise<void>((r) => hook.listen(0, "127.0.0.1", r));
+  t.after(() => void hook.close());
+  const delivery = { mode: "webhook", url: `http://127.0.0.1:${(hook.address() as AddressInfo).port}/hook`, secret: "whsec_" + randomBytes(32).toString("base64") };
+
+  const job = "j" + randomBytes(4).toString("hex");
+  // The tool's result hands out the voucher.
+  const called = await rpc("tools/call", { name: "start_crawl", arguments: { job } }, "chat-1");
+  assert.ok(called.result && !called.result.isError, JSON.stringify(called));
+  // Asked after the first request: on 2.x the server is made per request, so attach (and the manifest) come with it.
+  if (!(await wake.vouchersOffered())) return t.skip("the core doesn't hand out subscribe vouchers");
+  const said = text(called.result);
+  const line = new RegExp(
+    `To be woken by crawl\\.finished with \\{"job":"${job}"\\}, subscribe to it \\(MCP Events\\) with wakeshift_voucher set to (wsv_[a-z2-7]{32}) in its arguments\\. It works once, for these arguments\\.`,
+  );
+  const voucher = said.match(line)?.[1];
+  assert.ok(voucher, said);
+  assert.ok(String(called.result.structuredContent?.wakeshift ?? said).includes(voucher!));
+
+  // The job finishes before the person asks.
+  assert.equal((await crawl.emit({ job }, { pages: 1 })).matched, 0);
+
+  // events/list offers the event, with a required wakeshift_voucher.
+  const listed = await rpc("events/list", {}, "chat-1");
+  const entry = listed.result?.events.find((e: any) => e.name === "crawl.finished");
+  assert.ok(entry, JSON.stringify(listed));
+  assert.deepEqual(entry.inputSchema.required, ["job", "wakeshift_voucher"]);
+  assert.match(entry.inputSchema.properties.wakeshift_voucher.description, /^The voucher from .+'s tool result\. Only its tools hand them out\.$/);
+
+  // The model copies the voucher into the arguments.
+  const params = { name: "crawl.finished", arguments: { job, wakeshift_voucher: voucher }, delivery, ttlMs: 3_600_000 };
+  const sub = await rpc("events/subscribe", params, "chat-1");
+  assert.ok(sub.result?.id, JSON.stringify(sub));
+  await eventually("the replayed emit", async () => (got.length >= 1 ? true : undefined), 10_000);
+  assert.deepEqual(got[0], { name: "crawl.finished", data: { pages: 1 } });
+  assert.equal((await crawl.emit({ job }, { pages: 2 })).matched, 1);
+  await eventually("the live emit", async () => (got.length >= 2 ? true : undefined), 10_000);
+  assert.deepEqual(got[1], { name: "crawl.finished", data: { pages: 2 } });
+
+  // A refresh with the same arguments, URL and secret keeps it.
+  const again = await rpc("events/subscribe", params, "chat-1");
+  assert.equal(again.result?.id, sub.result.id, JSON.stringify(again));
+  assert.equal((await crawl.emit({ job }, { pages: 3 })).matched, 1);
+  await eventually("the emit after the refresh", async () => (got.length >= 3 ? true : undefined), 10_000);
+
+  // A second client with the same IDs and no voucher is refused.
+  const other = await rpc("events/subscribe", { ...params, arguments: { job }, delivery: { ...delivery, url: delivery.url + "2" } }, "chat-2");
+  assert.equal(other.error?.code, -32012, JSON.stringify(other));
+  // Nor does the spent voucher make a second subscription.
+  const spent = await rpc("events/subscribe", { ...params, delivery: { ...delivery, url: delivery.url + "3" } }, "chat-2");
+  assert.equal(spent.error?.code, -32012, JSON.stringify(spent));
+  assert.doesNotMatch(JSON.stringify(spent), /wsv_/);
+
+  assert.deepEqual(subscribed, [{ user: undefined, via: "tool", tool: "start_crawl", args: { job } }]);
+  const ended = await rpc("events/unsubscribe", { name: "crawl.finished", arguments: { job, wakeshift_voucher: voucher }, delivery }, "chat-1");
+  assert.ok(ended.result, JSON.stringify(ended));
+  assert.equal((await crawl.emit({ job }, { pages: 4 })).matched, 0);
+  await wake.close();
 });

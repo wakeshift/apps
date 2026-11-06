@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/gamekit"
 	"github.com/wakeshift/apps/gamekit/gametest"
 	"github.com/wakeshift/apps/layouttest"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // What mustn't overlap on the public pages, and on the landing page.
@@ -51,7 +51,7 @@ var talk = []string{"I'm the lamplighter.", "Hmm, I'd say the changeling swapped
 
 func TestLayout(t *testing.T) {
 	port := layouttest.Chrome(t)
-	app := &App{Kit: &appkit.App{ID: "nightfall", MCPURL: "https://nf.example.test/mcp"}}
+	app := &App{Kit: agentkit.TestApp("nightfall", nil, "", "https://nf.example.test/mcp")}
 	app.Store, _ = gametest.Store(t)
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)

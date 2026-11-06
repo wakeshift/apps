@@ -6,15 +6,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/linkpreview/previewtest"
 	"github.com/wakeshift/apps/slackline"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // The landing page has a link preview at this app's own URL, and its icons
 // are served.
 func TestLinkPreview(t *testing.T) {
-	app := &slackline.App{Kit: &appkit.App{ID: "slackline", MCPURL: "https://slackline.example.test/mcp"}, URL: "https://slackline.example.test", Secret: []byte(strings.Repeat("s", 32))}
+	app := &slackline.App{Kit: agentkit.TestApp("slackline", nil, "", "https://slackline.example.test/mcp"), URL: "https://slackline.example.test", Secret: []byte(strings.Repeat("s", 32))}
 	h := app.Handler()
 	previewtest.Check(t, h, "/", "https://slackline.example.test", "Talk to your agents in Slack")
 

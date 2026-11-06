@@ -13,23 +13,19 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/gamekit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
-type sessionIn struct {
-	appkit.WakeArgs
-}
+type sessionIn struct{}
 
 type sayIn struct {
 	Text string `json:"text" jsonschema:"Public: said aloud to every other player in the game and to every spectator."`
-	appkit.WakeArgs
 	Note string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type voteIn struct {
 	Player string `json:"player" jsonschema:"The handle of the player you suspect is the secret agent"`
-	appkit.WakeArgs
-	Note string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
+	Note   string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type playerOut struct {
@@ -124,7 +120,7 @@ func (a *App) addTools(srv *mcp.Server) {
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "join", Description: "Join a Secret Agent table as this conversation. Tables play game after game: you're seated at a table with a free seat " +
 		"and stay seated from one game to the next until you call `leave`, so call `join` only once. A table's game starts when three players are there; " +
 		"you're woken then. The result says how this conversation is woken, and gives its session_key: pass it to the game's tools."},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			gs, key, err := a.srv.Join(ctx, call, func(tx *gamekit.Tx, gs gamekit.State, p gamekit.Player) error {
 				return a.seated(tx, gs.(*game), p)
 			})
@@ -137,11 +133,11 @@ func (a *App) addTools(srv *mcp.Server) {
 				return nil, nil, gamekit.ErrNotPlaying
 			}
 			return nil, a.srv.Joined(call, a.view(g, me)), nil
-		}, appkit.Subscribes(a.srv.Updates()))
+		}, wakeshift.Subscribes(a.srv.Updates()))
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "game", Description: "Your table's current game: the phase, the players, and your secret role (with the codeword, if you're a civilian); " +
 		"between games, the last game's result and when the next starts. Keep your role to yourself."},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			g, me, err := a.find(ctx, call)
 			if err != nil {
 				return nil, nil, err
@@ -151,7 +147,7 @@ func (a *App) addTools(srv *mcp.Server) {
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "say", Description: "Say something to the other players in your game (during discussion and voting). " +
 		"Never say the codeword itself."},
-		func(ctx context.Context, call *appkit.ToolCall, in sayIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sayIn) (*mcp.CallToolResult, map[string]any, error) {
 			text := strings.TrimSpace(in.Text)
 			if text == "" || len(text) > sayMax {
 				return nil, nil, fmt.Errorf("text is required (at most %d characters)", sayMax)
@@ -179,7 +175,7 @@ func (a *App) addTools(srv *mcp.Server) {
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "vote", Description: "Vote for the player you suspect is the secret agent (any time once the game has started). You can change your vote until " +
 		"everyone has voted; the game ends as soon as everyone has."},
-		func(ctx context.Context, call *appkit.ToolCall, in voteIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in voteIn) (*mcp.CallToolResult, map[string]any, error) {
 			var me *player
 			g, err := gamekit.Move(ctx, a.srv, call, playerIn, func(tx *gamekit.Tx, g *game, p *player) error {
 				me = p
@@ -208,7 +204,7 @@ func (a *App) addTools(srv *mcp.Server) {
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "leave", Description: "Leave your table when you're done playing. During a game you play it to its end (your vote still counts) " +
 		"and your seat goes then; otherwise it goes at once. Call `join` to play again later."},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			var left bool
 			_, err := gamekit.Move(ctx, a.srv, call, playerIn, func(tx *gamekit.Tx, g *game, me *player) (err error) {
 				left, err = a.leave(tx, g, me)

@@ -34,6 +34,19 @@ export function siteFor(core: string | undefined): string {
 /** Wakeshift's homepage for the Wakeshift this runs on (WAKESHIFT_CORE): the pages link to it, the legal documents to its terms and privacy policy. */
 export const WAKESHIFT = siteFor(process.env.WAKESHIFT_CORE);
 
+/**
+ * The pages' pointer for MCP builders, who try a wake here before adding
+ * Wakeshift to their own server. Its link is a counted call to action only
+ * on the home page: a webhook's own page loads no analytics.
+ */
+export function builders(counted: boolean): string {
+  const mark = counted ? ` data-analytics="cta_clicked" data-analytics-cta="quickstart"` : "";
+  return `<section class="sect">
+  <h2>Run an MCP server?</h2>
+  <p>Your users' agents can hear back the same way, when a job your server started finishes or a person replies: one <code>emit</code> from your backend wakes the conversation that asked. <a href="${esc(WAKESHIFT)}/docs/quickstart"${mark}>Add Wakeshift to your MCP server</a>.</p>
+</section>`;
+}
+
 /** Single-quotes s for a POSIX shell. */
 export function shq(s: string): string {
   return "'" + s.replace(/'/g, `'\\''`) + "'";
@@ -134,7 +147,8 @@ export function homePage(nonce: string, l: PageLimits, preview?: Preview): strin
   <li><span class="n">i.</span><div><b>Connect your agent</b><p>Add your link to your agent as an MCP server (for most agents, one command). Then ask it to watch for webhooks.</p></div></li>
   <li><span class="n">ii.</span><div><b>Post to your webhook URL</b><p>Send JSON, a form or plain text. If GitHub, Stripe or Linear will post to it, turn on that service's signature check.</p></div></li>
   <li><span class="n">iii.</span><div><b>Your agent wakes</b><p>It reads what was posted as information from outside, rather than as your instructions, and gets to work. This page shows each post as it arrives.</p></div></li>
-</ol>`,
+</ol>
+${builders(true)}`,
     nonce,
     "",
     preview ? "\n" + previewTags(preview) : "",
@@ -298,7 +312,9 @@ export function linkPage(nonce: string, d: LinkPageData): string {
   <p class="status" id="livestatus" role="status" hidden></p>
   <ul class="live" id="live"><li class="empty">Nothing yet. Posts show up here as they arrive.</li></ul>
   <p class="note">${esc(limitsLine(d.limits))} The list keeps the last 50, for a day after the webhook was last used (longer while an agent is watching). A wake brings your agent at most 20 posts: in a burst, the rest come in the next wake, as soon as it goes back to waiting.</p>
-</section>`;
+</section>
+
+${builders(false)}`;
   const initial = JSON.stringify({ watchers: d.watchers, recent: d.recent }).replace(/</g, "\\u003c");
   return layout("Your webhook · Wakeshift webhooks", body, nonce, liveScript(d.code, initial), pickerHead());
 }

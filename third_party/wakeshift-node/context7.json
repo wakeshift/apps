@@ -1,18 +1,32 @@
 {
   "$schema": "https://context7.com/schema/context7.json",
+  "url": "https://context7.com/wakeshift/wakeshift-node",
+  "public_key": "pk_VQQuS8pdgK6PLLe6L8HXe",
   "projectTitle": "Wakeshift SDK for TypeScript",
-  "description": "@wakeshift/sdk: define the events an MCP server offers, serve them as MCP Events, and emit them; Wakeshift wakes every subscribed agent conversation (Claude Code, Codex, Cursor, ChatGPT and others). For @modelcontextprotocol/server 2.x and @modelcontextprotocol/sdk 1.x, with Mastra and xmcp adapters.",
-  "excludeFolders": ["test", "node_modules", "dist"],
-  "excludeFiles": ["CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md"],
+  "description": "@wakeshift/sdk: let the tools of an MCP server subscribe the agent conversation calling them to the app's events, and emit; Wakeshift wakes each subscribed conversation (Claude Code, Codex, Cursor, ChatGPT and others). For @modelcontextprotocol/server 2.x and @modelcontextprotocol/sdk 1.x, with Mastra and tools-only (xmcp, hand-rolled JSON-RPC) adapters.",
+  "excludeFolders": [
+    "test",
+    "node_modules",
+    "dist"
+  ],
+  "excludeFiles": [
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md"
+  ],
   "rules": [
-    "Read the app key from the WAKESHIFT_KEY environment variable (wst_ followed by 50 characters). Never hard-code it or commit it.",
-    "Install @wakeshift/sdk from npm, not as a file: dependency on a checkout, which can load a second copy of zod.",
+    "Create the client with new Wakeshift(), which reads WAKESHIFT_KEY and makes no network request; without a key it's disabled and every call still works. Never hard-code the key, commit it or log it.",
     "Import z from \"zod\", not \"zod/v4\": the MCP SDK refuses a schema that mixes the two.",
-    "Define every event with wake.defineEvent before calling wake.attach, which throws when no event is defined.",
-    "In your own tools, declare the events each one subscribes to: attached.events(name, { subscribes: [event] }, handler). call.subscribe takes only the listed events; a tool that subscribes to none passes subscribes: [].",
+    "Define every event with wake.defineEvent at startup, before wake.attach. text is optional.",
+    "Register a tool that subscribes through the attachment: attached.registerTool(name, { description, inputSchema, subscribes: [event] }, async (args, ctx, call) => { await call.subscribe(event, args, { once: true }) }). It's the MCP SDK's own registerTool with subscribes added and call appended; leave inputSchema as it is.",
+    "Tools registered elsewhere (a low-level Server, server.tool, a generated catalog) are named in attach's wrap: { tool_name: [event] }, and subscribe with wake.currentCall().subscribe(...).",
     "With createMcpHandler, call wake.attach inside the function that makes each server.",
-    "wakeshift_wait is off by default. Turn it on with wake.attach(server, { tools: { wait: { enabled: true } } }) only on a stateless server whose requests may stay open 30 seconds or more.",
-    "Write event descriptions as plain statements of what happened, not instructions to the agent.",
-    "Pass an id to event.emit when the source may retry (a webhook delivery ID), so a retried emit is delivered once."
+    "An event with neither personal, authorize nor public can be subscribed only by your own tools: keep that for IDs your tool mints; use personal for per-user things (emit's to comes from your own ownership records), authorize for shared resources, public only for streams anyone may watch.",
+    "When the caller names a resource, check they can see it before call.subscribe; subscribe before starting the work, or pass replay with once.",
+    "With sign-in, pass identify (returning { user } from a verified token) and requireUser: true.",
+    "builtinTools: { wait: true } turns on wakeshift_wait, off by default; only on a server whose requests may stay open 30 seconds or more.",
+    "Pass an id to event.emit when the source may retry (a webhook delivery ID), so a retried emit is delivered once.",
+    "Catch errors with isWakeshiftError(err, code); never log call.session, tokens or tool arguments, and use redactSecrets on text you log.",
+    "Write event descriptions as plain statements of what happened, not instructions to the agent."
   ]
 }

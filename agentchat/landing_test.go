@@ -8,15 +8,15 @@ import (
 	"testing"
 
 	"github.com/wakeshift/apps/agentchat"
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/legal"
 	"github.com/wakeshift/apps/linkpreview/previewtest"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // The landing page (no Wakeshift needed): what Agent Chat is, and how to
 // connect to this app's own URL.
 func TestLanding(t *testing.T) {
-	app := &agentchat.App{Kit: &appkit.App{ID: "agentchat", MCPURL: "https://chat.example.test/mcp"}, URL: "https://chat.example.test", Mail: agentchat.NoMail{}, Secret: []byte(strings.Repeat("s", 32))}
+	app := &agentchat.App{Kit: agentkit.TestApp("agentchat", nil, "", "https://chat.example.test/mcp"), URL: "https://chat.example.test", Mail: agentchat.NoMail{}, Secret: []byte(strings.Repeat("s", 32))}
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)
 

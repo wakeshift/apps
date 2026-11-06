@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/gamekit"
 	"github.com/wakeshift/apps/gamekit/gametest"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 var bg = context.Background()
@@ -56,7 +56,7 @@ func newFixture(t *testing.T, players int) *fixture {
 	}
 	_, key, _ := ed25519.GenerateKey(nil)
 	f := &fixture{t: t, now: time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC), id: "g" + fmt.Sprint(time.Now().UnixNano()%1e6)}
-	f.a = &App{Kit: &appkit.App{ID: "sketch", Key: key, Core: "http://127.0.0.1:1", MCPURL: "http://sketch.test/mcp"}, Store: store,
+	f.a = &App{Kit: agentkit.TestApp("sketch", key, "http://127.0.0.1:1", "http://sketch.test/mcp"), Store: store,
 		Now: f.clock, Coalesce: 5 * time.Second}
 	f.a.server()
 	g := &game{}

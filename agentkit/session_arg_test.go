@@ -14,7 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/agentkit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // sessionCore is a fake core: it hands out an agent's token, and records
@@ -64,8 +64,8 @@ func TestSessionArgument(t *testing.T) {
 	hs := httptest.NewServer(http.HandlerFunc(core.handler))
 	t.Cleanup(hs.Close)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	app := &appkit.App{ID: "chat", Key: key, Core: hs.URL}
-	agent := func(ctx context.Context, _ *mcp.CallToolRequest) (*appkit.Agent, error) {
+	app := agentkit.TestApp("chat", key, hs.URL, "")
+	agent := func(ctx context.Context, _ *mcp.CallToolRequest) (*wakeshift.Agent, error) {
 		return app.ActAs(ctx, "ws_1", "claude-code")
 	}
 

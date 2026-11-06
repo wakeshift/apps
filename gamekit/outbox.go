@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // The outbox: what's said in a room (room_log) is sent to the game's other
@@ -121,7 +121,7 @@ func (s *Server) sendEntry(ctx context.Context, game string, e entry) bool {
 			return false
 		}
 	}
-	var ended []appkit.Recipient
+	var ended []wakeshift.Recipient
 	for _, h := range []struct {
 		half      string
 		list      []recipient
@@ -136,17 +136,17 @@ func (s *Server) sendEntry(ctx context.Context, game string, e entry) bool {
 			u.Mentions = nil
 		}
 		emitID := u.ID + ":" + h.half
-		opts := []appkit.EmitOption{appkit.WithID(emitID)}
+		opts := []wakeshift.EmitOption{wakeshift.WithID(emitID)}
 		for _, r := range h.list {
 			if r.Native != "" {
-				opts = append(opts, appkit.ToNative(r.Native))
+				opts = append(opts, wakeshift.ToNative(r.Native))
 			} else {
-				opts = append(opts, appkit.ToSubscription(r.User, r.Subscription))
+				opts = append(opts, wakeshift.ToSubscription(r.User, r.Subscription))
 			}
 		}
 		res, err := s.emit(ctx, UpdateArgs{}, u, opts)
 		if err != nil {
-			limited := appkit.IsCode(err, "rate_limited")
+			limited := wakeshift.IsCode(err, "rate_limited")
 			slog.Warn(s.Name+": sending an update; will retry", "game", game, "limited", limited, "err", err)
 			if limited {
 				// Wakeshift's per-app limit refused the whole emit before
@@ -191,7 +191,7 @@ func (s *Server) farewellSent(ctx context.Context, e entry) {
 	s.SeatEnded(ctx, f.User, f.Subscription)
 }
 
-func (s *Server) emit(ctx context.Context, args UpdateArgs, u Update, opts []appkit.EmitOption) (appkit.Emitted, error) {
+func (s *Server) emit(ctx context.Context, args UpdateArgs, u Update, opts []wakeshift.EmitOption) (wakeshift.Emitted, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	return s.events().Emit(ctx, args, u, opts...)
@@ -232,7 +232,7 @@ func (s *Server) recipients(ctx context.Context, game string, e entry) (halves, 
 // ended (an emit's ended list, a duplicate's too): their seats aren't woken
 // any more, so they're away until their players join again. One
 // transaction.
-func (s *Server) sent(ctx context.Context, game string, seq int64, ended []appkit.Recipient) error {
+func (s *Server) sent(ctx context.Context, game string, seq int64, ended []wakeshift.Recipient) error {
 	return pgx.BeginFunc(ctx, s.Store.Pool, func(tx pgx.Tx) error {
 		for _, r := range ended {
 			if r.Subscription == "" {

@@ -38,14 +38,14 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/analytics"
 	"github.com/wakeshift/apps/gamekit"
 	"github.com/wakeshift/apps/sketch"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 func main() {
-	slog.SetDefault(slog.New(appkit.NewLogHandler(os.Stderr)))
+	slog.SetDefault(slog.New(agentkit.NewLogHandler(os.Stderr)))
 	if err := run(); err != nil {
 		slog.Error("sketch: exiting", "err", err)
 		os.Exit(1)

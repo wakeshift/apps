@@ -1,13 +1,12 @@
 // Type-checks every TypeScript example people copy against this SDK: the
-// ```ts blocks in site/docs, site/llms/agents.md (/AGENTS.md) and this README, the landing page's sample
+// ```ts blocks in site/docs, the product pages (site/pages), site/llms/agents.md (/AGENTS.md) and this README, the landing page's sample
 // (site/templates/landing.html) and the console's "Try it" snippet
 // (web/src/pages/app/Overview.tsx). Each example becomes a module: its
 // imports at the top, the rest in an async function, so fragments (a
 // `return` from a tool callback, an `await`) compile; examples/env.d.ts
 // declares what fragments take from around them (extra, repo, body…).
-// It also checks a mistake tsc can't see: attached.events names the tool
-// it's registered as. `core` isn't required: the SDK reads WAKESHIFT_CORE
-// itself, which is what an example would pass.
+// `core` isn't required: the SDK reads WAKESHIFT_CORE itself, which is
+// what an example would pass.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, copyFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -20,13 +19,29 @@ const out = join(sdk, "build-examples");
 const examples = []; // { from, code }
 
 // ```ts blocks in Markdown (the info string may add a title or tab: "ts server.ts").
+// A title that's a file name makes the block that file, a module of its
+// own: a page's blocks with the same file name are one file, in the order
+// they come, and its other files import it by name ("./server.js").
 function fromMarkdown(file) {
   const src = readFileSync(file, "utf8");
-  const re = /^```(ts|typescript)\b[^\n]*\n([\s\S]*?)^```/gm;
+  const re = /^```(ts|typescript)\b([^\n]*)\n([\s\S]*?)^```/gm;
+  const named = new Map();
   let m;
   while ((m = re.exec(src))) {
     const line = src.slice(0, m.index).split("\n").length;
-    examples.push({ from: `${relative(repo, file)}:${line}`, code: m[2] });
+    const from = `${relative(repo, file)}:${line}`;
+    const fileName = m[2].trim().match(/^([\w.-]+\.ts)$/)?.[1];
+    if (!fileName) {
+      examples.push({ from, code: m[3] });
+      continue;
+    }
+    const e = named.get(fileName);
+    if (e) e.code += "\n" + m[3];
+    else {
+      const ex = { from, code: m[3], file: fileName, dir: relative(repo, file).replace(/[^a-z0-9]+/gi, "-") };
+      named.set(fileName, ex);
+      examples.push(ex);
+    }
   }
 }
 // WAKESHIFT_EXAMPLES_README_ONLY=1 checks only this README: the published
@@ -34,8 +49,10 @@ function fromMarkdown(file) {
 const readmeOnly = process.env.WAKESHIFT_EXAMPLES_README_ONLY === "1";
 fromMarkdown(join(sdk, "README.md"));
 if (!readmeOnly) {
-  const docs = join(repo, "site/docs");
-  for (const f of readdirSync(docs).filter((f) => f.endsWith(".md")).sort()) fromMarkdown(join(docs, f));
+  for (const dir of ["site/docs", "site/pages"]) {
+    const docs = join(repo, dir);
+    for (const f of readdirSync(docs).filter((f) => f.endsWith(".md")).sort()) fromMarkdown(join(docs, f));
+  }
   // /AGENTS.md, the instructions for coding agents the site serves.
   fromMarkdown(join(repo, "site/llms/agents.md"));
 }
@@ -68,15 +85,7 @@ if (!readmeOnly) {
   examples.push({ from: "web/src/pages/app/Overview.tsx", code });
 }
 
-// What tsc can't see: attached.events("name", …) inside registerTool("name", …)
-// with another name throws at the first call. Each registration is checked
-// against the first attached.events in it, before the next registerTool.
 const problems = [];
-for (const e of examples) {
-  for (const m of e.code.matchAll(/registerTool\(\s*(["'`])([^"'`]+)\1(?:(?!registerTool\()[\s\S])*?attached\.events\(\s*(["'`])([^"'`]+)\3/g)) {
-    if (m[2] !== m[4]) problems.push(`${e.from}: attached.events("${m[4]}") wraps the tool registered as ${m[2]} (it throws)`);
-  }
-}
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
@@ -84,12 +93,24 @@ copyFileSync(join(sdk, "scripts/examples/env.d.ts"), join(out, "env.d.ts"));
 copyFileSync(join(sdk, "scripts/examples/frameworks.d.ts"), join(out, "frameworks.d.ts"));
 const files = [];
 examples.forEach((e, i) => {
+  if (e.file) {
+    // A named file, as it is (its imports first), in its page's directory.
+    mkdirSync(join(out, e.dir), { recursive: true });
+    const lines = e.code.split("\n");
+    const imports = [...new Set(lines.filter((l) => /^import\s/.test(l)))];
+    const rest = lines.filter((l) => !/^import\s/.test(l));
+    writeFileSync(join(out, e.dir, e.file), `// ${e.from}\n${imports.join("\n")}\nexport {};\n${rest.join("\n")}\n`);
+    files.push(join(e.dir, e.file));
+    return;
+  }
   const lines = e.code.split("\n");
-  const imports = lines.filter((l) => /^import\s/.test(l));
+  // A fragment's import of the page's own module ("./server.ts", the quickstart's main.ts) is dropped:
+  // what it imports is declared in examples/env.d.ts.
+  const imports = lines.filter((l) => /^import\s/.test(l) && !/from "\.\//.test(l));
   const rest = lines.filter((l) => !/^import\s/.test(l));
   const name = `${String(i).padStart(2, "0")}-${e.from.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "")}.ts`;
-  // A whole module (a Worker's `export default`) is checked as it is.
-  const whole = /^export default\b/m.test(e.code);
+  // A whole module (a Worker's `export default` or Durable Object class, the quickstart's exports) is checked as it is.
+  const whole = /^export (default|const|async function|function|class)\b/m.test(e.code);
   writeFileSync(
     join(out, name),
     whole ? `// ${e.from}\n${e.code}` : `// ${e.from}\n${imports.join("\n")}\nexport {};\n\nexport async function example() {\n${rest.join("\n")}\n}\n`,
@@ -109,7 +130,7 @@ writeFileSync(
         strict: true,
         noEmit: true,
         skipLibCheck: true,
-        paths: { "@wakeshift/sdk": ["../src/index.ts"], "@wakeshift/sdk/mastra": ["../src/mastra.ts"], "@wakeshift/sdk/xmcp": ["../src/xmcp.ts"] },
+        paths: { "@wakeshift/sdk": ["../src/index.ts"], "@wakeshift/sdk/mastra": ["../src/mastra.ts"], "@wakeshift/sdk/tools": ["../src/tools.ts"], "@wakeshift/sdk/testing": ["../src/testing.ts"] },
       },
       files: ["env.d.ts", "frameworks.d.ts", ...files],
     },

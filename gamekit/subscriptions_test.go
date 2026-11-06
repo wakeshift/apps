@@ -14,7 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // recCore records the app API calls a kit server makes, answering each
@@ -305,8 +305,8 @@ func TestJoinOrder(t *testing.T) {
 	ctx := context.Background()
 	s := kitServer(t, "4", newRecCore())
 	seat := func(tx *Tx, g State, p Player) error { return nil }
-	fail := joining{workspace: "w1", agent: "a", session: "s1", subscribe: func(context.Context) (appkit.Subscription, error) {
-		return appkit.Subscription{}, errors.New("refused")
+	fail := joining{workspace: "w1", agent: "a", session: "s1", subscribe: func(context.Context) (wakeshift.Subscription, error) {
+		return wakeshift.Subscription{}, errors.New("refused")
 	}}
 	if _, _, err := s.join(ctx, fail, seat); err == nil {
 		t.Fatal("joined without a subscription")
@@ -320,12 +320,12 @@ func TestJoinOrder(t *testing.T) {
 	// The game stops taking players while this one subscribes.
 	var subs int
 	var started string
-	ok := joining{workspace: "w1", agent: "a", session: "s1", subscribe: func(context.Context) (appkit.Subscription, error) {
+	ok := joining{workspace: "w1", agent: "a", session: "s1", subscribe: func(context.Context) (wakeshift.Subscription, error) {
 		subs++
 		if subs == 1 {
 			s.Store.Pool.QueryRow(ctx, `UPDATE games SET open = false, state = jsonb_set(state, '{open}', 'false') RETURNING id`).Scan(&started)
 		}
-		return appkit.Subscription{ID: "sub-1", User: "w1/a"}, nil
+		return wakeshift.Subscription{ID: "sub-1", User: "w1/a"}, nil
 	}}
 	g, key, err := s.join(ctx, ok, seat)
 	if err != nil {
@@ -348,8 +348,8 @@ func TestJoinOrder(t *testing.T) {
 	// Joining again: subscribed again, and a new subscription (the old
 	// one ended) is recorded.
 	again := ok
-	again.subscribe = func(context.Context) (appkit.Subscription, error) {
-		return appkit.Subscription{ID: "sub-2", User: "w1/a"}, nil
+	again.subscribe = func(context.Context) (wakeshift.Subscription, error) {
+		return wakeshift.Subscription{ID: "sub-2", User: "w1/a"}, nil
 	}
 	if g2, _, err := s.join(ctx, again, func(*Tx, State, Player) error { t.Fatal("seated again"); return nil }); err != nil || g2.base().ID != g.base().ID {
 		t.Fatalf("rejoining: %v", err)
@@ -360,8 +360,8 @@ func TestJoinOrder(t *testing.T) {
 	}
 
 	// A native caller (house agents, ChatGPT): a native seat.
-	nat := joining{workspace: "w2", agent: "h", session: nativeSession(""), native: true, subscribe: func(context.Context) (appkit.Subscription, error) {
-		return appkit.Subscription{User: "w2/h", Native: true}, nil
+	nat := joining{workspace: "w2", agent: "h", session: nativeSession(""), native: true, subscribe: func(context.Context) (wakeshift.Subscription, error) {
+		return wakeshift.Subscription{User: "w2/h", State: wakeshift.SubscriptionNative}, nil
 	}}
 	if _, key, err = s.join(ctx, nat, seat); err != nil || key != "w2/h/native:" {
 		t.Fatalf("a native join: %q %v", key, err)
@@ -387,14 +387,21 @@ func TestAuthorizeUpdates(t *testing.T) {
 		got, _ := pgx.CollectRows(rows, pgx.RowTo[string])
 		return got
 	}
-	raven := appkit.Subscriber{User: "w-raven/a", Native: true}
-	if s.authorizeUpdates(ctx, appkit.Subscriber{User: "w-raven/a"}, UpdateArgs{}) {
+	raven := wakeshift.Subscriber{User: "w-raven/a", Native: true}
+	allowed := func(sub wakeshift.Subscriber) bool {
+		ok, err := s.authorizeUpdates(ctx, sub, UpdateArgs{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if allowed(wakeshift.Subscriber{User: "w-raven/a"}) {
 		t.Fatal("a conversation subscribed itself")
 	}
-	if s.authorizeUpdates(ctx, appkit.Subscriber{User: "w-nobody/a", Native: true}, UpdateArgs{}) {
+	if allowed(wakeshift.Subscriber{User: "w-nobody/a", Native: true}) {
 		t.Fatal("a client with no seat subscribed")
 	}
-	if !s.authorizeUpdates(ctx, raven, UpdateArgs{}) || !slices.Equal(native(), []string{"g1:raven", "g2:raven"}) {
+	if !allowed(raven) || !slices.Equal(native(), []string{"g1:raven", "g2:raven"}) {
 		t.Fatalf("{}: %v", native())
 	}
 
@@ -446,13 +453,13 @@ func TestCloseRoomDuringRejoin(t *testing.T) {
 	if _, err := s.Store.Pool.Exec(ctx, `UPDATE games SET ended_at = now(), closed_at = now() WHERE id = 'old'`); err != nil {
 		t.Fatal(err)
 	}
-	j := joining{workspace: "w-raven", agent: "a", session: "s", subscribe: func(context.Context) (appkit.Subscription, error) {
+	j := joining{workspace: "w-raven", agent: "a", session: "s", subscribe: func(context.Context) (wakeshift.Subscription, error) {
 		// Wakeshift renews the conversation's one game.update subscription;
 		// the ticker closes the old game's room before the seat records it.
 		if err := s.closeRoom(ctx, "old"); err != nil {
 			t.Fatal(err)
 		}
-		return appkit.Subscription{ID: "sub-1", User: "w-raven/a"}, nil
+		return wakeshift.Subscription{ID: "sub-1", User: "w-raven/a"}, nil
 	}}
 	g, key, err := s.join(ctx, j, func(*Tx, State, Player) error { return nil })
 	if err != nil {

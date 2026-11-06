@@ -55,15 +55,37 @@ export interface McpServerLike {
   registerTool(...args: any[]): unknown;
 }
 
+/**
+ * A low-level Server from either MCP SDK: @modelcontextprotocol/sdk 1.x's
+ * (`@modelcontextprotocol/sdk/server/index.js`) or
+ * @modelcontextprotocol/server 2.x's `Server`, with its handlers set.
+ */
+export interface LowServerLike {
+  setRequestHandler(...args: any[]): unknown;
+  connect(...args: any[]): unknown;
+  registerTool?: never;
+}
+
 type LowOf<S> = S extends { server: infer L } ? L : never;
+
+// LowContext is the context a low-level Server's handlers get: 2.x's ctx
+// (read from its setRequestHandler), else what Wakeshift reads of 1.x's extra.
+type LowContext<S> = S extends { projectCallToolResult: unknown }
+  ? S extends { setRequestHandler(method: string, schemas: any, handler: (params: any, ctx: infer C) => any): void }
+    ? C
+    : ToolCallExtra
+  : ToolCallExtra;
 
 /**
  * The context a server's request handlers get, read from the server's own
- * type: @modelcontextprotocol/server 2.x's ServerContext (`ctx`), or
- * @modelcontextprotocol/sdk 1.x's RequestHandlerExtra (`extra`).
+ * type (an McpServer, or a low-level Server): @modelcontextprotocol/server
+ * 2.x's ServerContext (`ctx`), or @modelcontextprotocol/sdk 1.x's
+ * RequestHandlerExtra (`extra`).
  */
 export type HostContext<S> =
-  LowOf<S> extends { projectCallToolResult: unknown }
+  S extends LowServerLike
+    ? LowContext<S>
+    : LowOf<S> extends { projectCallToolResult: unknown }
     ? LowOf<S> extends { setRequestHandler(method: string, schemas: any, handler: (params: any, ctx: infer C) => any): void }
       ? C
       : ToolCallExtra

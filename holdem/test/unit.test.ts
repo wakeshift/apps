@@ -916,7 +916,7 @@ test("holdem.turn: \"Your table\", its hand_result kind and last_hand in the sch
   const fetchNever = (async () => {
     throw new Error("no requests");
   }) as typeof fetch;
-  const wake = new Wakeshift({ key: `wst_test_holdem_${Buffer.alloc(32, 7).toString("base64url")}`, core: "http://core.test", fetch: fetchNever });
+  const wake = new Wakeshift({ key: `wst_test_holdem_${Buffer.alloc(32, 7).toString("base64url")}`, core: "https://core.test", fetch: fetchNever });
   // The SDK's internals: the event's definition, manifest and text line.
   const turn = defineHoldemEvents(wake, {} as Casino).turn as unknown as {
     definition(): { title?: string; description: string };

@@ -43,6 +43,21 @@ export function codesFor(dialect: Dialect): Codes {
   return { notFound: -32023, forbidden: -32024, resourceExhausted: -32025, unsupported: -32026, callbackEndpoint: -32027 };
 }
 
+/**
+ * Harnesses Wakeshift wakes through its own paths (a Monitor, hooks, a connector, a plugin), by MCP clientInfo name or
+ * HTTP User-Agent product token, compared case-insensitively (internal/harnesses). A call from one is never treated as a
+ * native MCP Events client, whatever capabilities it declares: Claude Code, for one, isn't woken by MCP Events, so
+ * treating it as native would leave it with nothing listening (the same list in every SDK).
+ */
+export const BRIDGED_CLIENTS: readonly string[] = ["claude-code", "codex-mcp-client", "cursor", "cursor-vscode", "copilot-cli", "opencode", "antigravity-client", "openclaw-bundle-mcp", "hermes-agent", "capy", "muse-custom-connector"];
+
+/** Whether a client is one of BRIDGED_CLIENTS, by its clientInfo name or its User-Agent's first product token. */
+export function bridgedClient(clientName: string, userAgent: string): boolean {
+  if (BRIDGED_CLIENTS.includes(clientName.trim().toLowerCase())) return true;
+  const product = (userAgent.split("/")[0] ?? "").trim().toLowerCase();
+  return product !== "" && BRIDGED_CLIENTS.includes(product);
+}
+
 /** A client's dialect, by its clientInfo name or User-Agent: ChatGPT's MCP client is openai-mcp. */
 export function dialectOf(clientName: string, userAgent: string): Dialect {
   return clientName.toLowerCase() === "openai-mcp" || userAgent.toLowerCase().startsWith("openai-mcp") ? "chatgpt" : "draft";

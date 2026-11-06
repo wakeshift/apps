@@ -8,17 +8,31 @@ import type * as z3 from "zod/v3";
 import type * as z4 from "zod/v4/core";
 import * as z3rt from "zod/v3";
 import * as z4mini from "zod/v4-mini";
+import { zodToJsonSchema } from "zod-to-json-schema";
+import { UsageError } from "./errors.js";
 
+/**
+ * A zod 3 schema, read by its shape rather than by zod 3's own types: an
+ * app's "zod" and the "zod/v3" this package names can resolve to two
+ * copies of zod 3's declarations (moduleResolution node10), which compare
+ * structurally and too deeply for the compiler (TS2589).
+ */
+export interface Zod3Schema {
+  readonly _def: unknown;
+  readonly _output: unknown;
+  readonly _input: unknown;
+  safeParse(data: unknown): unknown;
+}
 /** A zod schema, from zod 3's API or zod 4's (classic or mini). */
-export type AnySchema = z3.ZodTypeAny | z4.$ZodType;
+export type AnySchema = Zod3Schema | z4.$ZodType;
 /** An object schema, or any schema (as the MCP SDK takes it). */
-export type AnyObjectSchema = z3.AnyZodObject | z4.$ZodObject | AnySchema;
+export type AnyObjectSchema = z4.$ZodObject | AnySchema;
 /** A zod shape: { field: schema }. */
 export type ZodRawShapeCompat = Record<string, AnySchema>;
 /** What a schema parses to. */
-export type SchemaOutput<S> = S extends z3.ZodTypeAny ? z3.infer<S> : S extends z4.$ZodType ? z4.output<S> : never;
+export type SchemaOutput<S> = S extends z4.$ZodType ? z4.output<S> : S extends Zod3Schema ? S["_output"] : never;
 /** What a schema takes. */
-export type SchemaInput<S> = S extends z3.ZodTypeAny ? z3.input<S> : S extends z4.$ZodType ? z4.input<S> : never;
+export type SchemaInput<S> = S extends z4.$ZodType ? z4.input<S> : S extends Zod3Schema ? S["_input"] : never;
 /** What a shape parses to, field by field. */
 export type ShapeOutput<Shape extends ZodRawShapeCompat> = { [K in keyof Shape]: SchemaOutput<Shape[K]> };
 
@@ -40,7 +54,7 @@ export function objectFromShape(shape: ZodRawShapeCompat): AnyObjectSchema {
   if (values.length === 0) return z4mini.object({});
   if (values.every(isZ4Schema)) return z4mini.object(shape as Record<string, z4.$ZodType>);
   if (values.every((s) => !isZ4Schema(s))) return z3rt.object(shape as Record<string, z3.ZodTypeAny>);
-  throw new Error("wakeshift: a shape mixes zod 3 and zod 4 schemas");
+  throw new UsageError("config", "a shape mixes zod 3 and zod 4 schemas");
 }
 
 /** @internal Parses with either major. */
@@ -92,19 +106,14 @@ export function normalizeObjectSchema(schema: unknown): AnyObjectSchema | undefi
   return undefined;
 }
 
-// zod 3 schemas are rendered by @modelcontextprotocol/sdk's own converter
-// (zod-to-json-schema, which it depends on), loaded only if it's installed:
-// zod 4 renders its own. An app on @modelcontextprotocol/server 2.x writes
-// zod 4 schemas, as that SDK requires.
-const v1JsonSchema: { toJsonSchemaCompat(schema: unknown, opts?: unknown): Record<string, unknown> } | undefined = await import(
-  /* webpackIgnore: true */ String("@modelcontextprotocol/sdk/server/zod-json-schema-compat.js")
-).catch(() => undefined);
+// zod 3 schemas are rendered by zod-to-json-schema, with the options
+// @modelcontextprotocol/sdk 1.x gives it (zod-json-schema-compat), so
+// tools/list reads as it did; zod 4 renders its own. It's a dependency,
+// imported statically, so defineEvent never needs an MCP SDK at run time,
+// in a bundle or with no MCP SDK installed (a disabled client included).
 
 /** @internal A schema as JSON Schema, the way the MCP SDK 1.x renders one for tools/list (draft-7, input side). */
 export function toJsonSchema(schema: AnySchema): Record<string, unknown> {
   if (isZ4Schema(schema)) return z4mini.toJSONSchema(schema, { target: "draft-7", io: "input" }) as Record<string, unknown>;
-  if (!v1JsonSchema) {
-    throw new Error("wakeshift: a zod 3 schema needs @modelcontextprotocol/sdk 1.x installed to render as JSON Schema: write it with zod 4 (import { z } from \"zod/v4\")");
-  }
-  return v1JsonSchema.toJsonSchemaCompat(schema);
+  return zodToJsonSchema(schema as z3.ZodTypeAny, { strictUnions: true, pipeStrategy: "input" }) as Record<string, unknown>;
 }

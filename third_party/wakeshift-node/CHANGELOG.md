@@ -2,6 +2,169 @@
 
 What changed in each release of `@wakeshift/sdk`. 0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
+## 0.11.0 (2026-11-06)
+
+One release across the three SDKs (TypeScript 0.11.0, Python 0.10.0, Go v0.10.0), simpler and safer by default. Read **Who may subscribe** first: it's the one change that alters what your server serves.
+
+### Breaking
+
+**Who may subscribe (read this first).** An event that declares neither `personal` nor `authorize` is now subscribed to only through your own tools: `subscribe_events` and native MCP Events subscriptions (ChatGPT) stop for it, and Wakeshift ends the ones made that way when your server first publishes its manifest (your logs say how many, as `event_closed`). If that's what you meant (it is for most servers: job and crawl IDs your tool mints), do nothing. To keep the other paths open, add `authorize` (gated) or `public: true` (open to anyone):
+
+```ts
+// Before: anyone who learned an ID could subscribe through subscribe_events or natively.
+wake.defineEvent("build.finished", { description, args, payload, text })
+// After: the same definition is tools-only. To reopen it, gated:
+wake.defineEvent("build.finished", { description, args, payload, authorize: (s, a) => canSee(s.user, a.repo) })
+// or open to anyone:
+wake.defineEvent("chat.message", { description, args, payload, public: true })
+```
+
+Apps that haven't upgraded see no change. If you serve ChatGPT through native subscriptions, decide before you deploy.
+
+**Construction.** The key defaults to `WAKESHIFT_KEY` and the core to `WAKESHIFT_CORE`. A missing key gives a disabled client (logged once at debug, so a stdio server's streams stay exactly as before) instead of throwing; pass `required: true` to throw. A malformed key, an unknown option or a core that isn't `https://` (loopback excepted) throws `UsageError` (`config`). Construction makes no request.
+
+```ts
+// Before
+const wake = new Wakeshift({ key: process.env.WAKESHIFT_KEY!, onWarning: (m) => log.warn(m) })
+const maybe = Wakeshift.optional(process.env.WAKESHIFT_KEY)
+// After
+const wake = new Wakeshift({ logger: log }) // disabled without a key; { required: true } to throw
+```
+
+**Tools that subscribe.** Register them through the attachment with your MCP SDK's own `registerTool`: your config plus `subscribes`, your handler with `call` appended. Wakeshift adds its arguments in `tools/list` and strips them before your code runs, so `attached.inputs`, `attached.output` and `attached.jsonSchema` are gone, and so is `notifies` (the sentence always comes from `subscribes`).
+
+```ts
+// Before
+server.registerTool("watch_ci", { description, inputSchema: attached.inputs({ repo: z.string() }) },
+  attached.events("watch_ci", { subscribes: [ciFinished] }, async ({ repo }, call) => { … }))
+// After
+attached.registerTool("watch_ci", { description, inputSchema: z.object({ repo: z.string() }), subscribes: [ciFinished] },
+  async ({ repo }, ctx, call) => { … })
+```
+
+`call.extra` is `call.ctx` (and the handler's second parameter). A subscribe to an event the tool didn't declare throws `UsageError` (`undeclared_subscribe`) instead of warning.
+
+**Tools registered elsewhere** (a low-level `Server`, `server.tool`, a vendor's catalog) are named in `wrap`, as event lists, on every server type; find the call with `wake.currentCall()` (or `wake.currentCall(ctx)`):
+
+```ts
+// Before
+wake.attach(server, { wrap: { start_crawl: { subscribes: [crawlFinished] } } })
+await attached.call().subscribe(crawlFinished, { job })
+// After
+wake.attach(server, { wrap: { start_crawl: [crawlFinished] } })
+await wake.currentCall().subscribe(crawlFinished, { job })
+```
+
+**attach's options.**
+
+```ts
+// Before
+wake.attach(server, { tools: { subscribe: { enabled: false }, wait: { enabled: true } }, events: { native: (ctx) => isHouse(ctx) } })
+// After
+wake.attach(server, { builtinTools: { subscribe: false, wait: true }, isNativeClient: (ctx) => isHouse(ctx) })
+```
+
+The deprecated `tools: [...]` list form is gone. `identify` may be async; it runs lazily, at most once per request, and a failure (a throw, or over 10 seconds) refuses Wakeshift's part of the request instead of going anonymous. `requireUser: true` refuses anonymous callers too. A second attach on the same server, and an McpServer's inner `.server`, throw.
+
+**Errors.** One hierarchy: `WakeshiftError`, its `APIError` (the core answered with an error), `APIConnectionError` (no answer: `unreachable` or `timeout`, `status: null`), `IdReusedError`, and `UsageError` for mistakes caught before sending (`bad_arguments` with `issues`, `config`, `disabled`, `no_call`, `call_ended`, `identify_failed`, …). A caller's abort rethrows its signal's reason.
+
+```ts
+// Before
+if (isCode(err, "id_reused")) …
+if (err instanceof WakeshiftError && err.status === 0) …
+// After
+if (isWakeshiftError(err, "id_reused")) …
+if (err instanceof APIConnectionError) …
+```
+
+`ArgsError` and `CallEnded` are `UsageError`s (`bad_arguments`, `call_ended`); `err.detail` is `err.message`. `status` moved from `WakeshiftError` to `APIError` (and is `null` on `APIConnectionError`): narrow first, `if (err instanceof APIError && err.status === 404)`. `err.code` stays on every `WakeshiftError`.
+
+**Subscriptions.** `call.subscribe` resolves to a union on `state`: `created`, `renewed`, `native`, `unavailable` (with `reason`) or `disabled`. `sub.created` and `sub.native` are gone; the session doesn't print.
+
+```ts
+// Before
+if (sub.created) await seat(user, sub.id)
+// After
+if (sub.state === "created") await seat(user, sub.id)
+```
+
+Translate by what each state means, not word for word. `created`: a new subscription. `renewed`: this conversation already had one with those arguments, now extended. `native`: the client subscribes itself (ChatGPT, through the voucher your result hands it): nothing exists yet, and there's no `id`. `unavailable` and `disabled`: nothing was made. Code that branched on `sub.created` usually meant "new" against "already subscribed"; with `state`, that `else` also catches `native`, `unavailable` and `disabled`, so a reply such as "Already watching" would reach ChatGPT, which isn't. Test `renewed` for "already subscribed", and give `native` your ordinary reply.
+
+**Argument values you already encode.** If your app already turns case-sensitive IDs into argument values its own way, keep its encoding: a subscription made with a new encoding never matches an emit made with the old one, and the other way round. `encodeArgValue` is for apps that don't encode yet.
+
+**A tool that only unsubscribes** (a "leave" or "stop watching" tool that subscribes to nothing) registers through the attachment, with `subscribes: []` or without `subscribes`. That gives it `call`, and the `session_key` argument that tells Wakeshift which conversation is calling, which `call.unsubscribe` needs. Registered with your server's own `registerTool`, it has neither.
+
+**Events.** `WakeEvent<A, P, N>` is `WakeEvent<N, A, P, Personal>`; `EventArgs<E>` and `EventPayload<E>` read an event's types. A personal event's `emit`, `createPublishUrl` and `status` need `{ to }` (a type error otherwise). `event.publishUrl` is `event.createPublishUrl`, and printing a `PublishUrl` elides its token. `text` is optional. `replay` is checked before sending (over 0, at most 24 hours), and a Duration string is sent as seconds.
+
+**Manifest and the agents API.** `Manifest` and `AgentScope` are camelCase (`othersCanWake`, `preapproveTools`, `ttlDays`, `wakeLimits`, `startPrompt`). `wake.workspace({ user, name })` and `wake.addAgent({ workspace, agent, displayName })` take objects; `wake.appId` is `undefined` until known instead of throwing.
+
+**Removed.** `@wakeshift/sdk/xmcp` (use `attachTools` from `@wakeshift/sdk/tools`: `list` and `call` for a runtime that answers JSON-RPC, `tool` and `builtins` for xmcp); `parseKey`, `signAssertion`, `AppKey`; `harnessAgent`; `Wakeshift.optional`, `onWarning`; every exported constant (`EVENT_TOOL_TEXT`, `*_TOOL_DESCRIPTION`, `BUILTIN_TOOLS`, `TOOL_OUTPUT_SCHEMAS`, `SESSION_ARG` and the others, `EXTENSION_KEY`, `TEXT_META`, `EVENTS_REVISION`, `DEFAULT_CORE`, `MAX_STATUS_SUBSCRIPTIONS`, `WAKESHIFT_ARGUMENTS_JSON_SCHEMA`); the zod plumbing and host types except `AuthInfo`.
+
+**Node 22.12 or later** (or 20.19 or later), for `require()` of ES modules; attach on `@modelcontextprotocol/sdk` 1.x throws naming that floor when Node can't. Cloudflare Workers need `nodejs_compat`. The peer range for `@modelcontextprotocol/sdk` is `>=1.0.0 <2`, with 1.23 or later checked when you attach.
+
+### Added
+
+- **Logging**: `logger` (by default every level to stderr, so a stdio server's stdout carries only JSON-RPC) and `logLevel`, with codes shared by every SDK (`no_key`, `event_closed`, `identify_error`, `authorize_failed`, `key_refused`, `description_too_long`, …). `no_key` and `no_identify`, the documented defaults, log at debug, so a default setup logs nothing at info or above; `events_capability_kept` is info. Failures log at most once per five minutes per code, with a count. `LogFields` is a type alias, so a logger taking `Record<string, unknown>` (pino, winston, console) assigns without a cast.
+- **Request options** on every async method: `{ signal, timeoutMs, maxRetries }`. `maxRetries` (also a client option) covers load-balancer refusals and connection failures; a retried emit carries one id on every attempt, so it never wakes twice.
+- **`createPublishUrl` and `status` from a fresh process** send the manifest when Wakeshift doesn't know the event yet, then ask again.
+- **`redactSecrets(text)`**, for logging paths the SDK can't reach, and **`encodeArgValue` / `decodeArgValue`**, so case-sensitive IDs stay apart in routing arguments.
+- **`wake.actAs({ workspace, agent })`** and `Identity.agent`, for apps that act for their users' agents; `Subscriber.authInfo` and `headers` for `authorize`.
+- **punkpeye's `fastmcp`**: attach each session's `server` in fastmcp's `connect` event, and serve HTTP with its `connect(transport)` ([MCP frameworks](https://wakeshift.ai/docs/frameworks#fastmcp-punkpeye)). A low-level 1.x `Server` that's connected but not yet initialized takes `attach`.
+- **`wrap` as a function** of a tool's name, for tools named at run time; a function that gives a tool something other than this client's events logs `wrap_bad_event` and serves it unwrapped.
+- **A top-level `title`** on every built-in tool, and `additionalProperties: true` (not `{}`) on their `arguments`.
+- **Test your integration**: a docs page with tests that play Claude Code, Codex and an MCP Events client.
+- **`event.watch(args, check, { every, timeout, maxErrors, isFinal, id, to, signal })`**, for an API with no usable webhook: calls `check` until it returns the payload (`undefined`: keep waiting), then emits once. First check at once, then every `every` (default 30 seconds; after errors in a row, longer, up to 5 minutes), until `timeout` (default 1 hour); at most 10 checks at once per client; one emit `id` across retries (pass your webhook's to dedupe the two); an emit error retrying won't fix stops it; a second watch of the same arguments returns the running one; a watch inside a call whose subscription came back `unavailable` doesn't run, and one the call started stops if the call fails. `watch.done` resolves (never rejects) with `{ outcome: "emitted" | "timeout" | "stopped" | "skipped" | "failed" }`. In-process only: a restart or a serverless freeze ends it (on Workers, use a Durable Object alarm). Logs `watch_failed` and `watch_timeout`.
+- **`onSubscribe`** on `defineEvent`: runs once per new subscription, whichever path made it (a tool's call that succeeded, `subscribe_events`, a native `events/subscribe` or first `events/poll`), with `{ args, user, via, tool }`, in the background; a throw logs `on_subscribe_failed`. Start a `watch` there to cover every path at once.
+- **`wake.close()`** stops every watch and waits for them and for `onSubscribe` work.
+- **`@wakeshift/sdk/testing`**: `createTestClient()` (a `Wakeshift` that's enabled and offline and records `emits`, `subscriptions`, `unsubscribes`, `publishUrls`), `createToolCall()` (a stand-in `ToolCall` whose `subscribe` answers a full `Subscription` and records it) and `withCall(wake, call, fn)` (`wake.currentCall()` returns `call` inside `fn`). To keep a real client off in tests whatever the environment says: `new Wakeshift({ key: "" })`.
+- **`BUILTIN_TOOL_NAMES`**, **`SharedEvent`** (any shared event: `emit` takes no `to`) and **`ToolCallExtra`** (1.x's handler context) are exported.
+- **`builtinTools: false`** turns every built-in tool off.
+- **Subscribe vouchers: ChatGPT can subscribe to tools-only events.** When Wakeshift offers it (its manifest answer reports `subscribe_vouchers`), `call.subscribe` of a tools-only event from an MCP Events client (ChatGPT) returns `native` instead of `unavailable`, and the result's block hands the client a one-time voucher for exactly that event and those arguments. The client writes it back as the event argument `wakeshift_voucher`, which the SDK takes out of the arguments before anything reads them and passes to Wakeshift; `onSubscribe` then runs with `via: "tool"` and your tool's name. `events/list` lists tools-only events, with a required `wakeshift_voucher`, only to native clients and only while Wakeshift offers vouchers, and the events capability is advertised whenever the server has an event. `native` may now come with no user (`user: ""`) for an anonymous caller. Nothing to write: your tools and events stay as they are. `wakeshift_voucher` is now a reserved argument name (`defineEvent` refuses it), `redactSecrets` redacts `wsv_` vouchers, and a call whose only Wakeshift work is native lines returns your result unchanged when Wakeshift can't add its line (logged as `native_unavailable`).
+- **`require()` from CommonJS, with types**, `replay` and `once` on `call.subscribe`, `signingSecret` on publish URLs, and output schemas with matching `structuredContent` on Wakeshift's own tools.
+- **`onSubscribe` gets the tool call's `context`.** `call.subscribe(event, args, { context })` takes a value of your own (the caller's credential a watch needs, say) that's never sent to Wakeshift and never logged; `Subscribed.context` is that value for the call's own subscription (`via: "tool"`), and for one made with the voucher the call handed out (ChatGPT) while this process still holds it (in memory, by the voucher's hash, for at most the voucher's four hours, dropped when it's redeemed; a redemption on another instance or after a restart gets none). `undefined` otherwise (`subscribe_events`, native subscriptions): without it a watch can't run with the caller's credentials, so log that or fall back to your status tool. `onSubscribe` for a tool's subscription now runs in the async context `call.subscribe` ran in (`AsyncLocalStorage.snapshot()`), so your own `AsyncLocalStorage` values are there. `Subscribed<Args, Ctx = unknown>` types `context`: annotate `onSubscribe`'s parameter as `Subscribed<Args, YourContext>` to read it without a cast. A watch already running for the same event and arguments keeps its first subscriber's context.
+- **Testing**: `TestClient.failNext("subscribe" | "unsubscribe", "unreachable" | "refused")` (and `TestToolCall.failNext`) makes the next one fail; the test client models vouchers (a ChatGPT-shaped call's result carries one in Wakeshift's form, and `wake.redeem(voucher, webhookUrl)` subscribes through the SDK's own redemption, reuse behaving as Wakeshift does); `createToolCall({ native: true, client })` hands out vouchers (`call.vouchers`); `call.finish()` runs `onSubscribe` (with each subscribe's context) as a real call does after it succeeds, and `call.subscriptions` records each subscribe's `context` in its `options`, and `withCall` runs it when its function resolves; `TestClient.close()` waits for watch checks in flight and their emits before stopping, so `emits` shows a check that was already done.
+- **Exported types**: `ToolCallSubscribe`, `ToolCallBase`, `RegisterToolHandler`, `RegisterToolResult`, `InferArgs`, `ToolResult`, `McpServerLike`, `LowServerLike` and `HostContext`, every type a public signature names.
+
+### Changed
+
+- **A Wakeshift failure never changes your tool's result.** When Wakeshift's addition to a result of a tool that subscribes fails (an error answer, a timeout, the core unreachable, a refused key), the agent gets the result exactly as your handler gave it, with no error and nothing asking it to call again: the tool may have started paid or visible work. Before, the call failed with "...Try again.". What the call subscribed is still rolled back, and the new `block_failed` code logs it (warn, at most once per five minutes). The built-in tools' answers for no answer from Wakeshift say only what happened ("Wakeshift didn't answer in time", "Wakeshift couldn't be reached"), and the `timeout` error's fix no longer says to retry: "The outcome is unknown; an emit sent again with the same id emits once."
+- **Claude Code is never an MCP Events client**, nor is any other harness Wakeshift wakes through a path of its own (a Monitor, hooks, a connector, a plugin or a background command; Capy's and Muse's clients included), recognized by its client name or `User-Agent`: its calls get Wakeshift's block even when they declare the MCP Events capability. ChatGPT is recognized by `openai-mcp` in its client name or `User-Agent`, `openai-mcp/1.0.0 (Codex)` from Work chats included.
+- **`list_subscriptions` and `unsubscribe_events` by id work without a user**: on a server without `identify` (or for an anonymous caller), they answer for the calling conversation, which its `session_key` names; `list_subscriptions` lists `session_key` for that. Both are left out of `tools/list` while nothing on the server subscribes (no tool's `subscribes` names an event, and no event is open to `subscribe_events`).
+- **`call.session` is `null` until Wakeshift resolved the conversation** (a subscribe that reached it, or `resolveSession`). It's never the raw `session_key` argument, which is only the agent's claim: don't key your own data on what an agent passes.
+- **`call.resolveSession()` returns `null` when nothing names the conversation** (no `session_key`, no `conversation_id` and no harness conversation in the call's `_meta`, such as a Codex thread), without a request to Wakeshift; before, it started a new session. Its type is `Promise<string | null>`. Call it directly to find your own record of the conversation: a passed key is checked first.
+- **A call that subscribes and then unsubscribes everything it made** gets no block on its result.
+- **A one-line description without a final period** gets one before the subscribes sentence, so the two don't run together.
+- **`identify_error`** (formerly the `identify_failed` log code) names the error's type once, with a new fix clause.
+- **`fetch`** is looked up at each request when you don't pass the option, so a test that stubs `globalThis.fetch` after construction is seen.
+- **Attached after the client initialized** (fastmcp's `connect` event over stdio comes after `initialize`), `attach` sends `notifications/tools/list_changed` when the server declares `tools.listChanged`, so a client that listed early lists again with Wakeshift's part. fastmcp 4 declares it; fastmcp 3 doesn't (see the docs).
+- **`emit` on an `AnyEvent`** takes `to` as optional (checked at run time) instead of demanding it.
+- **A compact `tools/list`**: Wakeshift's argument descriptions are at most 61 characters; all three arguments appear only on tools that subscribe to something and on `subscribe_events`, only `session_key` on tools with `subscribes: []`, on `unsubscribe_events` and on `list_subscriptions`; the built-ins' descriptions are short; their output schemas are minimal (no descriptions, nested objects untyped), and a tool's `wakeshift` output field is `{ "type": "string" }`. The tools still accept all three arguments.
+- **The events capability** is advertised whenever the server defines an event, tools-only ones included (an MCP Events client subscribes to those with the voucher a tool's result hands it), unless your server serves its own MCP Events; a server with no events advertises none. It's in every `initialize` and `server/discover` answer, whatever the protocol version.
+- **A vendor's own `server/discover`** keeps its answer, with Wakeshift's events capability added; a vendor's handler set after `attach` that calls the one it replaced amends `tools/list` and strips calls once (no more `wrap_arg_conflict` from Wakeshift's own arguments).
+- **Descriptions stay as written**: the subscribes sentence follows your description (a blank line after a multi-line one) instead of collapsing its whitespace, and keeps your app's name as written.
+- **The Cloudflare Workers recipe** ([docs](https://wakeshift.ai/docs/sdk#cloudflare-workers)) makes the client once, at module scope, from `env` (`import { env } from "cloudflare:workers"`), instead of on the first request, and needs the `nodejs_compat` flag (`attach` throws naming it). A `watch` doesn't survive on Workers: the recipe runs the check from a Durable Object alarm.
+- **zod 3 schemas render without an MCP SDK**: `zod-to-json-schema` is a dependency, so `defineEvent` works in a bundle or with no MCP SDK installed, and zod 3 types no longer go too deep under `moduleResolution: node10` (TS2589).
+- **`encodeArgValue`** keeps `a-z 0-9 - _` as they are, escaping the rest with `.`, so ordinary IDs read the same.
+- **`attachTools`**: on protocol 2026-07-28, `call`'s results carry `resultType`; what `dispatch` throws reaches your runtime unchanged.
+- **`registerTool`'s result type** is the host's: with an `outputSchema`, any `CallToolResult` (your own result type included; the MCP SDK checks `structuredContent` at run time), and an `inputSchema` typed `any` takes the handler with arguments.
+- **No secret prints.** The client, calls, subscriptions, subscribers, publish URLs and agents redact themselves in `JSON.stringify` and `util.inspect`.
+- **A zod 3 payload schema no longer refuses fields the sender adds**: payload schemas render as zod 4's do, so only a `.strict()` object refuses unknown fields. Nested zod 3 objects get the same treatment.
+- **The request timeout holds on Node 22.** The SDK times a request with its own timer rather than `AbortSignal.timeout`, whose timer Node 22 unrefs: with nothing else pending (a `fetch` option that holds no socket), the process exited mid-request instead of failing with the `timeout` error.
+- **A tool registered without `subscribes` is a plain tool**, as with `subscribes: []`, with or without a key: before, `attached.registerTool` threw a `config` error even with no key (under `createMcpHandler`, a silent HTTP 500). With a key it still takes `session_key` and can `call.unsubscribe` (a tool that only stops a watch). A `config` error `attach` or `registerTool` throws is now also logged (code `config`, error).
+- **Watches never keep the process alive**: their timers are unref'd, and a stdio server's client is closed (its watches stopped) when stdin ends or the stdio transport closes. On another transport, call `await wake.close()` on shutdown.
+- **`identify_failed` (the log code) is split**: `identify_error` when `identify` threw, failed or timed out (its fix now says to throw only when your upstream can't answer), and `user_required` (info) when `requireUser` refused a caller `identify` gave no user. `call.subscribe` throws the same code as the line: `identify_failed` when `identify` threw, failed or timed out, and the new error code `user_required` when `requireUser` refused the caller (`identify_failed` before).
+- **`monitor_line_long`** (warn, once per event): an emit whose text is over 200 bytes as Claude Code's Monitor line carries it, leaving its 480-byte line no room for the payload.
+- **`watch_failed`** says why the watch ended without repeating its fix. A watch stopped by an error your `isFinal` marks final logs the new `watch_stopped` at info instead of a `watch_failed` warning: it stopped as asked (its outcome is still `failed`, reason `check`).
+- **`Duration`** (`replay`, `ttl`, `every`, `timeout`) type-checks any string, keeping the literal forms for autocomplete; one that isn't a number and `s`, `m`, `h` or `d` throws `bad_arguments` naming the forms.
+- **Built-in tools carry no `execution`** unless the server's own tools do (the MCP SDK 1.x adds it to every tool it registers), so a strict tool-list check sees one shape.
+- **`events/list` lists a tools-only event with `delivery: ["webhook"]`** (it's never polled), and `events/poll` of one is refused with "can't be polled: it's subscribed to only through this app's tools, with a webhook", voucher or not.
+
+## 0.10.3 (2026-11-05)
+
+### Changed
+
+- **Text over 1000 bytes is trimmed by Wakeshift rather than refused; no need to trim it yourself.** Wakeshift cuts it between characters to 1000 bytes, ending with "…", and sends the occurrence. `emit` returns `textTrimmed: true` when it happens, and `onWarning` hears it once per event. An emit's `id` still compares the text you sent, so a retry with the same long text is a duplicate.
+
 ## 0.10.2 (2026-11-04)
 
 ### Added
@@ -20,7 +183,7 @@ What changed in each release of `@wakeshift/sdk`. 0.4.0 is the first published r
 
 ### Changed
 
-- **`wakeshift_wait` is opt-in.** `attach` (and `attachMastra`) no longer serves Claude Code's wait tool unless you turn it on: `wake.attach(server, { tools: { wait: { enabled: true } } })`. While a conversation waits on it, Claude Code keeps a request open to your server for about 20 seconds at a time and sends the next about a second later, for as long as it waits, whether or not anything arrives: on a serverless host, a function invocation per waiting conversation, all the time. This changes behavior for apps on today's defaults: a recent Claude Code in the terminal whose user declines Wakeshift's plugin now waits with a background monitor, as every other Claude Code does, rather than on your server. In manual permission mode that means approving the monitor, and each restart every 25 minutes, instead of one approval of `wakeshift_wait`; and the wait no longer carries on through `claude --continue`. Users who install the plugin see no difference. To keep the wait tool, add `tools: { wait: { enabled: true } }`, on a stateless server, and on a serverless host give the function a timeout of at least 30 seconds. Without it, `server/discover` no longer offers the tasks extension, tools/list no longer lists `wakeshift_wait`, and Wakeshift's `tasks/get` and `tasks/cancel` go on to your MCP SDK.
+- **`wakeshift_wait` is opt-in.** `attach` (and `attachMastra`) no longer serves Claude Code's wait tool unless you turn it on: `wake.attach(server, { tools: { wait: { enabled: true } } })` (in 0.11.0: `builtinTools: { wait: true }`). While a conversation waits on it, Claude Code keeps a request open to your server for about 20 seconds at a time and sends the next about a second later, for as long as it waits, whether or not anything arrives: on a serverless host, a function invocation per waiting conversation, all the time. This changes behavior for apps on today's defaults: a recent Claude Code in the terminal whose user declines Wakeshift's plugin now waits with a background monitor, as every other Claude Code does, rather than on your server. In manual permission mode that means approving the monitor, and each restart every 25 minutes, instead of one approval of `wakeshift_wait`; and the wait no longer carries on through `claude --continue`. Users who install the plugin see no difference. To keep the wait tool, add `tools: { wait: { enabled: true } }`, on a stateless server, and on a serverless host give the function a timeout of at least 30 seconds. Without it, `server/discover` no longer offers the tasks extension, tools/list no longer lists `wakeshift_wait`, and Wakeshift's `tasks/get` and `tasks/cancel` go on to your MCP SDK.
 - **`tools` takes an object, each tool `{ enabled }`**: `subscribe`, `list` and `unsubscribe` (on unless disabled, as before) and `wait` (off unless enabled). `tools: { subscribe: { enabled: false } }` replaces `tools: ["unsubscribe_events", "list_subscriptions"]`. New types: `AttachTools`, `ToolOptions`, `WaitToolOptions`.
 
 ### Deprecated

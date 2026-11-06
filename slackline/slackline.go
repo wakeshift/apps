@@ -40,14 +40,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/agentpicker"
 	"github.com/wakeshift/apps/legal"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // App serves Slackline.
 type App struct {
-	Kit    *appkit.App // the app's Wakeshift client (events)
+	Kit    *agentkit.App // the app's Wakeshift client (events)
 	Store  *Store
 	Slack  *Slack
 	URL    string // this server's public URL, without a trailing slash
@@ -60,7 +61,7 @@ type App struct {
 	people  sync.Map     // team/user → cachedPerson (users.info)
 
 	eventsOnce   sync.Once
-	slackMessage *appkit.DefinedEvent[MessageArgs, Message]
+	slackMessage *wakeshift.Event[MessageArgs, Message]
 }
 
 func (a *App) now() time.Time {
@@ -109,7 +110,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/authorize", a.authorize)
 	mux.HandleFunc("POST /oauth/authorize", a.form(a.authorizeAllow))
 	mux.HandleFunc("POST /oauth/token", a.token)
-	mux.Handle("/mcp", appkit.LogMCP(a.mcpHandler()))
+	mux.Handle("/mcp", agentkit.LogMCP(a.mcpHandler()))
 	return securityHeaders(mux)
 }
 
@@ -683,7 +684,7 @@ func (a *App) endListener(ctx context.Context, e Ending) error {
 // endSubscription ends the slack.message subscription watch made for one
 // of user's listeners.
 func (a *App) endSubscription(ctx context.Context, user, id string) error {
-	_, err := a.messages().End(ctx, user, id)
+	_, err := a.Kit.EndSubscription(ctx, user, id)
 	return err
 }
 

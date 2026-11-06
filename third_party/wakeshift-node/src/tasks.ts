@@ -16,11 +16,10 @@
 // which then gives the wait tool's instructions instead of its harness's
 // zero-install path (Claude Code's Monitor). Everything else is unchanged.
 
-import { WakeshiftError } from "./errors.js";
+import { detailOf } from "./errors.js";
 import { TASKS_EXTENSION, takesTasks } from "./discover.js";
-import { TASKS_MIN_SERVER, type Handler, type Host } from "./host.js";
+import { TASKS_MIN_SERVER, wrapMethod, type Handler, type Host } from "./host.js";
 import { RpcError } from "./mcp.js";
-import { WAKE_ARG_DESCRIPTIONS } from "./toolcall.js";
 import { toolCallOf, type Wakeshift } from "./wakeshift.js";
 
 /** The wait tool's name. */
@@ -67,13 +66,27 @@ export const TOOL_ANNOTATIONS = {
 /** The wait tool as tools/list lists it. */
 export const WAIT_TOOL_DEFINITION = {
   name: WAIT_TOOL,
+  title: TOOL_ANNOTATIONS.wakeshift_wait.title,
   description: WAIT_TOOL_DESCRIPTION,
   inputSchema: {
     type: "object",
     properties: {
-      session_key: { type: "string", description: WAKE_ARG_DESCRIPTIONS.session_key },
-      harness: { type: "string", description: WAKE_ARG_DESCRIPTIONS.harness },
-      conversation_id: { type: "string", description: WAKE_ARG_DESCRIPTIONS.conversation_id },
+      // The wait tool wasn't part of the compact tools/list bench: it keeps
+      // the wording test/mcp-tasks-wire.json pins.
+      session_key: {
+        type: "string",
+        description: "This conversation's session_key, from an earlier result (a secret token, or a handle such as claude-code#2). Keep it to this conversation; don't share or log it.",
+      },
+      harness: {
+        type: "string",
+        description:
+          "The program you're running in: codex, claude-code, cursor (local CLI or IDE), cursor-cloud (Cursor cloud agent), grok-bot, copilot-cli, opencode, antigravity, openclaw (even when it runs your turns in Codex), hermes, chatgpt, or your program's name if it isn't listed",
+      },
+      conversation_id: {
+        type: "string",
+        description:
+          "Your own ID for this conversation, if your program gives you one. Cursor and Grok Bot: the output of `printenv CURSOR_CONVERSATION_ID`. Codex and Antigravity send it automatically; others leave it empty",
+      },
     },
     additionalProperties: false,
   },
@@ -89,7 +102,7 @@ interface TaskAnswer {
 }
 
 /** @internal Who's calling, for a request (the MCP SDK's own context): the user (identify's) and the client's name. */
-export type CallerOf = (raw: unknown) => { user: string | undefined; client: string };
+export type CallerOf = (raw: unknown) => Promise<{ user: string | undefined; client: string; refused?: string; agentToken?: string }>;
 
 /**
  * @internal Serves the wait tool, tasks/get and tasks/cancel on server
@@ -101,15 +114,17 @@ export function serveTasks(wake: Wakeshift, host: Host, callerOf: CallerOf): voi
   const handlers = host.handlers();
   if (!handlers) return; // a future SDK: nothing to hook (no wait tool)
   if (!host.routesTasks()) {
-    wake.warnOnce(
-      "tasks-routing",
-      `wakeshift: this server's @modelcontextprotocol/server is older than ${TASKS_MIN_SERVER} (2.0 to 2.2 answer tasks/get with "Method not found" on protocol 2026-07-28 themselves), so Claude Code's ${WAIT_TOOL} never completes and conversations that use it aren't woken. Upgrade @modelcontextprotocol/server to ${TASKS_MIN_SERVER} or later.`,
+    wake.log.log(
+      "tasks_unrouted",
+      `this server's @modelcontextprotocol/server is older than ${TASKS_MIN_SERVER} (2.0 to 2.2 answer tasks/get with "Method not found" on protocol 2026-07-28 themselves), so Claude Code's ${WAIT_TOOL} never completes and conversations that use it aren't woken`,
     );
   }
 
-  const call = (raw: unknown, args: Record<string, unknown>) => {
-    const { user, client } = callerOf(raw);
-    return toolCallOf(host.req(raw), client, user, args, WAIT_TOOL, true);
+  const call = async (raw: unknown, args: Record<string, unknown>) => {
+    const { user, client, refused, agentToken } = await callerOf(raw);
+    // identify refused: Wakeshift's part of the request is refused.
+    if (refused) throw new RpcError(-32603, "this app couldn't verify who you are");
+    return toolCallOf(host.req(raw), client, user, args, WAIT_TOOL, true, agentToken);
   };
   const takes = (raw: unknown) => {
     const req = host.req(raw);
@@ -118,7 +133,7 @@ export function serveTasks(wake: Wakeshift, host: Host, callerOf: CallerOf): voi
   const waitCall: Handler = async (request, raw) => {
     const args = (request?.params?.arguments ?? {}) as Record<string, unknown>;
     try {
-      const out = await wake.requestApp<TaskAnswer>("POST", "/calls/task", { call: call(raw, args) });
+      const out = await wake.requestApp<TaskAnswer>("POST", "/calls/task", { call: await call(raw, args) });
       if (out.result) return out.result;
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `Wakeshift couldn't start the wait (${detailOf(err)}). Call ${WAIT_TOOL} again.` }] };
@@ -127,7 +142,7 @@ export function serveTasks(wake: Wakeshift, host: Host, callerOf: CallerOf): voi
   };
   const taskRequest = (path: string, hold: boolean): Handler => async (request, raw) => {
     const task = request?.params?.taskId;
-    const body: Record<string, unknown> = { task: typeof task === "string" ? task : "", call: call(raw, {}) };
+    const body: Record<string, unknown> = { task: typeof task === "string" ? task : "", call: await call(raw, {}) };
     if (hold) body.hold_seconds = TASK_HOLD_SECONDS;
     const signal = host.req(raw).signal;
     let out: TaskAnswer;
@@ -176,30 +191,18 @@ export function serveTasks(wake: Wakeshift, host: Host, callerOf: CallerOf): voi
       throw new RpcError(-32601, "Method not found");
     };
   };
-  const wrappers: Record<string, (h: Handler | undefined) => Handler> = {
-    "server/discover": (h) => wrapDiscover(h!),
-    "tools/list": (h) => wrapList(h!),
-    "tools/call": (h) => wrapCall(h!),
+  const wrappers: Record<string, (h: Handler | undefined) => Handler | undefined> = {
+    "server/discover": (h) => (h ? wrapDiscover(h) : undefined),
+    "tools/list": (h) => (h ? wrapList(h) : undefined),
+    "tools/call": (h) => (h ? wrapCall(h) : undefined),
     "tasks/get": wrapTask("/calls/task/get", true),
     "tasks/cancel": wrapTask("/calls/task/cancel", false),
   };
   for (const [method, wrap] of Object.entries(wrappers)) {
-    const h = handlers.get(method);
-    if (method.startsWith("tasks/")) {
-      // Routed by the SDK on every protocol revision (host.setTaskMethod),
-      // then answered by the wrapper, which hands anything that isn't
-      // Wakeshift's to the app's own handler, if it had one.
-      host.setTaskMethod(method);
-      Map.prototype.set.call(handlers, method, wrap(h));
-    } else if (h) {
-      // Set once (serveStateless wraps what's set through handlers.set).
-      Map.prototype.set.call(handlers, method, wrap(h));
-    }
+    // tasks/*: routed by the SDK on every protocol revision
+    // (host.setTaskMethod), then answered by the wrapper, which hands
+    // anything that isn't Wakeshift's to the app's own handler, if any.
+    if (method.startsWith("tasks/")) host.setTaskMethod(method);
+    wrapMethod(handlers, method, wrap);
   }
-  const set = handlers.set.bind(handlers);
-  handlers.set = (method: string, h: Handler) => set(method, wrappers[method] ? wrappers[method](h) : h);
-}
-
-function detailOf(err: unknown): string {
-  return err instanceof WakeshiftError ? err.detail : String((err as Error)?.message ?? err);
 }

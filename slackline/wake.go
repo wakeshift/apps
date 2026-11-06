@@ -3,12 +3,13 @@ package slackline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // slack.message: how a Slack message reaches an agent conversation. It's
@@ -48,9 +49,9 @@ func (m Message) line() string {
 
 // messages defines slack.message (once): before the manifest is published
 // (Start) and before the MCP endpoint serves events.
-func (a *App) messages() *appkit.DefinedEvent[MessageArgs, Message] {
+func (a *App) messages() *wakeshift.Event[MessageArgs, Message] {
 	a.eventsOnce.Do(func() {
-		e, err := appkit.DefineEvent(a.Kit, "slack.message", appkit.EventDef[MessageArgs, Message]{
+		e, err := wakeshift.DefineEvent(a.Kit.Client, "slack.message", wakeshift.EventDef[MessageArgs, Message]{
 			Title: "Slack messages",
 			Description: "A message for this conversation from Slack: a reply in its DM thread with the person who connected you, " +
 				"or a message in a channel they chose.",
@@ -71,27 +72,36 @@ func (a *App) messages() *appkit.DefinedEvent[MessageArgs, Message] {
 // subscribe to one of its own agent's listeners. Every other harness is
 // refused: watch subscribes it, and a second subscription would wake it
 // twice.
-func (a *App) authorizeMessages(ctx context.Context, sub appkit.Subscriber, args MessageArgs) bool {
-	ti := auth.TokenInfoFromContext(ctx)
+func (a *App) authorizeMessages(ctx context.Context, sub wakeshift.Subscriber, args MessageArgs) (bool, error) {
+	ti := sub.Request.Token
+	if ti == nil {
+		ti = auth.TokenInfoFromContext(ctx)
+	}
 	if !sub.Native || ti == nil || args.Listener == "" {
-		return false
+		return false, nil
 	}
 	ag, ok := ti.Extra["agent"].(Agent)
 	if !ok || sub.User != wsUser(ag.TeamID, ag.UserID) {
-		return false
+		return false, nil
 	}
 	l, err := a.Store.Listener(ctx, args.Listener)
-	return err == nil && l.AgentID == ag.ID
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	return err == nil && l.AgentID == ag.ID, err
 }
 
 // identify is the person behind a signed-in agent's request: the app's ID
 // for them (wsUser).
-func identify(_ context.Context, ti *auth.TokenInfo) (appkit.Identity, error) {
-	ag, ok := ti.Extra["agent"].(Agent)
-	if !ok {
-		return appkit.Identity{}, nil
+func identify(_ context.Context, r wakeshift.Request) (wakeshift.Identity, error) {
+	if r.Token == nil {
+		return wakeshift.Identity{}, nil
 	}
-	return appkit.Identity{User: wsUser(ag.TeamID, ag.UserID)}, nil
+	ag, ok := r.Token.Extra["agent"].(Agent)
+	if !ok {
+		return wakeshift.Identity{}, nil
+	}
+	return wakeshift.Identity{User: wsUser(ag.TeamID, ag.UserID)}, nil
 }
 
 // nativeSubs are the IDs of the slack.message subscriptions a client that
@@ -118,7 +128,7 @@ func (a *App) endNative(ctx context.Context, user, listener string) error {
 		return err
 	}
 	for _, id := range ids {
-		if _, err := a.messages().End(ctx, user, id); err != nil {
+		if _, err := a.Kit.EndSubscription(ctx, user, id); err != nil {
 			return err
 		}
 	}
@@ -129,7 +139,7 @@ func (a *App) endNative(ctx context.Context, user, listener string) error {
 // succeeds or ctx ends.
 func (a *App) Start(ctx context.Context) error {
 	a.messages()
-	m := appkit.Manifest{Description: "Chat with your agents from Slack: each conversation gets a thread in your DM with Slackline, " +
+	m := wakeshift.Manifest{Description: "Chat with your agents from Slack: each conversation gets a thread in your DM with Slackline, " +
 		"and listens in the channels you choose."}
 	for wait := time.Second; ; wait = min(wait*2, time.Minute) {
 		attempt, cancel := context.WithTimeout(ctx, 30*time.Second)

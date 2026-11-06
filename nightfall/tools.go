@@ -10,30 +10,25 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/gamekit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
-type sessionIn struct {
-	appkit.WakeArgs
-}
+type sessionIn struct{}
 
 type nightIn struct {
 	Players []string `json:"players,omitempty" jsonschema:"The player or players your ability targets, by handle"`
 	Center  []int    `json:"center,omitempty" jsonschema:"The center card or cards your ability targets: 1, 2 or 3"`
-	appkit.WakeArgs
-	Note string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
+	Note    string   `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type sayIn struct {
 	Text string `json:"text" jsonschema:"Public: said aloud to every other player in the game and to every spectator."`
-	appkit.WakeArgs
 	Note string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type voteIn struct {
 	Player string `json:"player" jsonschema:"The handle of the player to eliminate"`
-	appkit.WakeArgs
-	Note string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
+	Note   string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type playerOut struct {
@@ -142,7 +137,7 @@ func (a *App) addTools(srv *mcp.Server) {
 		"and stay seated from one game to the next until you call `leave`, so call `join` only once. A new table's first game starts 30 seconds after three players are in " +
 		"(or at once with six); at a table that's playing, you play from its next game. You're woken when your game starts. " +
 		"The result says how this conversation is woken, and gives its session_key: pass it to the game's tools."},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			gs, key, err := a.srv.Join(ctx, call, func(tx *gamekit.Tx, gs gamekit.State, p gamekit.Player) error {
 				a.seated(tx, gs.(*game), p)
 				return nil
@@ -156,11 +151,11 @@ func (a *App) addTools(srv *mcp.Server) {
 				return nil, nil, gamekit.ErrNotPlaying
 			}
 			return nil, a.srv.Joined(call, a.view(g, me)), nil
-		}, appkit.Subscribes(a.srv.Updates()))
+		}, wakeshift.Subscribes(a.srv.Updates()))
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "game", Description: "Your table's current game: the phase, the players, the cards in play, your dealt role and what it does, " +
 		"and (once day breaks) what you saw at night; between games, the last game's result and when the next starts. Keep your role to yourself, or lie about it."},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			g, me, err := a.find(ctx, call)
 			if err != nil {
 				return nil, nil, err
@@ -171,7 +166,7 @@ func (a *App) addTools(srv *mcp.Server) {
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "night", Description: "Make your role's night choice (during the night). Lamplighter: players=[handle] to see a card, or center=[a,b]. " +
 		"Changeling: players=[handle] to swap with. Gravedigger: players=[a,b] to swap. Sleepwalker: center=[n]. Lone vampire: center=[n] to look. " +
 		"You can change your choice until day breaks; it's carried out then, in role order."},
-		func(ctx context.Context, call *appkit.ToolCall, in nightIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in nightIn) (*mcp.CallToolResult, map[string]any, error) {
 			act := action{Center: in.Center}
 			for _, h := range in.Players {
 				act.Players = append(act.Players, strings.TrimPrefix(strings.TrimSpace(h), "@"))
@@ -193,7 +188,7 @@ func (a *App) addTools(srv *mcp.Server) {
 		})
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "say", Description: "Say something to the other players in your game (by day, and while voting)."},
-		func(ctx context.Context, call *appkit.ToolCall, in sayIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sayIn) (*mcp.CallToolResult, map[string]any, error) {
 			text := strings.TrimSpace(in.Text)
 			if text == "" || len(text) > sayMax {
 				return nil, nil, fmt.Errorf("text is required (at most %d characters)", sayMax)
@@ -217,7 +212,7 @@ func (a *App) addTools(srv *mcp.Server) {
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "vote", Description: "Vote for the player to eliminate (any time once day breaks). You can change your vote until everyone has voted; " +
 		"the game ends as soon as everyone has."},
-		func(ctx context.Context, call *appkit.ToolCall, in voteIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in voteIn) (*mcp.CallToolResult, map[string]any, error) {
 			target := strings.TrimPrefix(strings.TrimSpace(in.Player), "@")
 			var out map[string]any
 			err := a.move(ctx, call, "vote", in.Note, func(tx *gamekit.Tx, g *game, me *player) error {
@@ -241,7 +236,7 @@ func (a *App) addTools(srv *mcp.Server) {
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "leave", Description: "Leave your table when you're done playing. During a game you play it to its end (your vote still counts) " +
 		"and your seat goes then; otherwise it goes at once. Call `join` to play again later."},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			var left bool
 			_, err := gamekit.Move(ctx, a.srv, call, playerIn, func(tx *gamekit.Tx, g *game, me *player) (err error) {
 				left, err = a.leave(tx, g, me)
@@ -261,7 +256,7 @@ func (a *App) addTools(srv *mcp.Server) {
 // move runs a player's move on its game, under the game's lock (with who's
 // away found first: Wakeshift isn't called under the lock), and keeps its
 // note for the player's operator once the move is made.
-func (a *App) move(ctx context.Context, call *appkit.ToolCall, tool, note string, fn func(tx *gamekit.Tx, g *game, me *player) error) error {
+func (a *App) move(ctx context.Context, call *wakeshift.ToolCall, tool, note string, fn func(tx *gamekit.Tx, g *game, me *player) error) error {
 	_, err := gamekit.Move(ctx, a.srv, call, playerIn, func(tx *gamekit.Tx, g *game, me *player) error {
 		if slices.Contains(g.Next, me) {
 			return errNextGame

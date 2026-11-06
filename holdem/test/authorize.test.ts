@@ -48,7 +48,7 @@ function fakeCore() {
 async function start(t: { after: (f: () => Promise<void> | void) => void }, opts: { now?: () => number; limits?: { register?: number; session?: number } } = {}) {
   const db: Db = await testDb(t);
   const { core, fetchFn } = fakeCore();
-  const wake = new Wakeshift({ key: "wst_test_holdem_" + Buffer.alloc(32, 7).toString("base64url"), core: "http://core.test", fetch: fetchFn });
+  const wake = new Wakeshift({ key: "wst_test_holdem_" + Buffer.alloc(32, 7).toString("base64url"), core: "https://core.test", fetch: fetchFn });
   let page!: AuthorizePage;
   let signIn!: SignIn;
   const server = createServer(async (req, res) => {

@@ -15,7 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Rooms: the players seated in a game, each seat's conversation's
@@ -101,43 +101,58 @@ type joining struct {
 	native                    bool
 	// subscribe subscribes the conversation to game.update (or, for a
 	// native caller, tells it to subscribe itself: an empty ID).
-	subscribe func(ctx context.Context) (appkit.Subscription, error)
+	subscribe func(ctx context.Context) (wakeshift.Subscription, error)
+	// subscribed is the subscription joiningOf already made, if it did.
+	subscribed *wakeshift.Subscription
 }
 
 // joiningOf is the calling conversation of a join: a native client's seat
 // is keyed by its conversation (nativeSession), unless it passes a
 // session_key; any other conversation's session is the one it passes, or
-// the one Wakeshift finds or starts for it (a Codex thread's own).
-func (s *Server) joiningOf(ctx context.Context, call *appkit.ToolCall) (joining, error) {
+// the one Wakeshift finds or starts for it (a Codex thread's own). One
+// that names no conversation is subscribed first, which starts its
+// session, so the seat and the subscription share it.
+func (s *Server) joiningOf(ctx context.Context, call *wakeshift.ToolCall) (joining, error) {
 	ag := call.Agent
 	if ag == nil {
 		return joining{}, errors.New("not signed in")
 	}
-	j := joining{workspace: ag.Workspace, agent: ag.ID, native: call.Native, session: call.Session}
-	if j.session == "" {
-		if call.Native {
-			j.session = nativeSession(call.NativeConversation)
-		} else {
-			session, err := call.ResolveSession(ctx)
-			if err != nil {
-				return joining{}, friendlySession(err)
-			}
-			j.session = session
-		}
-	}
-	j.subscribe = func(ctx context.Context) (appkit.Subscription, error) {
-		sub, err := s.events().Subscribe(ctx, call, UpdateArgs{}, appkit.Reason("Playing "+s.Title))
-		if appkit.IsCode(err, "outside_scope") {
+	j := joining{workspace: ag.Workspace, agent: ag.ID, native: call.Native, session: string(call.Session())}
+	j.subscribe = func(ctx context.Context) (wakeshift.Subscription, error) {
+		sub, err := s.events().Subscribe(ctx, call, UpdateArgs{}, wakeshift.Reason("Playing "+s.Title))
+		if wakeshift.IsCode(err, "outside_scope") {
 			return sub, fmt.Errorf("this agent's consent for %s doesn't cover games; sign in to %s again", s.Title, s.Title)
 		}
 		return sub, err
+	}
+	if j.session != "" {
+		return j, nil
+	}
+	session, err := call.ResolveSession(ctx)
+	if err != nil {
+		return joining{}, friendlySession(err)
+	}
+	j.session = string(session)
+	switch {
+	case j.session != "":
+	case call.Native:
+		// Nothing names the conversation (ResolveSession asked nothing).
+		j.session = nativeSession(call.NativeConversation)
+	default:
+		// Nothing names it: the subscribe starts its session, as
+		// ResolveSession did for such a call.
+		sub, err := j.subscribe(ctx)
+		if err != nil {
+			return joining{}, err
+		}
+		j.subscribed, j.session = &sub, string(sub.Session)
 	}
 	return j, nil
 }
 
 // friendlySession is a session the call names that Wakeshift doesn't know.
 func friendlySession(err error) error {
-	if appkit.IsCode(err, "unknown_session") {
+	if wakeshift.IsCode(err, "unknown_session") {
 		return errors.New("you have no such session: leave session_key out to start one")
 	}
 	return err
@@ -153,7 +168,7 @@ func friendlySession(err error) error {
 // failure ends a subscription it made, so no seated player is left without
 // one. A conversation already playing gets its game back, subscribed again
 // (a rejoin re-arms waking).
-func (s *Server) Join(ctx context.Context, call *appkit.ToolCall, seat func(tx *Tx, g State, p Player) error) (State, string, error) {
+func (s *Server) Join(ctx context.Context, call *wakeshift.ToolCall, seat func(tx *Tx, g State, p Player) error) (State, string, error) {
 	j, err := s.joiningOf(ctx, call)
 	if err != nil {
 		return nil, "", err
@@ -164,7 +179,7 @@ func (s *Server) Join(ctx context.Context, call *appkit.ToolCall, seat func(tx *
 func (s *Server) join(ctx context.Context, j joining, seat func(tx *Tx, g State, p Player) error) (State, string, error) {
 	key := PlayerKey(j.workspace, j.agent, j.session)
 	user := j.workspace + "/" + j.agent
-	var sub *appkit.Subscription
+	sub := j.subscribed
 	subscribe := func() error {
 		if sub != nil {
 			return nil
@@ -252,12 +267,12 @@ func (s *Server) resubscribed(ctx context.Context, game, key, user, subscription
 // it passes to the game's tools from now on (a client that subscribes to
 // events itself needs none). Wakeshift's own block, added to the result,
 // says how the conversation is woken.
-func (s *Server) Joined(call *appkit.ToolCall, view map[string]any) map[string]any {
+func (s *Server) Joined(call *wakeshift.ToolCall, view map[string]any) map[string]any {
 	if view == nil {
 		view = map[string]any{}
 	}
-	if call.Session != "" && !call.Native {
-		view["session_key"] = call.Session
+	if call.Session() != "" && !call.Native {
+		view["session_key"] = string(call.Session())
 	}
 	return view
 }
@@ -329,7 +344,7 @@ func (s *Server) SeatEnded(ctx context.Context, user, subscription string) {
 	if seated {
 		return
 	}
-	if _, err := s.events().End(ctx, user, subscription); err != nil && !appkit.IsCode(err, "not_found") && !appkit.IsCode(err, "unknown_workspace") {
+	if _, err := s.Kit.EndSubscription(ctx, user, subscription); err != nil && !wakeshift.IsCode(err, "not_found") && !wakeshift.IsCode(err, "unknown_workspace") {
 		slog.Warn(s.Name+": ending a seat's subscription", "err", err)
 	}
 }
@@ -414,7 +429,7 @@ func (s *Server) Away(ctx context.Context, game string) map[string]bool {
 		return nil
 	}
 	away := map[string]bool{}
-	var subs []appkit.Recipient
+	var subs []wakeshift.Recipient
 	handleOf := map[string]string{} // subscription → handle
 	for _, st := range seats {
 		switch {
@@ -422,7 +437,7 @@ func (s *Server) Away(ctx context.Context, game string) map[string]bool {
 		case st.Subscription == "":
 			away[st.Handle] = true // its subscription ended
 		default:
-			subs = append(subs, appkit.Recipient{User: st.Subscriber, Subscription: st.Subscription})
+			subs = append(subs, wakeshift.Recipient{User: st.Subscriber, Subscription: st.Subscription})
 			handleOf[st.Subscription] = st.Handle
 		}
 	}

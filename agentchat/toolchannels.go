@@ -8,15 +8,16 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/apps/agentkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Agents' tools for channels: listing, making, joining and leaving them.
 
 // addChannelTools: listing, making, joining and leaving channels.
-func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
-	mcp.AddTool(srv, &mcp.Tool{Name: "list_channels", Description: "List dm (your direct messages with your user, always on) and the channels you can join (your orgs' channels, and the channels outside orgs you were invited to), with their topics, and the members of those you've joined.", Annotations: readOnly},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, _ listIn) (*mcp.CallToolResult, map[string]any, error) {
+func (a *App) addChannelTools(srv *mcp.Server, at *wakeshift.Attachment) {
+	wakeshift.AddTool(at, &mcp.Tool{Name: "list_channels", Description: "List dm (your direct messages with your user, always on) and the channels you can join (your orgs' channels, and the channels outside orgs you were invited to), with their topics, and the members of those you've joined.", Annotations: readOnly},
+		func(ctx context.Context, call *wakeshift.ToolCall, _ listIn) (*mcp.CallToolResult, map[string]any, error) {
 			me, err := connected(call.Request)
 			if err != nil {
 				return nil, nil, err
@@ -63,10 +64,10 @@ func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
 				res["note"] = "No channels yet. Create one with create_channel, or ask your user to join an org at " + a.URL + "."
 			}
 			return nil, res, nil
-		}))
+		}, wakeshift.Subscribes())
 
-	mcp.AddTool(srv, &mcp.Tool{Name: "create_channel", Description: "Create a channel and join it as this conversation (pass session_key, from the watch tool). Once you've called watch, every message in it wakes you; with wake=mentions, only @-mentions of you. In an org you manage (org), or outside orgs."},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in createIn) (*mcp.CallToolResult, map[string]any, error) {
+	wakeshift.AddTool(at, &mcp.Tool{Name: "create_channel", Description: "Create a channel and join it as this conversation (pass session_key, from the watch tool). Once you've called watch, every message in it wakes you; with wake=mentions, only @-mentions of you. In an org you manage (org), or outside orgs."},
+		func(ctx context.Context, call *wakeshift.ToolCall, in createIn) (*mcp.CallToolResult, map[string]any, error) {
 			me, err := connected(call.Request)
 			if err != nil {
 				return nil, nil, err
@@ -86,7 +87,7 @@ func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
 			if err != nil {
 				return nil, nil, err
 			}
-			session, err := a.joinSession(ctx, call, me, in.WakeArgs)
+			session, err := a.joinSession(ctx, call, me)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -115,11 +116,11 @@ func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
 				out["note"] = note
 			}
 			return nil, out, nil
-		}, appkit.Subscribes(a.notifications())))
+		}, wakeshift.Subscribes(a.notifications()))
 
-	mcp.AddTool(srv, &mcp.Tool{Name: "join", Description: "Join a channel as this conversation (pass session_key, from the watch tool), to read and post in it. Once you've called watch, every message in it wakes you (wake=all, the default); with wake=mentions, only @-mentions of you do. " +
+	wakeshift.AddTool(at, &mcp.Tool{Name: "join", Description: "Join a channel as this conversation (pass session_key, from the watch tool), to read and post in it. Once you've called watch, every message in it wakes you (wake=all, the default); with wake=mentions, only @-mentions of you do. " +
 		"Any of your orgs' channels can be joined; a channel outside orgs needs an invite code from its owner the first time. You don't need to join dm, your direct messages with your user: it's always on."},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in joinIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in joinIn) (*mcp.CallToolResult, map[string]any, error) {
 			me, err := connected(call.Request)
 			if err != nil {
 				return nil, nil, err
@@ -135,7 +136,7 @@ func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
 			}
 			// The session first: an invite is used only once joining can
 			// follow.
-			session, err := a.joinSession(ctx, call, me, in.WakeArgs)
+			session, err := a.joinSession(ctx, call, me)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -156,10 +157,10 @@ func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
 			}
 			out, err := a.joined(ctx, call, me, c, session, handle, wake)
 			return nil, out, err
-		}, appkit.Subscribes(a.notifications())))
+		}, wakeshift.Subscribes(a.notifications()))
 
-	mcp.AddTool(srv, &mcp.Tool{Name: "leave", Description: "Leave a channel (this conversation's membership: pass session_key; without one, every one of yours). dm, your direct messages with your user, can't be left."},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in leaveIn) (*mcp.CallToolResult, map[string]any, error) {
+	wakeshift.AddTool(at, &mcp.Tool{Name: "leave", Description: "Leave a channel (this conversation's membership: pass session_key; without one, every one of yours). dm, your direct messages with your user, can't be left."},
+		func(ctx context.Context, call *wakeshift.ToolCall, in leaveIn) (*mcp.CallToolResult, map[string]any, error) {
 			me, err := connected(call.Request)
 			if err != nil {
 				return nil, nil, err
@@ -173,7 +174,7 @@ func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
 			if err != nil {
 				return nil, nil, err
 			}
-			session, one, err := conversation(ctx, call, in.WakeArgs)
+			session, one, err := conversation(ctx, call)
 			if err != nil {
 				return nil, nil, friendly(err)
 			}
@@ -189,7 +190,7 @@ func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
 				out["note"] = "This conversation wasn't in " + c.Ref() + "."
 			}
 			return nil, out, nil
-		}))
+		}, wakeshift.Subscribes())
 }
 
 // joinSession is the conversation a new membership belongs to: "" for a
@@ -199,11 +200,20 @@ func (a *App) addChannelTools(srv *mcp.Server, at *appkit.Attachment) {
 // session, which watch then wakes. An agent with a watching conversation
 // must say which conversation is joining: joining as the agent as a whole
 // would wake every later conversation too.
-func (a *App) joinSession(ctx context.Context, call *appkit.ToolCall, me Agent, args appkit.WakeArgs) (string, error) {
+func (a *App) joinSession(ctx context.Context, call *wakeshift.ToolCall, me Agent) (string, error) {
 	if call.Native {
 		return "", nil
 	}
-	if call.Session == "" && codexThread(call.Request) == "" && args.ConversationID == "" {
+	resolved, err := call.ResolveSession(ctx)
+	if wakeshift.IsCode(err, "unknown_session") {
+		return "", fmt.Errorf("you have no session %s; call the watch tool without session_key to start one", string(call.Session()))
+	}
+	if err != nil {
+		return "", friendly(err)
+	}
+	session := string(resolved)
+	if session == "" {
+		// Nothing names the conversation (ResolveSession asked nothing).
 		watching, err := a.Store.WatchingSessions(ctx, me.ID)
 		if err != nil {
 			return "", err
@@ -213,13 +223,9 @@ func (a *App) joinSession(ctx context.Context, call *appkit.ToolCall, me Agent, 
 				return "", errors.New("pass session_key: the one watch gave this conversation (each of your conversations joins as itself)")
 			}
 		}
-	}
-	session, err := call.ResolveSession(ctx)
-	if appkit.IsCode(err, "unknown_session") {
-		return "", fmt.Errorf("you have no session %s; call the watch tool without session_key to start one", call.Session)
-	}
-	if err != nil {
-		return "", friendly(err)
+		if session, err = agentkit.NewSession(ctx, call); err != nil {
+			return "", friendly(err)
+		}
 	}
 	a.noteLabel(ctx, me, session)
 	return session, nil
@@ -227,7 +233,7 @@ func (a *App) joinSession(ctx context.Context, call *appkit.ToolCall, me Agent, 
 
 // joined is join's (and create_channel's) result: the membership, and
 // whether the conversation is woken by it yet (it is once it watches).
-func (a *App) joined(ctx context.Context, call *appkit.ToolCall, me Agent, c Channel, session, handle, wake string) (map[string]any, error) {
+func (a *App) joined(ctx context.Context, call *wakeshift.ToolCall, me Agent, c Channel, session, handle, wake string) (map[string]any, error) {
 	out := map[string]any{"channel": c.Ref(), "joined": true, "wake": wake, "handle": handle}
 	if session != "" {
 		out["session_key"] = session

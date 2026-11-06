@@ -19,7 +19,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/apps/agentkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Players' sign-in: the games' own OAuth server, for MCP clients (Claude
@@ -77,7 +78,7 @@ const (
 // limits are the per-address limits on registering, on starting sessions
 // and on token requests (registerLimit, sessionLimit and tokenLimit set
 // them for tests; 0 is the default).
-func (s *Server) limits() (registers, sessions, tokens *appkit.RateLimiter) {
+func (s *Server) limits() (registers, sessions, tokens *agentkit.RateLimiter) {
 	s.limitsOnce.Do(func() {
 		n := func(v, def int) int {
 			if v == 0 {
@@ -85,9 +86,9 @@ func (s *Server) limits() (registers, sessions, tokens *appkit.RateLimiter) {
 			}
 			return v
 		}
-		s.registers = appkit.NewRateLimiter(n(s.registerLimit, 20), signInWindow, s.ProxyHops)
-		s.sessions = appkit.NewRateLimiter(n(s.sessionLimit, 20), signInWindow, s.ProxyHops)
-		s.tokens = appkit.NewRateLimiter(n(s.tokenLimit, 60), signInWindow, s.ProxyHops)
+		s.registers = agentkit.NewRateLimiter(n(s.registerLimit, 20), signInWindow, s.ProxyHops)
+		s.sessions = agentkit.NewRateLimiter(n(s.sessionLimit, 20), signInWindow, s.ProxyHops)
+		s.tokens = agentkit.NewRateLimiter(n(s.tokenLimit, 60), signInWindow, s.ProxyHops)
 	})
 	return s.registers, s.sessions, s.tokens
 }
@@ -371,16 +372,16 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		}
 		// The player's workspace (its ID is the session's) and agent, named
 		// after the client.
-		agent := appkit.HarnessAgent(cl.Name)
+		agent := agentkit.HarnessAgent(cl.Name)
 		ws, err := s.Kit.Workspace(ctx, sess.ID, s.Title+" player")
 		if err == nil {
 			_, err = s.Kit.AddAgent(ctx, ws, agent, cl.Name)
 		}
 		switch {
-		case appkit.IsCode(err, "workspace_limit"):
+		case wakeshift.IsCode(err, "workspace_limit"):
 			oauthErr(w, http.StatusForbidden, "access_denied", s.Title+" can't take more players right now")
 			return
-		case appkit.IsCode(err, "workspace_rate_limited"):
+		case wakeshift.IsCode(err, "workspace_rate_limited"):
 			oauthErr(w, http.StatusServiceUnavailable, "temporarily_unavailable", s.Title+" is taking too many new players right now; try again later")
 			return
 		case err != nil:
@@ -403,7 +404,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		}
 		// The player must still be there in Wakeshift: forgotten, or its
 		// grant revoked, the session ends.
-		if _, err := s.Kit.ActAs(ctx, *sess.Workspace, *sess.Agent); appkit.IsCode(err, "no_grant") || appkit.IsCode(err, "unknown_workspace") {
+		if _, err := s.Kit.ActAs(ctx, *sess.Workspace, *sess.Agent); wakeshift.IsCode(err, "no_grant") || wakeshift.IsCode(err, "unknown_workspace") {
 			s.endSession(ctx, sess.ID)
 			oauthErr(w, http.StatusBadRequest, "invalid_grant", "this player's access was revoked; sign in again")
 			return
@@ -448,11 +449,11 @@ func (s *Server) tokenFailed(w http.ResponseWriter, doing string, err error) {
 func (s *Server) verify(_ context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 	var t accessToken
 	if !s.unseal(labelAccess, token, &t) || t.Session == "" || t.Workspace == "" {
-		return nil, &appkit.TokenError{Reason: appkit.ReasonInvalid}
+		return nil, &wakeshift.TokenError{Reason: wakeshift.ReasonInvalid}
 	}
 	exp := time.Unix(t.Expires, 0)
 	if now := time.Now(); !now.Before(exp) {
-		return nil, &appkit.TokenError{Reason: appkit.ReasonExpired, Past: now.Sub(exp)}
+		return nil, &wakeshift.TokenError{Reason: wakeshift.ReasonExpired, Past: now.Sub(exp)}
 	}
 	return &auth.TokenInfo{UserID: t.Session, Expiration: exp,
 		Extra: map[string]any{"workspace": t.Workspace, "agent": t.Agent, "client": t.Client}}, nil

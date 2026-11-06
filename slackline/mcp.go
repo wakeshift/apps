@@ -12,7 +12,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/apps/agentkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // The MCP server agents add (OAuth-protected): watch (get a thread in the
@@ -22,15 +23,15 @@ import (
 func (a *App) mcpHandler() http.Handler {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "slackline", Title: "Slackline", Version: "0.2.0"}, &mcp.ServerOptions{Instructions: instructions})
 	// slack.message is defined before Attach, which serves it to clients
-	// that subscribe themselves; the tools come after it (appkit.Events
+	// that subscribe themselves; the tools come after it (wakeshift.AddTool
 	// needs its handle).
 	a.messages()
 	// Wait: Claude Code's wait tool (docs/harnesses.md, "Claude Code: MCP
 	// tasks as a wake path").
-	attached := a.Kit.Attach(srv, appkit.AttachOptions{Identify: identify, Tools: appkit.Tools{Wait: appkit.Wait{Enabled: true}}})
+	attached := a.Kit.Attach(srv, wakeshift.AttachOptions{Identify: identify, BuiltinTools: wakeshift.BuiltinTools{Wait: true}})
 	a.addTools(srv, attached)
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
-	return appkit.RequireBearer(a.verifyMCP, a.URL+"/.well-known/oauth-protected-resource")(attached.Wrap(h))
+	return wakeshift.RequireBearer(a.verifyMCP, a.URL+"/.well-known/oauth-protected-resource")(attached.Handler(h))
 }
 
 func (a *App) verifyMCP(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
@@ -65,63 +66,58 @@ const instructions = "Slackline lets the person who connected you chat with you 
 
 type watchIn struct {
 	Label string `json:"label,omitempty" jsonschema:"A short name for this conversation in Slack (e.g. the project), at most 40 characters; defaults to the agent's name"`
-	appkit.WakeArgs
 }
 
 // watchOut is watch's structured output, for hosts that show the model
-// only structuredContent (ChatGPT): the conversation's listener, and
-// Wakeshift's block (appkit.WakeOutput, which appkit.Events fills): how
-// the conversation is woken, or which event to subscribe to.
+// only structuredContent (ChatGPT): the conversation's listener (Wakeshift
+// adds its block in a wakeshift field: how the conversation is woken, or
+// which event to subscribe to).
 type watchOut struct {
 	Listener string `json:"listener" jsonschema:"This conversation's listener in Slack: the listener argument of its slack.message event"`
-	appkit.WakeOutput
 }
 
 type replyIn struct {
 	Text     string `json:"text" jsonschema:"What to post (Slack formatting: *bold*, _italic_, backticks for code)"`
 	Channel  string `json:"channel,omitempty" jsonschema:"The channel ID a message came from (its data.channel), to answer there; empty: your DM thread"`
 	ThreadTS string `json:"thread_ts,omitempty" jsonschema:"The thread to answer in (a message's data.thread_ts); empty with a channel: a new post there"`
-	appkit.WakeArgs
 }
 
-type argsOnly struct {
-	appkit.WakeArgs
-}
+type argsOnly struct{}
 
-// addTools adds the tools, each wrapped by appkit.Events: Wakeshift's block
+// addTools adds the tools, each through wakeshift.AddTool: Wakeshift's block
 // (how the conversation is woken, messages held for it, a fresh Codex
 // beacon) is added to every reply.
-func (a *App) addTools(srv *mcp.Server, at *appkit.Attachment) {
-	mcp.AddTool(srv, &mcp.Tool{Name: "watch", Description: "Listen in Slack: you get your own thread in the DM of the person who " +
+func (a *App) addTools(srv *mcp.Server, at *wakeshift.Attachment) {
+	wakeshift.AddTool(at, &mcp.Tool{Name: "watch", Description: "Listen in Slack: you get your own thread in the DM of the person who " +
 		"connected you, and each message they send there wakes this conversation, as do messages in the channels they chose for you. " +
 		"Calling it again keeps the same thread. A client that subscribes to events itself subscribes to slack.message after watch, with the listener ID watch gives it."},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in watchIn) (*mcp.CallToolResult, watchOut, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in watchIn) (*mcp.CallToolResult, watchOut, error) {
 			ag, err := agentOf(call.Request)
 			if err != nil {
 				return nil, watchOut{}, err
 			}
-			return a.watch(ctx, ag, call, in.WakeArgs, in.Label)
-		}, appkit.Subscribes(a.messages())))
-	mcp.AddTool(srv, &mcp.Tool{Name: "reply", Description: "Post in Slack: in your DM thread with the person who connected you, or in a " +
+			return a.watch(ctx, ag, call, in.Label)
+		}, wakeshift.Subscribes(a.messages()))
+	wakeshift.AddTool(at, &mcp.Tool{Name: "reply", Description: "Post in Slack: in your DM thread with the person who connected you, or in a " +
 		"channel you listen in (pass the channel and thread_ts of the message you're answering). You can't mention @channel, people or groups."},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in replyIn) (*mcp.CallToolResult, any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in replyIn) (*mcp.CallToolResult, any, error) {
 			ag, err := agentOf(call.Request)
 			if err != nil {
 				return nil, nil, err
 			}
 			return a.reply(ctx, ag, call, in)
-		}))
-	mcp.AddTool(srv, &mcp.Tool{Name: "unwatch", Description: "Stop listening in Slack: nothing there wakes this conversation any more."},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in argsOnly) (*mcp.CallToolResult, any, error) {
+		}, wakeshift.Subscribes())
+	wakeshift.AddTool(at, &mcp.Tool{Name: "unwatch", Description: "Stop listening in Slack: nothing there wakes this conversation any more."},
+		func(ctx context.Context, call *wakeshift.ToolCall, _ argsOnly) (*mcp.CallToolResult, any, error) {
 			ag, err := agentOf(call.Request)
 			if err != nil {
 				return nil, nil, err
 			}
-			return a.unwatch(ctx, ag, call, in.WakeArgs)
-		}))
-	mcp.AddTool(srv, &mcp.Tool{Name: "listening", Description: "Where you listen in Slack: your DM thread, and the channels the person who " +
+			return a.unwatch(ctx, ag, call)
+		}, wakeshift.Subscribes())
+	wakeshift.AddTool(at, &mcp.Tool{Name: "listening", Description: "Where you listen in Slack: your DM thread, and the channels the person who " +
 		"connected you chose (every message or only @Slackline mentions, from them only or from anyone there)."},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, _ argsOnly) (*mcp.CallToolResult, any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, _ argsOnly) (*mcp.CallToolResult, any, error) {
 			ag, err := agentOf(call.Request)
 			if err != nil {
 				return nil, nil, err
@@ -131,13 +127,13 @@ func (a *App) addTools(srv *mcp.Server, at *appkit.Attachment) {
 				return nil, nil, err
 			}
 			return textResult(text), nil, nil
-		}))
+		}, wakeshift.Subscribes())
 }
 
 // convKeys are hashes of what identifies the calling conversation across
-// calls: the session key Wakeshift gave it, Codex's thread, ChatGPT's
-// conversation, or the conversation ID the agent passes.
-func (a *App) convKeys(ag Agent, call *appkit.ToolCall, args appkit.WakeArgs, more ...string) [][]byte {
+// calls: the session key Wakeshift gave it, Codex's thread or ChatGPT's
+// conversation.
+func (a *App) convKeys(ag Agent, call *wakeshift.ToolCall, more ...string) [][]byte {
 	var keys [][]byte
 	add := func(kind, v string) {
 		if v != "" {
@@ -148,12 +144,11 @@ func (a *App) convKeys(ag Agent, call *appkit.ToolCall, args appkit.WakeArgs, mo
 	if call.Request != nil && call.Request.Params != nil {
 		meta = call.Request.Params.GetMeta()
 	}
-	add("session", args.SessionKey)
-	add("codex", appkit.CodexThread(meta))
+	add("session", string(call.Session()))
+	add("codex", agentkit.CodexThread(meta))
 	if s, ok := meta["openai/session"].(string); ok {
 		add("openai", s)
 	}
-	add("conversation", strings.TrimSpace(args.ConversationID))
 	for _, s := range more {
 		add("session", s)
 	}
@@ -162,15 +157,23 @@ func (a *App) convKeys(ag Agent, call *appkit.ToolCall, args appkit.WakeArgs, mo
 
 // listenerOf is the calling conversation's listener (it must be the
 // agent's).
-func (a *App) listenerOf(ctx context.Context, ag Agent, call *appkit.ToolCall, args appkit.WakeArgs) (Listener, error) {
-	l, err := a.Store.ListenerFor(ctx, a.convKeys(ag, call, args))
+func (a *App) listenerOf(ctx context.Context, ag Agent, call *wakeshift.ToolCall) (Listener, error) {
+	if call.Session() == "" {
+		// The key passed is only the agent's claim: Wakeshift checks it
+		// (with nothing that names the conversation, ResolveSession asks
+		// nothing).
+		if _, err := call.ResolveSession(ctx); err != nil && !wakeshift.IsCode(err, "unknown_session") {
+			return Listener{}, err
+		}
+	}
+	l, err := a.Store.ListenerFor(ctx, a.convKeys(ag, call))
 	if errors.Is(err, ErrNotFound) || err == nil && l.AgentID != ag.ID {
 		return Listener{}, errors.New("this conversation isn't listening in Slack: call watch first")
 	}
 	return l, err
 }
 
-func (a *App) watch(ctx context.Context, ag Agent, call *appkit.ToolCall, args appkit.WakeArgs, label string) (*mcp.CallToolResult, watchOut, error) {
+func (a *App) watch(ctx context.Context, ag Agent, call *wakeshift.ToolCall, label string) (*mcp.CallToolResult, watchOut, error) {
 	team, err := a.Store.Team(ctx, ag.TeamID)
 	if errors.Is(err, ErrNotFound) {
 		return nil, watchOut{}, errors.New("Slackline isn't in this person's Slack workspace yet: ask them to add it (Add to Slack, at " + a.URL + ")")
@@ -178,7 +181,15 @@ func (a *App) watch(ctx context.Context, ag Agent, call *appkit.ToolCall, args a
 	if err != nil {
 		return nil, watchOut{}, err
 	}
-	l, err := a.Store.ListenerFor(ctx, a.convKeys(ag, call, args))
+	if call.Session() == "" {
+		// The key passed is only the agent's claim: Wakeshift checks it
+		// (with nothing that names the conversation, ResolveSession asks
+		// nothing).
+		if _, err := call.ResolveSession(ctx); err != nil && !wakeshift.IsCode(err, "unknown_session") {
+			return nil, watchOut{}, err
+		}
+	}
+	l, err := a.Store.ListenerFor(ctx, a.convKeys(ag, call))
 	existing := err == nil && l.AgentID == ag.ID
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, watchOut{}, err
@@ -187,15 +198,28 @@ func (a *App) watch(ctx context.Context, ag Agent, call *appkit.ToolCall, args a
 		l = Listener{ID: newID(), AgentID: ag.ID, Label: cleanLabel(label, ag.Label)}
 	}
 	// Every harness Wakeshift wakes is subscribed here. A client that
-	// subscribes itself (ChatGPT) gets no subscription (sub.Native, sub.ID
+	// subscribes itself (ChatGPT) gets no subscription (state native, ID
 	// ""): Wakeshift's block tells it to subscribe with the listener's ID,
-	// or that it has. If the call fails, the wrapper ends a subscription it
-	// made.
+	// or that it has. Its listener is opened first: authorizeMessages,
+	// which Wakeshift asks before it tells the client to subscribe, checks
+	// that the listener is the agent's. If the call fails, the wrapper ends
+	// a subscription it made.
+	opened := false
+	if call.Native && !existing {
+		if err := a.openListener(ctx, team, ag, &l); err != nil {
+			return nil, watchOut{}, err
+		}
+		opened = true
+	}
 	sub, err := a.messages().Subscribe(ctx, call, MessageArgs{Listener: l.ID})
 	if err != nil {
 		return nil, watchOut{}, err
 	}
+	if sub.State == wakeshift.SubscriptionUnavailable {
+		return nil, watchOut{}, errors.New("Slackline can't wake this client (" + sub.Reason + ")")
+	}
 	switch {
+	case opened:
 	case !existing:
 		l.Subscription = sub.ID
 		if err := a.openListener(ctx, team, ag, &l); err != nil {
@@ -217,7 +241,7 @@ func (a *App) watch(ctx context.Context, ag Agent, call *appkit.ToolCall, args a
 			slog.Warn("slackline: ending a listener's replaced subscription failed", "err", err)
 		}
 	}
-	if err := a.Store.RememberConversation(ctx, a.convKeys(ag, call, args, sub.Session), l.ID); err != nil {
+	if err := a.Store.RememberConversation(ctx, a.convKeys(ag, call, string(sub.Session)), l.ID); err != nil {
 		return nil, watchOut{}, err
 	}
 	where, err := a.listening(ctx, ag)
@@ -278,12 +302,12 @@ func (a *App) listening(ctx context.Context, ag Agent) (string, error) {
 	return b.String(), nil
 }
 
-func (a *App) reply(ctx context.Context, ag Agent, call *appkit.ToolCall, in replyIn) (*mcp.CallToolResult, any, error) {
+func (a *App) reply(ctx context.Context, ag Agent, call *wakeshift.ToolCall, in replyIn) (*mcp.CallToolResult, any, error) {
 	text := strings.TrimSpace(in.Text)
 	if text == "" {
 		return nil, nil, errors.New("text is empty")
 	}
-	l, err := a.listenerOf(ctx, ag, call, in.WakeArgs)
+	l, err := a.listenerOf(ctx, ag, call)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -355,8 +379,8 @@ func validTS(s string) bool {
 	return true
 }
 
-func (a *App) unwatch(ctx context.Context, ag Agent, call *appkit.ToolCall, args appkit.WakeArgs) (*mcp.CallToolResult, any, error) {
-	l, err := a.listenerOf(ctx, ag, call, args)
+func (a *App) unwatch(ctx context.Context, ag Agent, call *wakeshift.ToolCall) (*mcp.CallToolResult, any, error) {
+	l, err := a.listenerOf(ctx, ag, call)
 	if err != nil {
 		return nil, nil, err
 	}

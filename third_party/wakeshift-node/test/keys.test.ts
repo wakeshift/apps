@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Wakeshift, parseKey, signAssertion } from "../src/index.js";
+import { parseKey, signAssertion } from "../src/key.js";
+import { Wakeshift } from "../src/index.js";
 import { publicKeyOf } from "../src/key.js";
 
 // build-test/test/keys.test.js reads test/app-keys.json in the source tree.
@@ -122,15 +123,15 @@ const appReply = { id: "ci-bot", name: "CI bot", key: { key_id: NEW_KID.slice(0,
 
 test("a current key: appId throws until app() has asked Wakeshift, once", async () => {
   const core = fakeCore(() => [200, appReply]);
-  const wake = new Wakeshift({ key: NEW, core: "http://core.test", fetch: core.fetchFn });
-  assert.throws(() => wake.appId, /call await wake\.app\(\) first: this key doesn't name its app/);
+  const wake = new Wakeshift({ key: NEW, core: "https://core.test", fetch: core.fetchFn });
+  assert.equal(wake.appId, undefined, "undefined until Wakeshift has said it");
   const [a, b] = await Promise.all([wake.app(), wake.app()]);
   assert.deepEqual(a, { id: "ci-bot", name: "CI bot", key: { id: NEW_KID.slice(0, 8), name: "default" } });
   assert.deepEqual(b, a);
   assert.deepEqual(await wake.app(), a);
   assert.equal(wake.appId, "ci-bot");
   assert.equal(core.sent.length, 1);
-  assert.equal(core.sent[0].url, "http://core.test/api/apps/v1/app");
+  assert.equal(core.sent[0].url, "https://core.test/api/apps/v1/app");
   // The first assertion names the key; once the app is known, the app.
   assert.equal(parts(core.sent[0].auth!.slice("Bearer ".length)).claims.iss, NEW_KID);
   await wake.forgetUser("ada");
@@ -143,9 +144,9 @@ test("a current key: appId throws until app() has asked Wakeshift, once", async 
 test("app() asks again after a failure", async () => {
   let fail = true;
   const core = fakeCore(() => (fail ? [500, { error: { code: "internal", message: "boom" } }] : [200, appReply]));
-  const wake = new Wakeshift({ key: NEW, core: "http://core.test", fetch: core.fetchFn });
+  const wake = new Wakeshift({ key: NEW, core: "https://core.test", fetch: core.fetchFn });
   await assert.rejects(wake.app(), /boom/);
-  assert.throws(() => wake.appId, /call await wake\.app\(\) first/);
+  assert.equal(wake.appId, undefined);
   fail = false;
   assert.equal((await wake.app()).id, "ci-bot");
   assert.equal(wake.appId, "ci-bot");
@@ -153,7 +154,7 @@ test("app() asks again after a failure", async () => {
 
 test("an older key: appId from the key, and app() adds the name", async () => {
   const core = fakeCore(() => [200, { ...appReply, name: "CI" }]);
-  const wake = new Wakeshift({ key: OLD_TEST, core: "http://core.test", fetch: core.fetchFn });
+  const wake = new Wakeshift({ key: OLD_TEST, core: "https://core.test", fetch: core.fetchFn });
   assert.equal(wake.appId, "ci-bot");
   assert.deepEqual(await wake.app(), { id: "ci-bot", name: "CI", key: { id: NEW_KID.slice(0, 8), name: "default" } });
 });

@@ -27,9 +27,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/apps/agentkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Manifest is what Agent Chat may do for its people's agents, when it runs
@@ -37,13 +36,13 @@ import (
 // Chat (OthersCanWake). It acts for its agents (sessions, waits, stream
 // links) and subscribes and posts nothing by event type: chat.notification
 // is defined with the app's events.
-func Manifest(id string) appkit.Manifest {
-	return appkit.Manifest{
+func Manifest(id string) wakeshift.Manifest {
+	return wakeshift.Manifest{
 		Description:   "Channels where your agents talk to each other: post, reply in threads, and @-mention an agent to wake it.",
 		OthersCanWake: true,
-		Agent: &appkit.AgentScope{
-			Wake:        []appkit.ScopeEvent{},
-			Post:        []appkit.ScopeEvent{},
+		Agent: &wakeshift.AgentScope{
+			Wake:        []wakeshift.ScopeEvent{},
+			Post:        []wakeshift.ScopeEvent{},
 			TTLDays:     90,
 			StartPrompt: "Check Agent Chat and say hello to me in dm",
 		},
@@ -52,7 +51,7 @@ func Manifest(id string) appkit.Manifest {
 }
 
 // PreapproveTools are the tools Agent Chat offers to pre-approve in agents'
-// programs (appkit.Manifest.PreapproveTools): the two that only read
+// programs (wakeshift.Manifest.PreapproveTools): the two that only read
 // (list_channels, history), the wait tool (it reads the agent's own
 // messages), and post, the routine reply on every wake. post reaches only
 // dm (the agent's own user) and channels this conversation already joined;
@@ -81,7 +80,7 @@ const (
 
 // App serves Agent Chat.
 type App struct {
-	Kit    *appkit.App
+	Kit    *agentkit.App
 	Store  *Store
 	Mail   Sender
 	URL    string // this server's public URL, without a trailing slash
@@ -98,7 +97,7 @@ type App struct {
 
 	kick             chan struct{} // wakes the outbox worker
 	eventsOnce       sync.Once
-	chatNotification *appkit.DefinedEvent[NotificationArgs, Notification]
+	chatNotification *wakeshift.Event[NotificationArgs, Notification]
 }
 
 // Start publishes the manifest, retrying until Wakeshift accepts it.
@@ -146,7 +145,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/authorize", a.authorize)
 	mux.HandleFunc("POST /oauth/authorize", a.form(a.authorizeAllow))
 	mux.HandleFunc("POST /oauth/token", a.token)
-	mux.Handle("/mcp", appkit.LogMCP(a.mcpHandler()))
+	mux.Handle("/mcp", agentkit.LogMCP(a.mcpHandler()))
 	return securityHeaders(mux)
 }
 
@@ -251,7 +250,7 @@ func friendly(err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case appkit.IsCode(err, "no_grant"):
+	case wakeshift.IsCode(err, "no_grant"):
 		return errors.New("Agent Chat can't act for this agent right now; try again")
 	}
 	var netErr *url.Error
@@ -279,14 +278,4 @@ func mentions(text string, explicit []string, self string) []string {
 		add(m)
 	}
 	return out
-}
-
-// ── Codex conversations ──────────────────────────────────────────────────
-
-// codexThread is the Codex thread a tool call came from, if any.
-func codexThread(req *mcp.CallToolRequest) string {
-	if req == nil || req.Params == nil {
-		return ""
-	}
-	return appkit.CodexThread(req.Params.GetMeta())
 }

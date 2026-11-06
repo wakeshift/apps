@@ -25,21 +25,20 @@
 // declares the events extension in its own capabilities (2026-07-28 has no
 // initialize, so each request carries them).
 
-import { z } from "zod";
-import { EXTENSION_KEY, RESULT_TYPE } from "./spec.js";
-import { STATELESS_VERSION, is2026, v1Req, type Handler, type Host, type Req } from "./host.js";
+import { optionalModules } from "./optional.js";
+import { EXTENSION_KEY, RESULT_TYPE, bridgedClient } from "./spec.js";
+import { STATELESS_VERSION, is2026, v1Req, wrapAll, wrapMethod, type Handler, type Host, type Req } from "./host.js";
 
 export { STATELESS_VERSION };
 
 const CAPABILITIES_META = "io.modelcontextprotocol/clientCapabilities";
 const SERVER_INFO_META = "io.modelcontextprotocol/serverInfo";
 
-// The MCP SDK 1.x's list of supported versions, which its transport checks
-// the MCP-Protocol-Version header against: the same module the app's own
-// copy of the SDK loaded (loaded only if it's installed).
-const v1Types: { SUPPORTED_PROTOCOL_VERSIONS?: string[] } | undefined = await import(
-  /* webpackIgnore: true */ String("@modelcontextprotocol/sdk/types.js")
-).catch(() => undefined);
+// The MCP SDK 1.x's lists of supported versions, which its transport checks
+// the MCP-Protocol-Version header against: in each copy of its types module
+// the app may have loaded, ESM and CommonJS (optional.ts), if it's installed.
+type V1Types = { SUPPORTED_PROTOCOL_VERSIONS?: string[] };
+const v1Types = () => optionalModules<V1Types>("@modelcontextprotocol/sdk/types.js");
 
 // The list methods whose 2026-07-28 results carry ttlMs and cacheScope.
 const LISTS = new Set(["tools/list", "prompts/list", "resources/list", "resources/templates/list"]);
@@ -66,7 +65,11 @@ export function takesTasks(meta: Record<string, unknown> | undefined, extra?: un
   return !!ext && typeof ext === "object" && !Array.isArray(ext) && TASKS_EXTENSION in (ext as object);
 }
 
-function declaresEvents(meta: Record<string, unknown> | undefined): boolean {
+// declaresEvents: the request's client declares MCP Events, and isn't a
+// harness Wakeshift wakes itself (BRIDGED_CLIENTS: its name wins).
+function declaresEvents(meta: Record<string, unknown> | undefined, userAgent: string): boolean {
+  const info = meta?.["io.modelcontextprotocol/clientInfo"] as { name?: unknown } | undefined;
+  if (bridgedClient(typeof info?.name === "string" ? info.name : "", userAgent)) return false;
   const ext = (meta?.[CAPABILITIES_META] as { extensions?: unknown } | undefined)?.extensions;
   return !!ext && typeof ext === "object" && EXTENSION_KEY in ext;
 }
@@ -79,8 +82,10 @@ export function serveStateless(host: Host, opts: { bridgedOnly?: readonly string
   const v1 = host.version === 1;
   if (v1) {
     // Mutating the SDK's own list is how 1.x can be taught a version.
-    const versions = v1Types?.SUPPORTED_PROTOCOL_VERSIONS;
-    if (Array.isArray(versions) && !versions.includes(STATELESS_VERSION)) versions.unshift(STATELESS_VERSION);
+    for (const types of v1Types()) {
+      const versions = types.SUPPORTED_PROTOCOL_VERSIONS;
+      if (Array.isArray(versions) && !versions.includes(STATELESS_VERSION)) versions.unshift(STATELESS_VERSION);
+    }
   }
   const wrap = (method: string, h: Handler): Handler =>
     (async (request: any, raw: any) => {
@@ -88,7 +93,7 @@ export function serveStateless(host: Host, opts: { bridgedOnly?: readonly string
       const req = host.req(raw);
       if (!is2026(req) || !result || typeof result !== "object") return result;
       let out = result;
-      if (method === "tools/list" && hidden.size > 0 && declaresEvents(req.meta) && Array.isArray(out.tools)) {
+      if (method === "tools/list" && hidden.size > 0 && declaresEvents(req.meta, req.header("user-agent") || "") && Array.isArray(out.tools)) {
         out = { ...out, tools: out.tools.filter((t: any) => !hidden.has(t?.name)) };
       }
       if (!v1) {
@@ -105,25 +110,40 @@ export function serveStateless(host: Host, opts: { bridgedOnly?: readonly string
       if (LISTS.has(method) && out.ttlMs === undefined) return { ...out, ttlMs: 0, cacheScope: "private" };
       return out;
     }) as Handler;
-  const wraps = (method: string) => v1 || method === "tools/list";
-  for (const [method, h] of handlers) if (wraps(method)) handlers.set(method, wrap(method, h));
-  const set = handlers.set.bind(handlers);
-  handlers.set = (method: string, h: Handler) => set(method, wraps(method) ? wrap(method, h) : h);
-  if (!v1) return;
+  // Outside every other wrapping, on every method (1.x) or tools/list (2.x),
+  // now and whenever a handler is set again.
+  wrapAll(handlers, (method, h) => (v1 || method === "tools/list" ? wrap(method, h) : h));
 
-  const low = (host.server as unknown as { server: any }).server;
-  low.setRequestHandler(z.object({ method: z.literal("server/discover"), params: z.any().optional() }) as any, async () => {
-    const out: Record<string, unknown> = {
-      resultType: RESULT_TYPE,
-      supportedVersions: [...(v1Types?.SUPPORTED_PROTOCOL_VERSIONS ?? [STATELESS_VERSION])],
-      // Cacheable results carry these on 2026-07-28 (Claude Code refuses a
-      // server/discover without them, and connects the old way).
-      ttlMs: 0,
-      cacheScope: "public",
-      capabilities: low.getCapabilities(),
-      _meta: { [SERVER_INFO_META]: low._serverInfo },
+  // server/discover: the server's capabilities, the events keys included.
+  // A vendor's own handler (set before attach or after) keeps its answer,
+  // with the capabilities it leaves out added; 1.x without one gets
+  // Wakeshift's; 2.x without one answers itself, from the same capabilities.
+  const low = (host.server as unknown as { server: any }).server ?? host.server;
+  const withCapabilities = (out: any) => {
+    const caps = host.serverCapabilities();
+    if (!out || typeof out !== "object" || !caps) return out;
+    const theirs = out.capabilities && typeof out.capabilities === "object" ? out.capabilities : {};
+    const merged: Record<string, unknown> = { ...caps, ...theirs };
+    const ext = { ...(caps.extensions as object | undefined), ...(theirs.extensions as object | undefined) };
+    if (Object.keys(ext).length > 0) merged.extensions = ext;
+    return { ...out, capabilities: merged };
+  };
+  wrapMethod(handlers, "server/discover", (inner) => {
+    if (inner) return async (request: any, raw: any) => withCapabilities(await inner(request, raw));
+    if (!v1) return undefined;
+    return async () => {
+      const out: Record<string, unknown> = {
+        resultType: RESULT_TYPE,
+        supportedVersions: [...(v1Types()[0]?.SUPPORTED_PROTOCOL_VERSIONS ?? [STATELESS_VERSION])],
+        // Cacheable results carry these on 2026-07-28 (Claude Code refuses a
+        // server/discover without them, and connects the old way).
+        ttlMs: 0,
+        cacheScope: "public",
+        capabilities: low.getCapabilities(),
+        _meta: { [SERVER_INFO_META]: low._serverInfo },
+      };
+      if (low._instructions) out.instructions = low._instructions;
+      return out;
     };
-    if (low._instructions) out.instructions = low._instructions;
-    return out as any;
   });
 }

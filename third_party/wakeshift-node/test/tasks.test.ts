@@ -24,22 +24,22 @@ interface Req {
 function fakeCore(reply: (path: string, body: any) => any = () => ({})) {
   const reqs: Req[] = [];
   const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
-    const path = String(url).replace("http://core.test/api/apps/v1", "");
+    const path = String(url).replace("https://core.test/api/apps/v1", "");
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     reqs.push({ path, body });
     return new Response(JSON.stringify(reply(path, body) ?? {}), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
-  return { reqs, wake: new Wakeshift({ key: KEY, core: "http://core.test", fetch: fakeFetch }) };
+  return { reqs, wake: new Wakeshift({ key: KEY, core: "https://core.test", fetch: fakeFetch }) };
 }
 
 // app is the golden file's app: one event, identify naming u1, and a
 // wrapped tool, join, that subscribes nothing. The wait tool is on unless
 // wait is false (attach's default is off).
 function app(wake: Wakeshift, define = true, wait = true) {
-  if (define) wake.defineEvent("chat.message", { description: "A new message", args: z.object({ channel: z.string() }), payload: z.object({ text: z.string() }), text: (m) => m.text });
+  if (define) wake.defineEvent("chat.message", { description: "A new message", args: z.object({ channel: z.string() }), payload: z.object({ text: z.string() }), text: (m) => m.text, public: true });
   const server = new McpServer({ name: "chat", version: "1.0.0" });
-  const attached = wake.attach(server, { identify: () => ({ user: "u1" }), ...(wait ? { tools: { wait: { enabled: true } } } : {}) });
-  server.registerTool("join", { description: "Join", inputSchema: attached.inputs({}) }, attached.events("join", async () => "joined"));
+  const attached = wake.attach(server, { identify: () => ({ user: "u1" }), ...(wait ? { builtinTools: { wait: true } } : {}) });
+  attached.registerTool("join", { description: "Join", inputSchema: {}, subscribes: [] }, async () => "joined");
   return server;
 }
 
@@ -208,11 +208,11 @@ test("a stateless HTTP server serves the wait tool and tasks/get", async () => {
 
 test("tools registered after attach: the wait tool and the lists' cache fields are still there", async () => {
   const { wake } = fakeCore();
-  wake.defineEvent("chat.message", { description: "x", args: z.object({ channel: z.string() }), payload: z.object({ t: z.string() }), text: () => "x" });
+  wake.defineEvent("chat.message", { description: "x", args: z.object({ channel: z.string() }), payload: z.object({ t: z.string() }), text: () => "x", public: true });
   const rpc = await rawRpc(() => {
     const server = new McpServer({ name: "chat", version: "1.0.0" });
-    const attached = wake.attach(server, { tools: { subscribe: { enabled: false }, list: { enabled: false }, unsubscribe: { enabled: false }, wait: { enabled: true } } });
-    server.registerTool("join", { description: "Join", inputSchema: attached.inputs({}) }, attached.events("join", async () => "joined"));
+    const attached = wake.attach(server, { builtinTools: { subscribe: false, list: false, unsubscribe: false, wait: true } });
+    attached.registerTool("join", { description: "Join", inputSchema: {}, subscribes: [] }, async () => "joined");
     return server;
   });
   const list = (await rpc("tools/list", { _meta: golden.lists[0].meta })).result;

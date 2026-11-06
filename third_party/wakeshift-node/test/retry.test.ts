@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Wakeshift, WakeshiftError } from "../src/index.js";
+import { Wakeshift, APIError } from "../src/index.js";
 import { retryRefused } from "../src/retry.js";
 
 const KEY = `wst_test_ci-bot_${Buffer.from("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex").toString("base64url")}`;
@@ -30,7 +30,7 @@ function scripted(answers: (() => Response)[]) {
 
 test("a POST the load balancer refused is sent again, body and all, and gets through", async () => {
   const s = scripted([gfe500, () => json(200, { forgotten: true })]);
-  const wake = new Wakeshift({ key: KEY, core: "http://core.test", fetch: retryRefused(s.fetchFn, [1, 1]) });
+  const wake = new Wakeshift({ key: KEY, core: "https://core.test", fetch: retryRefused(s.fetchFn, [1, 1]) });
   // The SDK wraps whatever fetch it's given: the wrapper above only makes the pauses short.
   const r = await wake.forgetUser("ada");
   assert.equal(r, true);
@@ -40,12 +40,12 @@ test("a POST the load balancer refused is sent again, body and all, and gets thr
 
 test("Wakeshift's own errors aren't retried; a refusal that keeps coming is the error", async () => {
   const own = scripted([() => json(500, { error: { code: "internal", message: "x" } })]);
-  await assert.rejects(new Wakeshift({ key: KEY, core: "http://core.test", fetch: own.fetchFn }).forgetUser("ada"), (e: unknown) => e instanceof WakeshiftError && e.status === 500);
+  await assert.rejects(new Wakeshift({ key: KEY, core: "https://core.test", fetch: own.fetchFn }).forgetUser("ada"), (e: unknown) => e instanceof APIError && e.status === 500);
   assert.equal(own.bodies.length, 1);
 
   const always = scripted([gfe500]);
   const f = retryRefused(always.fetchFn, [1, 1]);
-  const resp = await f("http://core.test/api/apps/v1/x", { method: "POST", body: "{}" });
+  const resp = await f("https://core.test/api/apps/v1/x", { method: "POST", body: "{}" });
   assert.equal(resp.status, 500);
   assert.equal(always.bodies.length, 3);
   assert.match(await resp.text(), /Server Error/, "the last refusal's body is still readable");
@@ -61,7 +61,7 @@ test("which answers are retried", async () => {
   ];
   for (const [name, method, answer, want] of cases) {
     const s = scripted([answer]);
-    await retryRefused(s.fetchFn, [1, 1])("http://core.test/x", { method, ...(method === "POST" ? { body: "{}" } : {}) });
+    await retryRefused(s.fetchFn, [1, 1])("https://core.test/x", { method, ...(method === "POST" ? { body: "{}" } : {}) });
     assert.equal(s.bodies.length, want, name);
   }
 });
@@ -69,7 +69,7 @@ test("which answers are retried", async () => {
 test("a retry's pause ends when the request's signal does", async () => {
   const s = scripted([gfe500]);
   const ctl = new AbortController();
-  const p = retryRefused(s.fetchFn, [60_000])("http://core.test/x", { signal: ctl.signal });
+  const p = retryRefused(s.fetchFn, [60_000])("https://core.test/x", { signal: ctl.signal });
   setTimeout(() => ctl.abort(new Error("gave up")), 10);
   await assert.rejects(p, /gave up/);
 });

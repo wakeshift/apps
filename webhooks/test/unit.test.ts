@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { checkSignature, githubText, toEvent } from "../src/events.js";
 import { Links } from "../src/links.js";
-import { askLine, connectedText, esc, linkPage, liveConnection, shq, skippedText } from "../src/page.js";
+import { askLine, builders, connectedText, esc, homePage, linkPage, liveConnection, shq, skippedText } from "../src/page.js";
 import { pickerHtml, SCRIPT_PATH, STYLE_PATH } from "../src/agentpicker/picker.js";
 import { inline, legalDocsFor, markdown, siteFor, WAKESHIFT } from "../src/legal.js";
 import { State } from "../src/state.js";
@@ -2201,4 +2201,11 @@ test("legal: the documents state the limits in use, the preview kept and how a p
   const a = await instance(t, await testDatabase(t), { limits: { perHour: 9, perDay: 90, linksPerHour: 4 } });
   const html = await (await fetch(a.base + "/terms")).text();
   assert.ok(html.includes("9 posts an hour and 90 a day") && html.includes("4 new links an hour"));
+});
+
+test("pages: MCP builders are pointed to the quickstart, counted only where analytics loads", () => {
+  const home = homePage("n", { perHour: 60, perDay: 500, idleDays: 7 });
+  assert.ok(home.includes(builders(true)), "the home page's pointer");
+  assert.match(builders(true), /href="[^"]+\/docs\/quickstart" data-analytics="cta_clicked" data-analytics-cta="quickstart"/);
+  assert.doesNotMatch(builders(false), /data-analytics/);
 });

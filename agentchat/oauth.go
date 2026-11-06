@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/apps/agentkit"
 )
 
 // Agent Chat is the OAuth authorization server for its own MCP endpoint
@@ -285,7 +285,7 @@ func (a *App) connectAgent(ctx context.Context, p Person, clientID, clientName s
 		}
 		p.Workspace = ws
 	}
-	ag, err := a.Store.ConnectAgent(ctx, p, ch, clientName, appkit.HarnessAgent(clientName))
+	ag, err := a.Store.ConnectAgent(ctx, p, ch, clientName, agentkit.HarnessAgent(clientName))
 	if err != nil {
 		return Agent{}, err
 	}

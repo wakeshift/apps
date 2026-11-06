@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/wakeshift/apps/agentkit"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // connectedAgents looks agents up at once, alongside answers it already
@@ -42,7 +41,7 @@ func TestConnectedAgentsConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &App{Kit: &appkit.App{ID: "agentchat", Key: key, Core: core.URL, MCPURL: "https://chat.example.test/mcp"}}
+	a := &App{Kit: agentkit.TestApp("agentchat", key, core.URL, "https://chat.example.test/mcp")}
 
 	// Unique IDs, so other tests' cached answers don't interfere.
 	prefix := fmt.Sprintf("race-%d-", time.Now().UnixNano())

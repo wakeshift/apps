@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/apps/agentkit"
 )
 
 const testChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
@@ -160,7 +160,7 @@ func TestAuthorizePage(t *testing.T) {
 func TestAuthorizeFormKey(t *testing.T) {
 	a := newAuthorizeApp(t, true)
 	_, key, _ := ed25519.GenerateKey(nil)
-	other := &Server{Kit: &appkit.App{Key: key}}
+	other := &Server{Kit: agentkit.TestApp("g", key, "", "")}
 	tok := other.signForm(authorizeForm{Query: "x", Nonce: "AAAAAAAAAAAAAAAAAAAAAA", Expires: time.Now().Add(time.Minute).Unix()})
 	if f, ok := other.openForm(tok); !ok || f.Query != "x" {
 		t.Fatal("a signed form didn't open")
@@ -189,7 +189,7 @@ func TestAuthorizeWithoutLegal(t *testing.T) {
 // of it always breaks it.
 func TestSignaturesAreCanonical(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(nil)
-	s := &Server{Kit: &appkit.App{Key: key}}
+	s := &Server{Kit: agentkit.TestApp("g", key, "", "")}
 	tok := s.signForm(authorizeForm{Query: "x", Nonce: "AAAAAAAAAAAAAAAAAAAAAA", Expires: time.Now().Add(time.Minute).Unix()})
 	if _, ok := s.openForm(tok); !ok {
 		t.Fatal("a signed form didn't open")

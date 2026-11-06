@@ -7,14 +7,14 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/agentkit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // InboxNotes changes only the results of the tools an app names (or every
 // tool's, if it says AllTools), and refuses to be set up for none.
 func TestMiddlewareIsOptIn(t *testing.T) {
 	called := 0
-	agent := func(context.Context, *mcp.CallToolRequest) (*appkit.Agent, error) {
+	agent := func(context.Context, *mcp.CallToolRequest) (*wakeshift.Agent, error) {
 		called++
 		return nil, context.Canceled
 	}

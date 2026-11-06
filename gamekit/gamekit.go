@@ -30,15 +30,15 @@ import (
 	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/agentpicker"
 	"github.com/wakeshift/apps/legal"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Server is a game app's server.
 type Server struct {
-	Kit          *appkit.App
+	Kit          *agentkit.App
 	Name, Title  string // the MCP implementation's name ("secret-agent") and the game's title
 	Instructions string // the MCP server's instructions
-	Manifest     appkit.Manifest
+	Manifest     wakeshift.Manifest
 	// Follow is the follow-along page's view of a game for one player
 	// (Player.Key): ErrNoGame if the game is gone.
 	Follow func(ctx context.Context, game, player string) (View, error)
@@ -143,11 +143,11 @@ type Server struct {
 	// Sign-in's per-address limits (oauth.go); the *Limit fields set them
 	// for tests (0: the default).
 	limitsOnce                              sync.Once
-	registers, sessions, tokens             *appkit.RateLimiter
+	registers, sessions, tokens             *agentkit.RateLimiter
 	registerLimit, sessionLimit, tokenLimit int
 	eventsOnce                              sync.Once
-	updates                                 *appkit.DefinedEvent[UpdateArgs, Update] // events.go
-	attached                                *appkit.Attachment                       // Handler's, for AddTool
+	updates                                 *wakeshift.Event[UpdateArgs, Update] // events.go
+	attached                                *wakeshift.Attachment                // Handler's, for AddTool
 }
 
 // ParseWorkspaces reads a comma-separated list of workspace IDs (UUIDs)
@@ -235,16 +235,16 @@ func (s *Server) Handler(addTools func(*mcp.Server)) http.Handler {
 	s.events()
 	// Wait: Claude Code's wait tool, which follows a conversation across
 	// --continue (docs/harnesses.md, "Claude Code: MCP tasks as a wake path").
-	attached := s.Kit.Attach(srv, appkit.AttachOptions{Identify: s.identify, Tools: appkit.Tools{Wait: appkit.Wait{Enabled: true}}, Events: appkit.EventsOptions{Native: s.houseCall}})
 	// join is what subscribes a conversation (game.update's Authorize
 	// refuses everyone but a client that subscribes itself, which uses MCP
 	// Events, not this tool), so subscribe_events isn't offered.
-	srv.RemoveTools("subscribe_events")
+	attached := s.Kit.Attach(srv, wakeshift.AttachOptions{Identify: s.identify, IsNativeClient: s.houseCall,
+		BuiltinTools: wakeshift.BuiltinTools{Wait: true, DisableSubscribe: true}})
 	s.attached = attached
 	addTools(srv)
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", appkit.LogMCP(appkit.RequireBearer(s.verify, s.PublicURL()+"/.well-known/oauth-protected-resource")(attached.Wrap(h))))
+	mux.Handle("/mcp", agentkit.LogMCP(wakeshift.RequireBearer(s.verify, s.PublicURL()+"/.well-known/oauth-protected-resource")(attached.Handler(h))))
 	// Players sign in with no account, agreeing to the game's terms on its
 	// authorize page (oauth.go, authorize.go).
 	s.oauthRoutes(mux)
@@ -269,11 +269,11 @@ func (s *Server) Handler(addTools func(*mcp.Server)) http.Handler {
 
 // houseCall says whether a tool call comes from a house agent (house.go):
 // it subscribes to game.update with MCP Events itself.
-func (s *Server) houseCall(_ context.Context, req *mcp.CallToolRequest) bool {
-	if s.HouseSecret == "" || req == nil || req.Extra == nil || req.Extra.Header == nil {
+func (s *Server) houseCall(_ context.Context, r wakeshift.Request) bool {
+	if s.HouseSecret == "" || r.Header == nil {
 		return false
 	}
-	_, ok := s.verifyHouse(req.Extra.Header)
+	_, ok := s.verifyHouse(r.Header)
 	return ok
 }
 
@@ -298,7 +298,7 @@ func (s *Server) PublicPages() []string {
 func (s *Server) PublicURL() string { return strings.TrimSuffix(s.Kit.MCPURL, "/mcp") }
 
 // Agent is the app acting for the calling agent.
-func (s *Server) Agent(ctx context.Context, req *mcp.CallToolRequest) (*appkit.Agent, error) {
+func (s *Server) Agent(ctx context.Context, req *mcp.CallToolRequest) (*wakeshift.Agent, error) {
 	if req.Extra == nil {
 		return nil, errors.New("not signed in")
 	}
@@ -307,7 +307,7 @@ func (s *Server) Agent(ctx context.Context, req *mcp.CallToolRequest) (*appkit.A
 
 // agentOf is the app acting for the signed-in player's agent, in the
 // player's workspace.
-func (s *Server) agentOf(ctx context.Context, ti *auth.TokenInfo) (*appkit.Agent, error) {
+func (s *Server) agentOf(ctx context.Context, ti *auth.TokenInfo) (*wakeshift.Agent, error) {
 	if ti == nil {
 		return nil, errors.New("not signed in")
 	}
@@ -317,16 +317,15 @@ func (s *Server) agentOf(ctx context.Context, ti *auth.TokenInfo) (*appkit.Agent
 		return nil, errors.New("not signed in")
 	}
 	ag, err := s.Kit.ActAs(ctx, ws, agent)
-	if appkit.IsCode(err, "no_grant") {
+	if wakeshift.IsCode(err, "no_grant") {
 		return nil, fmt.Errorf("%s isn't allowed for this agent any more; sign in again (in Claude Code: /mcp, then Authenticate)", s.Title)
 	}
 	return ag, err
 }
 
-// sessionIn is a tool's input with only Wakeshift's arguments.
-type sessionIn struct {
-	appkit.WakeArgs
-}
+// sessionIn is a tool's input with only Wakeshift's arguments, which
+// Wakeshift adds.
+type sessionIn struct{}
 
 // AddWait adds wait_for_messages, for harnesses nothing can wake, and
 // unwatch, which stops this conversation being woken (join again to be
@@ -335,25 +334,25 @@ func (s *Server) AddWait(srv *mcp.Server) {
 	agentkit.WaitTool{Agent: s.Agent, App: s.Title,
 		Reply: "Answer the moderator and players with " + s.Title + "'s tools."}.Add(srv)
 	AddTool(s, srv, &mcp.Tool{Name: "unwatch", Description: "Stop the game waking this conversation. Pass session_key (from join); a Codex thread needs nothing. Join again to be woken once more."},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			if call.Agent == nil {
 				return nil, nil, errors.New("not signed in")
 			}
-			if _, err := s.events().Unsubscribe(ctx, call, UpdateArgs{}); err != nil && !appkit.IsCode(err, "unknown_session") {
+			if _, err := s.events().Unsubscribe(ctx, call, UpdateArgs{}); err != nil && !wakeshift.IsCode(err, "unknown_session") {
 				return nil, nil, err
 			}
 			out := map[string]any{"note": agentkit.UnwatchNote}
 			if call.Native {
 				return nil, out, nil
 			}
-			session, err := s.conversation(ctx, call)
+			session, _, err := s.conversation(ctx, call)
 			if err != nil {
 				return nil, nil, err
 			}
 			if session == "" {
 				return nil, nil, errors.New("pass session_key: the one join gave you")
 			}
-			if err := agentkit.Unwatch(ctx, call.Agent, session); appkit.IsCode(err, "unknown_session") {
+			if err := agentkit.Unwatch(ctx, call.Agent, session); wakeshift.IsCode(err, "unknown_session") {
 				return nil, nil, fmt.Errorf("you have no session %s", session)
 			} else if err != nil {
 				return nil, nil, err
@@ -393,12 +392,4 @@ func Shuffle[T any](s []T) {
 		j := RandInt(i + 1)
 		s[i], s[j] = s[j], s[i]
 	}
-}
-
-// codexThreadOf is the Codex thread a tool call came from, if any.
-func codexThreadOf(req *mcp.CallToolRequest) string {
-	if req.Params == nil {
-		return ""
-	}
-	return appkit.CodexThread(req.Params.GetMeta())
 }

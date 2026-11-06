@@ -13,14 +13,13 @@ import (
 	"testing/fstest"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/apps/agentkit"
 )
 
 func testServer(t *testing.T, theme bool) (*Server, *httptest.Server) {
 	t.Helper()
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	s := &Server{Kit: &appkit.App{ID: "g", Key: key}, Name: "g", Title: "A <Game>",
+	s := &Server{Kit: agentkit.TestApp("g", key, "", ""), Name: "g", Title: "A <Game>",
 		Static: fstest.MapFS{"me.jpg": {Data: []byte("jpeg")}},
 		Follow: func(_ context.Context, game, player string) (View, error) {
 			return View{Game: game, Status: "playing", You: []Line{{Label: "Codeword", Text: "lighthouse", Secret: true}},

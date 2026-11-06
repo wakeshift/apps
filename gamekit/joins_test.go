@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 type joinRow struct {
@@ -33,8 +33,8 @@ func readJoins(t *testing.T, s *Server) []joinRow {
 
 func joinAs(t *testing.T, s *Server, ctx context.Context, workspace, agent, session string) Player {
 	t.Helper()
-	j := joining{workspace: workspace, agent: agent, session: session, subscribe: func(context.Context) (appkit.Subscription, error) {
-		return appkit.Subscription{ID: "sub-" + session, User: workspace + "/" + agent}, nil
+	j := joining{workspace: workspace, agent: agent, session: session, subscribe: func(context.Context) (wakeshift.Subscription, error) {
+		return wakeshift.Subscription{ID: "sub-" + session, User: workspace + "/" + agent}, nil
 	}}
 	var seated Player
 	if _, _, err := s.join(ctx, j, func(tx *Tx, g State, p Player) error {

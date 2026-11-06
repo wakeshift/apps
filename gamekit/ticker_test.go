@@ -17,8 +17,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/internal/pgtest"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // kitServer is a kit server on a database of its own whose pool has
@@ -42,7 +43,7 @@ func kitServer(t *testing.T, conns string, core http.Handler) *Server {
 			g.(*testGame).Deadline = now.Add(time.Hour)
 		}}
 	if core != nil {
-		// The manifest appkit sends before the first emit (nothing published yet).
+		// The manifest wakeshift sends before the first emit (nothing published yet).
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/apps/v1/manifest" {
 				w.Header().Set("Content-Type", "application/json")
@@ -53,7 +54,7 @@ func kitServer(t *testing.T, conns string, core http.Handler) *Server {
 		}))
 		t.Cleanup(srv.Close)
 		_, key, _ := ed25519.GenerateKey(rand.Reader)
-		s.Kit = &appkit.App{ID: "g", Key: key, Core: srv.URL}
+		s.Kit = agentkit.TestApp("g", key, srv.URL, "")
 	}
 	return s
 }
@@ -316,12 +317,12 @@ func TestJoinSweptReservation(t *testing.T) {
 	ctx := context.Background()
 	s := kitServer(t, "4", nil)
 	var swept bool
-	j := joining{workspace: "w", agent: "a", session: "s", subscribe: func(context.Context) (appkit.Subscription, error) {
+	j := joining{workspace: "w", agent: "a", session: "s", subscribe: func(context.Context) (wakeshift.Subscription, error) {
 		if !swept {
 			swept = true
 			s.Store.Pool.Exec(ctx, `DELETE FROM seats`) // abandoned, as another join sees it
 		}
-		return appkit.Subscription{ID: "sub-1", User: "w/a"}, nil
+		return wakeshift.Subscription{ID: "sub-1", User: "w/a"}, nil
 	}}
 	var seated []string
 	g, key, err := s.join(ctx, j, func(tx *Tx, g State, p Player) error {
@@ -393,9 +394,9 @@ func TestEndedPlayersAreAwayUntilTheyRejoin(t *testing.T) {
 	status["sub-r2"] = [2]bool{true, true}
 	mu.Unlock()
 	var subscribed int
-	j := joining{workspace: "w1", agent: "a", session: "s", subscribe: func(context.Context) (appkit.Subscription, error) {
+	j := joining{workspace: "w1", agent: "a", session: "s", subscribe: func(context.Context) (wakeshift.Subscription, error) {
 		subscribed++
-		return appkit.Subscription{ID: "sub-r2", User: "w1/a", Created: true}, nil
+		return wakeshift.Subscription{ID: "sub-r2", User: "w1/a", State: wakeshift.SubscriptionCreated}, nil
 	}}
 	g, _, err := s.join(ctx, j, func(*Tx, State, Player) error { t.Fatal("seated again"); return nil })
 	if err != nil {

@@ -9,16 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/gamekit"
 	"github.com/wakeshift/apps/gamekit/gametest"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // spectated sets up a game in each phase, with its codeword, roles and
 // votes, behind a server.
 func spectated(t *testing.T) (*App, *httptest.Server, map[string]*game) {
 	t.Helper()
-	app := &App{Kit: &appkit.App{ID: "secretagent", MCPURL: "https://sa.example.test/mcp"}}
+	app := &App{Kit: agentkit.TestApp("secretagent", nil, "", "https://sa.example.test/mcp")}
 	app.Store, _ = gametest.Store(t)
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)
@@ -146,7 +146,7 @@ func TestSpectatorsSeeNoSecrets(t *testing.T) {
 
 // With no game on, the landing page and the listing say so.
 func TestNoGamesOn(t *testing.T) {
-	app := &App{Kit: &appkit.App{ID: "secretagent", MCPURL: "https://sa.example.test/mcp"}}
+	app := &App{Kit: agentkit.TestApp("secretagent", nil, "", "https://sa.example.test/mcp")}
 	app.Store, _ = gametest.Store(t)
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)

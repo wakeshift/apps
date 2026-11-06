@@ -13,6 +13,7 @@ import { Server, createMcpHandler } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import * as z4 from "zod/v4";
 import { Wakeshift } from "../src/index.js";
+import { quiet, warningsInto } from "./logs.js";
 import { attachMastra, supportedMastra } from "../src/mastra.js";
 import { EXTENSION_KEY } from "../src/spec.js";
 import { WAIT_TOOL } from "../src/tasks.js";
@@ -32,13 +33,13 @@ function fakeCore(answers: Record<string, (body: any) => unknown> = {}) {
   const reqs: CoreReq[] = [];
   const warnings: string[] = [];
   const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
-    const path = String(url).replace("http://core.test/api/apps/v1", "");
+    const path = String(url).replace("https://core.test/api/apps/v1", "");
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     reqs.push({ path, body });
     const out = answers[path]?.(body) ?? {};
     return new Response(JSON.stringify(out), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
-  const wake = new Wakeshift({ key: `wst_test_chat_${seed}`, core: "http://core.test", fetch: fakeFetch, onWarning: (m) => warnings.push(m) });
+  const wake = new Wakeshift({ key: `wst_test_chat_${seed}`, core: "https://core.test", fetch: fakeFetch, logger: warningsInto(warnings) });
   return { reqs, warnings, wake };
 }
 
@@ -89,6 +90,7 @@ function chatApp(wake: Wakeshift) {
     args: z.object({ channel: z.string() }),
     payload: z.object({ from: z.string(), text: z.string() }),
     text: (m) => `${m.from}: ${m.text}`,
+    public: true,
   });
 }
 
@@ -126,7 +128,7 @@ function watchApp(answers: Record<string, (body: any) => unknown> = {}, ownEvent
     ...answers,
   });
   const message = chatApp(core.wake);
-  const attached = attachMastra(core.wake, { identify: (ctx) => ({ user: ctx.http?.authInfo?.clientId }), tools: { wait: { enabled: true } } });
+  const attached = attachMastra(core.wake, { identify: (ctx) => ({ user: ctx.http?.authInfo?.clientId }), builtinTools: { wait: true } });
   let failNext = false;
   const watch: MastraTool = {
     description: "Watch a channel",
@@ -138,7 +140,12 @@ function watchApp(answers: Record<string, (body: any) => unknown> = {}, ownEvent
     }),
   };
   const ping: MastraTool = { description: "Ping", inputSchema: z4.object({}), execute: async () => "pong" };
-  const server = attached.serve(new MCPServer({ watch, ping }, ownEvents));
+  const peek: MastraTool = {
+    description: "Peek at a channel",
+    inputSchema: attached.inputs(z4.object({ channel: z4.string() })),
+    execute: attached.events("peek", { subscribes: [] }, async ({ channel }: { channel: string }) => `Quiet in ${channel}.`),
+  };
+  const server = attached.serve(new MCPServer({ watch, ping, peek }, ownEvents));
   return { ...core, rpc: serve(server), server, watch, failNext: () => (failNext = true) };
 }
 
@@ -153,9 +160,16 @@ test("mastra: tools/list has the app's tools, Wakeshift's own, and the wait tool
   // It declares chat.message: tools/list says it's how the app notifies, in the event's words.
   assert.equal(
     watch.description,
-    "Watch a channel This tool is how Chat notifies you in this conversation of this event: A new message in a channel. Chat delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it.",
+    "Watch a channel. This tool is how Chat notifies you in this conversation of this event: A new message in a channel. Chat delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it.",
   );
   assert.equal(listed.result.tools.find((t: any) => t.name === "ping").description, "Ping");
+  // Compact scoping: a tool that subscribes to nothing lists only session_key, and still takes all three.
+  const peek = listed.result.tools.find((t: any) => t.name === "peek");
+  assert.deepEqual(Object.keys(peek.inputSchema.properties).sort(), ["channel", "session_key"]);
+  assert.deepEqual(Object.keys(watch.inputSchema.properties).sort(), ["channel", "conversation_id", "harness", "session_key"]);
+  const peeked = await rpc("tools/call", { name: "peek", arguments: { channel: "c", harness: "claude-code", conversation_id: "x" } }, { user: "ada" });
+  assert.equal(peeked.error, undefined, JSON.stringify(peeked.error));
+  assert.ok(JSON.stringify(peeked.result.content).includes("Quiet in c."));
   const sub = listed.result.tools.find((t: any) => t.name === "subscribe_events");
   assert.deepEqual(sub.inputSchema.properties.event.enum, ["chat.message"]);
   // Wakeshift's own tools and the wait tool carry every SDK's annotations.
@@ -166,7 +180,7 @@ test("mastra: tools/list has the app's tools, Wakeshift's own, and the wait tool
   assert.equal(listed.result.cacheScope, "private");
 
   // A client that speaks MCP Events subscribes natively: no subscribe_events, no wait tool.
-  const native = await rpc("tools/list", {}, { caps: { extensions: { [EXTENSION_KEY]: {} } } });
+  const native = await rpc("tools/list", {}, { caps: { extensions: { [EXTENSION_KEY]: {} } }, client: "acme-agent" });
   const nativeNames = native.result.tools.map((t: any) => t.name);
   assert.ok(!nativeNames.includes("subscribe_events"));
   assert.ok(!nativeNames.includes(WAIT_TOOL));
@@ -258,11 +272,12 @@ test("mastra: serve takes MCPServer only, once, and checks @mastra/mcp's version
   for (const v of ["2.6.9", "1.9.0", "3.0.0", "x"]) assert.ok(!supportedMastra(v), v);
 });
 
-test("mastra: attachMastra needs events, and the tools it names", () => {
-  const { wake } = fakeCore();
-  assert.throws(() => attachMastra(wake), /attachMastra needs at least one event/);
+test("mastra: attachMastra with no events logs no_events; it refuses unknown options and values", () => {
+  const { wake, warnings } = fakeCore();
+  attachMastra(wake);
+  assert.match(warnings.join("\n"), /came before any defineEvent/);
   chatApp(wake);
-  assert.throws(() => attachMastra(wake, { tools: ["subscribe" as any] }), /attachMastra's tools names "subscribe"/);
+  assert.throws(() => attachMastra(wake, { builtinTools: { subcribe: false } as any }), /subcribe/);
 });
 
 test("mastra: a server Wakeshift can't attach to is served without it, with one warning", async () => {

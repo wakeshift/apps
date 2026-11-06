@@ -1,6 +1,6 @@
 // Package appkey reads and writes app keys: the app's
 // Ed25519 private key, as the console shows it once. The core
-// (internal/apps) and the Go SDK (pkg/appkit) share it; the Node and
+// (internal/apps) and the Go SDK (pkg/wakeshift) share it; the Node and
 // Python SDKs implement the same rules, and all of them test against
 // sdk/typescript/test/app-keys.json.
 //

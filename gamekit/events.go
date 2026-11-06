@@ -7,9 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/auth"
-
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Events: game.update, one personal event for everything said in the games
@@ -60,28 +58,31 @@ func updateText(u Update, _ UpdateArgs) string {
 // the same for every conversation of the agent), and the app acting for
 // it (agentOf). A conversation's game.update subscription belongs to that
 // user, and so does a native client's.
-func (s *Server) identify(ctx context.Context, ti *auth.TokenInfo) (appkit.Identity, error) {
-	ag, err := s.agentOf(ctx, ti)
-	if err != nil {
-		return appkit.Identity{}, err
+func (s *Server) identify(ctx context.Context, r wakeshift.Request) (wakeshift.Identity, error) {
+	if r.Token == nil {
+		return wakeshift.Identity{}, nil
 	}
-	return appkit.Identity{User: ag.User(), Agent: ag}, nil
+	ag, err := s.agentOf(ctx, r.Token)
+	if err != nil {
+		return wakeshift.Identity{}, err
+	}
+	return wakeshift.Identity{User: ag.User(), Agent: ag}, nil
 }
 
 // PlayerUser is who a seated player's subscriptions belong to: its agent's
-// user (appkit.Agent.User), in the workspace Wakeshift keeps for the
+// user (wakeshift.Agent.User), in the workspace Wakeshift keeps for the
 // player's session.
 func PlayerUser(p Player) string { return p.Workspace + "/" + p.Agent }
 
 // Updates is game.update, the event joining a game subscribes the
-// conversation to: a join tool declares it (appkit.Subscribes).
-func (s *Server) Updates() *appkit.DefinedEvent[UpdateArgs, Update] { return s.events() }
+// conversation to: a join tool declares it (wakeshift.Subscribes).
+func (s *Server) Updates() *wakeshift.Event[UpdateArgs, Update] { return s.events() }
 
 // events defines game.update (once per server): before the manifest is
 // published (Start) and before Attach (Handler).
-func (s *Server) events() *appkit.DefinedEvent[UpdateArgs, Update] {
+func (s *Server) events() *wakeshift.Event[UpdateArgs, Update] {
 	s.eventsOnce.Do(func() {
-		e, err := appkit.DefineEvent(s.Kit, "game.update", appkit.EventDef[UpdateArgs, Update]{
+		e, err := wakeshift.DefineEvent(s.Kit.Client, "game.update", wakeshift.EventDef[UpdateArgs, Update]{
 			Title: s.Title + " game updates",
 			Description: "The moderator or another player spoke in a " + s.Title + " game you're seated in " +
 				"(players' lines are labeled as theirs; the moderator speaks for the game).",
@@ -100,19 +101,26 @@ func (s *Server) events() *appkit.DefinedEvent[UpdateArgs, Update] {
 
 // authorizeUpdates lets a client that speaks MCP Events subscribe, as its
 // own agent, if it has any open seat (and it marks every such seat native:
-// present while the subscription lives). Other harnesses are refused: join
+// present while the subscription lives). A seat join has reserved but not
+// yet given a handle counts too: join asks before it tells the client to
+// subscribe, and seats it native itself. Other harnesses are refused: join
 // subscribes their conversation.
-func (s *Server) authorizeUpdates(ctx context.Context, sub appkit.Subscriber, _ UpdateArgs) bool {
+func (s *Server) authorizeUpdates(ctx context.Context, sub wakeshift.Subscriber, _ UpdateArgs) (bool, error) {
 	if !sub.Native || sub.User == "" {
-		return false
+		return false, nil
 	}
 	tag, err := s.Store.Pool.Exec(ctx, `UPDATE seats s SET native = true FROM games g
 		WHERE g.id = s.game_id AND g.closed_at IS NULL AND s.workspace || '/' || s.agent = $1 AND s.handle IS NOT NULL`, sub.User)
 	if err != nil {
-		slog.Warn(s.Name+": noting a native subscriber", "err", err)
-		return false
+		return false, err
 	}
-	return tag.RowsAffected() > 0
+	if tag.RowsAffected() > 0 {
+		return true, nil
+	}
+	var reserved bool
+	err = s.Store.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM seats s JOIN games g ON g.id = s.game_id
+		WHERE g.closed_at IS NULL AND s.workspace || '/' || s.agent = $1 AND s.handle IS NULL)`, sub.User).Scan(&reserved)
+	return reserved, err
 }
 
 // nativePlayers are the game's native seats (taken by a client that

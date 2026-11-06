@@ -84,7 +84,7 @@ for (const c of fixture.cases) {
     let unknown = c.unknown_emits ?? 0;
     const unavailable = { status: 503, body: { error: { code: "unavailable", message: "try again" } } };
     const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
-      const path = String(url).replace("http://core.test/api/apps/v1", "");
+      const path = String(url).replace("https://core.test/api/apps/v1", "");
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       let status = 200;
@@ -106,7 +106,7 @@ for (const c of fixture.cases) {
       }
       return new Response(JSON.stringify(out), { status, headers: { "Content-Type": "application/json" } });
     }) as typeof fetch;
-    const wake = new Wakeshift({ key: KEY, core: "http://core.test", fetch: fakeFetch });
+    const wake = new Wakeshift({ key: KEY, core: "https://core.test", fetch: fakeFetch });
     const events = new Map<string, ReturnType<typeof defineSample>>();
     for (const name of c.define) events.set(name, defineSample(wake, name));
     for (const [i, s] of c.steps.entries()) {
@@ -159,7 +159,7 @@ test("concurrent emits Wakeshift doesn't know the event for send one merge, then
   let merges = 0;
   let emits = 0;
   const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
-    const path = String(url).replace("http://core.test/api/apps/v1", "");
+    const path = String(url).replace("https://core.test/api/apps/v1", "");
     let status = 200;
     let out: unknown = { matched: 0 };
     if (path === "/manifest/merge") {
@@ -176,7 +176,7 @@ test("concurrent emits Wakeshift doesn't know the event for send one merge, then
     }
     return new Response(JSON.stringify(out), { status, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
-  const wake = new Wakeshift({ key: KEY, core: "http://core.test", fetch: fakeFetch });
+  const wake = new Wakeshift({ key: KEY, core: "https://core.test", fetch: fakeFetch });
   const chat = defineSample(wake, "chat.message") as any;
   const results = await Promise.all(Array.from({ length: 5 }, () => chat.emit(fixture.emit.arguments, fixture.emit.payload)));
   assert.equal(results.length, 5);

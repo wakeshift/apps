@@ -2,6 +2,170 @@
 
 What changed in each release of `github.com/wakeshift/wakeshift-go`. v0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
+## v0.10.0 (2026-11-06)
+
+One release across the three SDKs (TypeScript 0.11.0, Python 0.10.0, Go v0.10.0), with the same concepts, names and defaults in each. It breaks the Go API where that makes it simpler; nothing changes for an app until it upgrades.
+
+### Breaking
+
+- **Who may subscribe: an event that declares neither `Personal`, `Authorize` nor `Public` can now be subscribed only by your app's own tools.** `subscribe_events` doesn't list it, and native `events/subscribe` and `events/poll` (ChatGPT) are refused for it, on every request; Wakeshift enforces the same (the manifest now says `subscribe: "tools"` or `"any"` for each event). On your first deploy, Wakeshift ends the subscriptions to such an event that were made through `subscribe_events` or natively, and the SDK logs `event_closed` with how many. If that's what you meant (it is for IDs your tool mints: jobs, crawls), do nothing. To keep other paths open, add `Authorize` (gated) or `Public: true` (open to anyone). If you serve ChatGPT through native subscriptions, decide before you deploy.
+
+  ```go
+  // before: open to subscribe_events and native clients
+  wakeshift.DefineEvent(app, "crawl.finished", wakeshift.EventDef[jobArgs, crawl]{Description: "A crawl finished", Text: text})
+  // after: the same definition is tools-only; to keep it open:
+  wakeshift.DefineEvent(wake, "chat.message", wakeshift.EventDef[channel, message]{Description: "A new message", Public: true})
+  ```
+
+  `Public` can't be combined with `Personal` or `Authorize`. For a native caller, `Subscribe` now runs `Authorize` before telling the client what to subscribe to (it used to run only on the client's follow-up), and returns `SubscriptionUnavailable` with a `Reason` (`client_unsupported`, `no_user`, `refused`) instead of a native line the client couldn't act on. An `Authorize` that checks state your tool hasn't written yet refuses: write it first.
+
+- **Construction: `wakeshift.New(opts...)`, with no I/O, replaces `Open` and `OpenOptional`.** It reads `WAKESHIFT_KEY` and `WAKESHIFT_CORE`. A missing key gives a disabled client that runs as a no-op (tools register as written, emits send nothing, `Enabled()` is false), logged once at debug (`no_key`), so a stdio server without a key behaves exactly as before; `Required()` makes it an error. A malformed key, and a core that isn't `https://` (except on localhost), are a `*UsageError` (`CodeConfig`) that never quotes the key. The app's ID is asked of Wakeshift on first need (`AppID(ctx)`) and kept; `New` makes no request.
+
+  ```go
+  // before
+  app, err := appkit.Open(ctx, os.Getenv("WAKESHIFT_KEY"), "")
+  app, err := appkit.OpenOptional(ctx, key, "", log.Printf) // and a nil check before Attach
+  // after
+  wake, err := wakeshift.New() // WithKey, WithCore, WithHTTPClient, WithLogger, WithMaxRetries, Required
+  ```
+
+  `*Client` has no exported fields (`ID`, `Key`, `Core`, `MCPURL`, `HTTP` are gone): use `KeyID()`, `AppID(ctx)` and the options. Printing or logging it never shows the key. `ParseKey` and `DefaultCore` are gone.
+
+- **Tools that subscribe: `wakeshift.AddTool(attached, tool, handler, wakeshift.Subscribes(…))` replaces `mcp.AddTool(srv, tool, wakeshift.Events(attached, handler, …))`.** It's generic in `In` and `Out`, as `mcp.AddTool` is, and delegates to it. Your input is your own type: no embedded `WakeArgs` (Wakeshift adds `session_key`, `harness` and `conversation_id` to tools/list and strips them before your code runs), and no `ToolName`.
+
+  ```go
+  // before
+  type watchIn struct {
+  	Repo string `json:"repo"`
+  	wakeshift.WakeArgs
+  }
+  mcp.AddTool(srv, &mcp.Tool{Name: "watch_ci"}, wakeshift.Events(attached, watch, wakeshift.Subscribes(ciFinished)))
+  // after
+  type watchIn struct {
+  	Repo string `json:"repo"`
+  }
+  wakeshift.AddTool(attached, &mcp.Tool{Name: "watch_ci"}, watch, wakeshift.Subscribes(ciFinished))
+  ```
+
+  A tool registered elsewhere subscribes by name: `AttachOptions{Wrap: map[string][]wakeshift.ToolOption{"watch_ci": {wakeshift.Subscribes(ciFinished)}}}`, and its handler finds the call with `wakeshift.ToolCallFrom(ctx)`. A `Subscribe` to an event the tool doesn't name in `Subscribes` now returns `CodeUndeclaredSubscribe` (it used to warn). `AddTool` panics, as `mcp.AddTool` does, on a built-in tool's name, a schema that names Wakeshift's arguments or its `wakeshift` field, or another client's event.
+
+- **`attached.Handler(next)` replaces `attached.Wrap(next)`, and is required on HTTP.** It strips Wakeshift's arguments before go-sdk or mcp-go parses the request, so no middleware, validation or tool of yours sees them (a receiving middleware you add after `Attach` included), and it makes the HTTP request the unit of identity. For a server built per request, attach each server and put one `wake.Handler(next, opts)` around the handler that builds them; pass `Wrap` and `WrapFunc` to each server's `Attach`, since `wake.Handler` doesn't read them. On a disabled client both return `next`.
+
+- **`Identify(ctx, r wakeshift.Request)` replaces `Identify(ctx, *auth.TokenInfo)`.** It runs lazily, at most once per HTTP request, with that request's own `ctx` (your middleware's values, also on a stateful session) and `r.Token` (nil without one), `r.Header`, `r.ClientName` and `r.Meta`. An error, a panic or a run over 10 seconds now refuses Wakeshift's part of the request (`Subscribe` returns `CodeIdentifyFailed`; your tool's own code still runs) instead of counting as no user. `RequireUser: true` refuses anonymous callers the same way.
+
+  ```go
+  // before
+  Identify: func(_ context.Context, ti *auth.TokenInfo) (appkit.Identity, error) { return appkit.Identity{User: ti.UserID}, nil },
+  // after
+  Identify: func(_ context.Context, r wakeshift.Request) (wakeshift.Identity, error) {
+  	if r.Token == nil {
+  		return wakeshift.Identity{}, nil
+  	}
+  	return wakeshift.Identity{User: r.Token.UserID}, nil
+  },
+  ```
+
+- **`Authorize` returns `(bool, error)`.** An error, a panic or a run over 10 seconds refuses, logged as `authorize_failed` with the error's type only.
+
+  ```go
+  // before
+  Authorize: func(ctx context.Context, s appkit.Subscriber, a repoArgs) bool { return canSee(s.User, a.Repo) },
+  // after
+  Authorize: func(ctx context.Context, s wakeshift.Subscriber, a repoArgs) (bool, error) { return canSee(ctx, s.User, a.Repo) },
+  ```
+
+  `Subscriber.Request` carries the caller's verified token and header.
+
+- **Options:** `AttachOptions{BuiltinTools: wakeshift.BuiltinTools{Wait: true, DisableSubscribe: true}}` replaces `Tools: appkit.Tools{Wait: appkit.Wait{Enabled: true}, Subscribe: appkit.Tool{Disabled: true}}`; `IsNativeClient: func(ctx, wakeshift.Request) bool` replaces `Events: appkit.EventsOptions{Native: …}`. mcp-go takes the same `wakeshift.AttachOptions` (`mcpgo.AttachOptions` is gone), and `mcpgo.AddTool(attached, tool, handler, …)` replaces `srv.AddTools(mcpgo.Events(…))`.
+- **Subscriptions:** `Subscription.State` (`SubscriptionCreated`, `SubscriptionRenewed`, `SubscriptionNative`, `SubscriptionUnavailable`, `SubscriptionDisabled`) replaces `Created` and `Native`. `call.Session()` (a `SessionKey`) replaces the `Session` field, and `ResolveSession` returns a `SessionKey`. A `SessionKey` prints, logs and marshals as `[redacted]`; `string(k)` is the key.
+
+  ```go
+  // before
+  if sub.Created { … }; key := call.Session
+  // after
+  if sub.State == wakeshift.SubscriptionCreated { … }; key := string(call.Session())
+  ```
+
+- **Emit and publish URLs:** `event.CreatePublishURL(ctx, args, …)` replaces `PublishURL`, and printing, logging or marshaling a `PublishURL` elides its token (use `.URL`). The options are checked by the compiler: `To`, `ToSubscription` and `ToNative` are a `RecipientOption` every call takes, `WithID` only `Emit`, `SigningSecret` only `CreatePublishURL`. `EventSubscriptionStatus` is `SubscriptionStatus`. `Event.End` and `MaxStatusSubscriptions` are gone.
+- **Errors:** one hierarchy, as in the other SDKs. `*APIError` is Wakeshift's answer, or none (`Status` 0, `CodeUnreachable` or `CodeTimeout`, the SDK's own timeout now told apart). `*UsageError` is a mistake caught before sending (`CodeConfig`, `CodeDisabled`, `CodeUndeclaredSubscribe`, `CodeNoCall`, `CodeCallEnded`, `CodeIdentifyFailed`, and the API's codes for local checks, which used to be an `*APIError` with a made-up status). `type Code string` with a constant per code; `IsCode(err, code)` matches either type. A canceled `ctx` returns an error that `errors.Is(err, context.Canceled)` matches, never an `APIError`. Every message the SDK writes says what failed, the fix, and a docs anchor.
+
+  ```go
+  // before
+  appkit.IsCode(err, "unknown_event"); errors.Is(err, appkit.ErrIDReused); errors.Is(err, appkit.ErrNoCall)
+  // after
+  wakeshift.IsCode(err, wakeshift.CodeUnknownEvent); wakeshift.IsCode(err, wakeshift.CodeIDReused); wakeshift.IsCode(err, wakeshift.CodeNoCall)
+  ```
+
+- **Logging:** `wakeshift.WithLogger(l)` (default: `slog.Default()`, read when it logs). Every line has a `code`; failures that repeat (`identify_failed`, `authorize_failed`, `key_refused`, `rollback_failed`) log at most once per 5 minutes with a `count`. `no_identify` (attaching without `Identify`, the documented default) logs at debug, so a default setup logs nothing at info or above.
+- **Removed:** `Notifies`, `NotifyWhen`, `NotifyApp` (the sentence comes from `Subscribes`), `WakeArgs`, `WakeInput`, `WakeOutput`, `WakeArgsJSONSchema`, `Events`, `EventsOption`, `EventsOptions`, `ToolName`, `Tools`, `Tool`, `Wait`, `ErrIDReused`, `ErrNoCall`, `ErrCallEnded`, and the exported constants (tool and argument names, `Via…`, `TaskIDPrefix`, `TasksExtension`, `WaitTool`). The helpers for Wakeshift's own apps left the SDK: `NewLogHandler`, `CloudLogging`, `LogMCP`, `RateLimiter`, `NewRateLimiter`, `CodexThread`, `ConnectorMetaKey`, `HarnessAgent`.
+- **Go version:** the module declares `go 1.25`, so it builds on Go 1.25 and later. The package is `wakeshift` at the module's root: import `github.com/wakeshift/wakeshift-go` (it was `…/appkit`) and `github.com/wakeshift/wakeshift-go/mcpgo`; `*appkit.App` is `*wakeshift.Client` and `*appkit.DefinedEvent[A, P]` is `*wakeshift.Event[A, P]`.
+
+### Added
+
+- **Subscribe vouchers: ChatGPT can subscribe to tools-only events.** When Wakeshift offers it (its manifest answer reports `subscribe_vouchers`), `Subscribe` of a tools-only event from an MCP Events client (ChatGPT) returns `SubscriptionNative` instead of `SubscriptionUnavailable`, and the result's block hands the client a one-time voucher for exactly that event and those arguments. The client writes it back as the event argument `wakeshift_voucher`, which the SDK takes out of the arguments before anything reads them and passes to Wakeshift; `OnSubscribe` then runs with `Via: "tool"` and your tool's name. `events/list` lists tools-only events, with a required `wakeshift_voucher`, only to native clients and only while Wakeshift offers vouchers, and the events capability is advertised whenever the server has an event. `SubscriptionNative` may now come with no user (`User: ""`) for an anonymous caller. Nothing to write. `wakeshift_voucher` is now a reserved argument name (`DefineEvent` refuses it), `RedactSecrets` redacts `wsv_` vouchers, and a call whose only Wakeshift work is native lines returns your result unchanged when Wakeshift can't add its line (logged as `native_unavailable`).
+- **A compact `tools/list`.** Wakeshift's arguments have short descriptions, and each is listed only where it's read: all three on a tool that subscribes to something and on `subscribe_events`, `session_key` alone on a tool that subscribes to nothing and on `unsubscribe_events`, none on `list_subscriptions`. The built-in tools' descriptions are short, and their output schemas minimal. On a typical server it cuts what Wakeshift adds to `tools/list` by about two thirds. A tool's `wakeshift` output field is `{"type": "string"}`.
+- **`wakeshift.RedactSecrets(text)`** replaces every Wakeshift secret format (app keys, session keys, publish URL tokens, signing secrets, wait-task IDs, JWS and stream links, bare, URL-encoded or in JSON) with `[redacted]`, for logs the SDK can't reach.
+- **`wakeshift.EncodeArgValue` and `DecodeArgValue`** encode a case-sensitive ID as a routing argument value injectively (`Job7` is `.job7`), so two IDs never become one. Use them on every path, on events only your tools subscribe to or that are personal.
+- **`Replay(d)` and `Once()` for `Subscribe`**: `Replay` (more than 0, at most 24 hours, checked before sending) also delivers the latest occurrence from that far back; `Once` ends the subscription after its first delivery.
+- **`SigningSecret(secret)` for `CreatePublishURL`**: the sender's Standard Webhooks secret (`whsec_…`), so the URL accepts only posts signed with it. `PublishURL.Signing` has its fingerprint, never the secret.
+- **`EventDef.Text` is optional**: without it the agent reads the event's description and arguments ("A crawl finished (job 3f2a)").
+- **Output schemas on Wakeshift's own tools.** `subscribe_events`, `unsubscribe_events` and `list_subscriptions` list an `outputSchema` and answer with matching `structuredContent`, on go-sdk and mcp-go.
+- **Retries:** `WithMaxRetries(n)` (default 2) covers a load balancer's refusals and connection failures. An emit without an ID gets the SDK's own, so its retry can't wake twice.
+- **A server that serves its own MCP Events keeps them**: Wakeshift serves none there and leaves the capability as it is (`events_capability_kept`).
+- **`AttachOptions.WrapFunc(tool) []ToolOption`**: `Wrap` as a function, for tools you know only by name at run time. It's asked on each tools/list and tools/call about a tool that `AddTool` and `Wrap` don't declare, never a built-in, and its answer isn't kept. A nil event or another client's in its options logs `wrap_bad_event`, and the tool is served unwrapped.
+- **Titles on Wakeshift's own tools.** `subscribe_events`, `list_subscriptions`, `unsubscribe_events` and `wakeshift_wait` list a top-level `title`, the same as their annotations' title, on go-sdk and mcp-go.
+- **Stdio servers' stdout carries only JSON-RPC.** The SDK logs through `slog` (stderr by default) and never writes to stdout; a test runs a stdio server with and without a key to keep it so. If you pass `WithLogger`, point it at stderr.
+- **`attached.Stdin(r)` and `mcpgo.ServeStdio(attached)` for stdio servers.** They take Wakeshift's arguments out of every tool call before go-sdk or mcp-go reads the line, as `attached.Handler` does on HTTP, so no receiving middleware, hook or tool middleware of yours sees them, whenever you added it. On go-sdk: `srv.Run(ctx, attached.StdioTransport())`. On mcp-go: `mcpgo.ServeStdio(attached)` in place of `server.ServeStdio(srv)`, or `attached.Stdin(os.Stdin)` passed to `Listen`.
+- **`description_too_long`**: a tool that subscribes whose description, with Wakeshift's sentence, is over 2048 characters logs a warning once per tool. Claude Code keeps only the first 2048, which cuts off the sentence.
+- `Example` functions on pkg.go.dev, on a disabled client.
+
+- **`event.Watch(ctx, args, check, opts...)`: emit once when work finishes, for services with no usable webhook.** It calls `check(ctx) (P, done bool, error)` until it reports done, then emits the payload once. The first check runs at once, then every `Every(d)` (default 30 seconds, at least 1 second); check errors back off (`Every·2ⁿ`, up to 5 minutes), and `MaxErrors(n)` in a row (default 5) or one `FinalIf(func(error) bool)` marks stop it; `Timeout(d)` (default 1 hour) bounds the whole watch. At most 10 checks of a client run at once. The emit carries `WithID(id)`'s ID, or one the watch makes, on every attempt (so a webhook that emits with the same ID wins a race without a second wake; `id_reused` counts as done), and is retried only when a retry could help (no answer, 429, 5xx). A second `Watch` of the same event and arguments while one runs returns nil at once. It blocks: run it with `go` and a context that outlives the request (`context.WithoutCancel(ctx)`). Inside a tool call it doesn't start when that call's `Subscribe` to these arguments came back unavailable or disabled, and stops if the call fails. It runs in this process only: a restart or a frozen serverless instance ends it. On a disabled client it checks nothing. Logs `watch_failed` (rate-limited) and `watch_timeout`.
+- **`EventDef.OnSubscribe func(ctx, wakeshift.Subscribed[A]) error`** runs once for each new subscription, whichever path made it: a tool's `Subscribe` (after the call succeeded; never a renewal or a rolled-back call), `subscribe_events`, or a native `events/subscribe` or first `events/poll`. `Subscribed` has `Args`, `User`, `Via` (`"tool"`, `"subscribe_events"`, `"native"`) and `Tool`. It runs in its own goroutine with a context that outlives the request; an error or panic logs `on_subscribe_failed` and the subscription stands. Start a `Watch` there to cover every path in one place.
+- **`github.com/wakeshift/wakeshift-go/wakeshifttest`** for unit tests, offline: `NewClient(opts...)` is an enabled client a fake Wakeshift answers in memory (no network, no `WAKESHIFT_KEY`), recording `Emits()`, `Subscriptions()`, `Unsubscribes()` and `PublishURLs()` (`Clear()` forgets them; `App(name)` names the app, `With(...)` passes client options); `NewToolCall(ToolCallOptions{Tool, User, Session, Native, Events})` returns a stand-in `*wakeshift.ToolCall` and a `*Recorder`, for calling a handler directly (`Subscribe` returns `SubscriptionCreated`, then `SubscriptionRenewed`); `ContextWithCall(ctx, call)` makes `ToolCallFrom` find it, for a tool named in `Wrap`. To keep a real client off in tests while `WAKESHIFT_KEY` is set, use `wakeshift.New(wakeshift.WithKey(""))`.
+- **`wakeshift.BuiltinToolNames()`**: `subscribe_events`, `unsubscribe_events`, `list_subscriptions` and `wakeshift_wait`, for telling your tools from Wakeshift's.
+- **`BuiltinTools{DisableAll: true}`** turns off every built-in tool, the wait tool included.
+- **`attached.StdioTransport()`**: go-sdk's stdio transport with `attached.Stdin` in front (`srv.Run(ctx, attached.StdioTransport())`). Like `mcp.StdioTransport`, it never closes the process's stdout; an `mcp.IOTransport` given `os.Stdout` itself closes it when the session ends.
+- **`wakeshift.Context(v)` for `Subscribe`: `OnSubscribe` gets the subscribing call's value** (`Subscribed.Context`), such as the caller's credential for a `Watch` that checks your API as the caller, so you no longer keep a map of job to credential. `v` is never sent to Wakeshift, logged or printed. For a tool's own subscription it's that call's; for a native client (ChatGPT) redeeming the subscribe voucher a call handed it, it's that call's if this process still remembers it (in memory, for four hours, until the voucher is redeemed; a redemption on another instance gets nil, as do `subscribe_events` and native subscriptions). `OnSubscribe` for a tool's subscription now runs with the values of the ctx that call's `Subscribe` was given (not canceled with the request).
+- **`wakeshift.CodeOf(err) Code`**: an error's code (`""` for none), to switch on several codes at once, beside `IsCode`.
+- **`(*Client).Close()`** stops the client's watches and the `OnSubscribe` goroutines it started (their ctx ends) and returns once each has, so none outlives it; after it, `Watch` returns at once. A stdio server's process ends with its `main` anyway; call `defer wake.Close()` where the process goes on (tests, a server that stops serving).
+- **`wakeshifttest`:** `Client.FailNext(op, err)` and `Recorder.FailNext` make the next `Subscribe` or `Unsubscribe` fail (`FailUnreachable`, `FailRefused`); the test client hands out subscribe vouchers to a native call as Wakeshift does (`Vouchers()`), and `Client.Redeem(ctx, voucher, webhookURL)` plays ChatGPT redeeming one (refresh at the same URL, refused elsewhere), `OnSubscribe` getting the handing-out call's `Context`; `ToolCallOptions.Client` gives a native stand-in vouchers too (`Recorder.Vouchers()`); `Recorder.Finish(ctx)` runs `OnSubscribe` for what the stand-in created, as a call that succeeded does, and waits; each `Subscription` the stand-in records carries its `Subscribe`'s `Context`; and the test client's `Close` lets a watch check in flight, and its emit, finish first, so a check that's done shows in `Emits()` after `Close`.
+- **`monitor_line_long`** (warn, once per event): an emit whose text is over 200 bytes leaves its payload no room on Claude Code's 480-byte Monitor line, where Wakeshift's own fields take about 230; keep the text short and the details in the payload.
+
+### Fixed
+
+- **A Wakeshift failure never changes your tool's result.** When Wakeshift's addition to a result of a tool that subscribes fails (an error answer, a timeout, the core unreachable, a refused key), the agent gets the result exactly as your handler gave it, with no error and nothing asking it to call again: the tool may have started paid or visible work. Before, the call failed (go-sdk and mcp-go) with "...Try again.". What the call subscribed is still rolled back, and the new `block_failed` code logs it (warn, at most once per five minutes). The built-in tools' answers for no answer from Wakeshift say only what happened ("Wakeshift didn't answer in time", "Wakeshift couldn't be reached"), and the `timeout` error's fix no longer says to retry: "The outcome is unknown; an emit sent again with the same id emits once."
+- **Claude Code is never an MCP Events client**, nor is any other harness Wakeshift wakes through a path of its own (a Monitor, hooks, a connector, a plugin or a background command; Capy's and Muse's clients included), recognized by its client name or `User-Agent`: its calls get Wakeshift's block even when they declare the MCP Events capability. ChatGPT is recognized by `openai-mcp` in its client name or `User-Agent`, `openai-mcp/1.0.0 (Codex)` from Work chats included.
+- **A bad or missing key no longer stops your server** unless you ask with `Required()`, and an outage at startup no longer leaves Wakeshift off: `New` makes no request.
+- **A middleware that re-wraps or logs your tools can't break them or see `session_key`**: the arguments are stripped at the HTTP layer, from every call whose tool doesn't name them, and nothing compares handlers.
+- **Identity on a stateful go-sdk session** comes from each request, not from `initialize`'s.
+- A tool registered under a built-in tool's name outside Wakeshift is logged, and Wakeshift's tool is served.
+- **`Wrap` and `WrapFunc` work on mcp-go.** A tool registered with mcp-go's own `srv.AddTool` and named in `Wrap` got no call (`ToolCallFrom` returned nil, so `Subscribe` failed with `CodeNoCall`), no block, and saw `session_key` in its arguments. It now runs in its call, as `mcpgo.AddTool`'s tools do, on HTTP and stdio.
+- **On mcp-go without `Handler` or `Stdin`, Wakeshift's arguments leave every call before tool middleware runs.** They're taken out in a `BeforeCallTool` hook `Attach` adds, so `WithToolHandlerMiddleware` and `srv.Use` middleware never see them; only hooks that run before it (`BeforeAny`, `OnRequestInitialization`, `BeforeCallTool` hooks added before `Attach`) do. Serve stdio through `mcpgo.ServeStdio` to keep them from those too.
+- **`subscribe_events`' and `unsubscribe_events`' `arguments` property is `{"type": "object", "description": …, "additionalProperties": true}`**, the same in every SDK, on go-sdk and mcp-go.
+- **The events capability follows what native clients can subscribe to.** It's advertised whenever the server has an event, including tools-only ones, which native clients subscribe to with the voucher a tool's result hands them; a server with no events advertises none. `attached.Handler` adds it to your server's `initialize` and `server/discover` answers, so it's on HTTP only.
+- **`list_subscriptions` works on a server without sign-in.** With no user it lists the calling conversation's subscriptions (by its `session_key`, which tools/list now gives it), and `unsubscribe_events` with an `id` ends one of them; it used to refuse without `Identify`.
+- **`list_subscriptions` and `unsubscribe_events` are listed only where something can subscribe**: a tool declared with `Subscribes` naming an event (through `AddTool`, `Wrap` or `WrapFunc`), or an event open to `subscribe_events`. A server whose tools don't subscribe no longer gets them. Both still answer a call.
+- **A description without a final period gets one** before the subscribes sentence ("…the build's information. This tool is how…"), on one-line descriptions; a multi-line one is left as written.
+- **A call that subscribes and then unsubscribes the same subscription gets no block** (no listener instructions for a conversation with nothing to wake it for).
+- **`call.Session()` is empty until Wakeshift resolved the conversation** (a `Subscribe` that reached it, or `ResolveSession`): it never returns the raw `session_key` argument, which anyone can make up. The passed key still goes to Wakeshift.
+- **`call.ResolveSession(ctx)` returns `""` when nothing names the conversation** (no `session_key`, no `conversation_id` and no harness conversation in the call's `_meta`, such as a Codex thread), without a request to Wakeshift; before, it started a new session. Call it directly to find your own record of the conversation: a passed key is checked first.
+- **A refused caller's built-in result is a neutral line for the agent** ("This app needs you to sign in…", "This app couldn't verify who you are…"), never a developer's instructions; the detail is in your log (`identify_error`, whose line no longer repeats itself).
+- **Quieter logs:** `no_key` is at debug, and `events_capability_kept` at info.
+- **`Request.Header` is nil off HTTP under mcp-go too** (mcp-go hands an empty header on stdio), so `r.Header == nil` means stdio on both libraries.
+- **`WithID` returns `IDOption`**, which `Emit` and `Watch` both take; existing calls compile unchanged.
+- **The subscribes sentence names your app as you wrote it.** A lowercase name such as `shipyard` is no longer capitalized where it starts a sentence; only the unnamed default reads "This app".
+- **Wakeshift's capability reaches clients when your handler answers `server/discover` itself** with no `Content-Type`, or with SSE `data:` lines that have no space after the colon. Your own capabilities and fields are kept.
+- **`AddTool` without `Subscribes` is a plain registration**, with or without a key: the same as `Subscribes()` with no events (with a key, `session_key` for `Unsubscribe` and `ResolveSession`). A mistake that panics at registration (`AddTool`, `Attach`, `mcpgo`'s) is now logged too (`config`), since a framework may turn the panic into a bare error.
+- **`identify_failed` is two log codes:** `identify_error` (error) when `Identify` returned an error, panicked or ran over 10 seconds, its fix now "throw only when the upstream can't answer" as the docs say; and `user_required` (info, at most once per five minutes) when `RequireUser` refused a caller `Identify` gave no user, which logged nothing before. `Subscribe` returns the same code as the line: `CodeIdentifyFailed` when `Identify` failed, and the new `CodeUserRequired` (`user_required`) when `RequireUser` refused the caller (`CodeIdentifyFailed` before).
+- **A tools-only event is listed with `delivery: ["webhook"]`** on `events/list`, and `events/poll` of one, voucher or not, is refused with "… can't be polled: it's subscribed to only through this app's tools, with a webhook" (it named a voucher, which can't help a poll).
+- **`watch_failed`'s line no longer repeats itself.** A watch stopped by an error your `FinalIf` marks final logs the new `watch_stopped` at info instead of a `watch_failed` warning: it stopped as asked (`Watch` still returns the check's error).
+
+## v0.9.3 (2026-11-05)
+
+### Changed
+
+- **Text over 1000 bytes is trimmed by Wakeshift rather than refused; no need to trim it yourself.** Wakeshift cuts it between characters to 1000 bytes, ending with "…", and sends the occurrence. `Emit` returns `Emitted.TextTrimmed` set when it happens, and logs a warning once per event. An emit's `id` still compares the text you sent, so a retry with the same long text is a duplicate.
+
 ## v0.9.2 (2026-11-04)
 
 ### Added

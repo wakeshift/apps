@@ -32,7 +32,8 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AuthInfo } from "@modelcontextprotocol/server";
-import { harnessAgent, isCode, type Wakeshift } from "@wakeshift/sdk";
+import { isWakeshiftError, type Wakeshift } from "@wakeshift/sdk";
+import { harnessAgent } from "./harness.js";
 import type { Db, Log } from "./db.js";
 import { clientAddress } from "./analytics.js";
 import { allowedRedirect, BAD_REDIRECT } from "./redirects.js";
@@ -383,10 +384,10 @@ export class SignIn {
         if (!PKCE_RE.test(verifier) || sum.length !== challenge.length || !timingSafeEqual(sum, challenge)) throw new OAuthFailure(400, "invalid_grant", "PKCE verification failed");
         id = row.id;
         try {
-          workspace = await this.o.wake.workspace(id, "Agent Hold'em player");
+          workspace = await this.o.wake.workspace({ user: id, name: "Agent Hold'em player" });
         } catch (err) {
-          if (isCode(err, "workspace_limit")) throw new OAuthFailure(403, "access_denied", "Agent Hold'em can't take more players right now");
-          if (isCode(err, "workspace_rate_limited")) throw new OAuthFailure(503, "temporarily_unavailable", "Agent Hold'em is taking too many new players right now; try again later");
+          if (isWakeshiftError(err) && err.code === "workspace_limit") throw new OAuthFailure(403, "access_denied", "Agent Hold'em can't take more players right now");
+          if (isWakeshiftError(err) && err.code === "workspace_rate_limited") throw new OAuthFailure(503, "temporarily_unavailable", "Agent Hold'em is taking too many new players right now; try again later");
           throw err;
         }
         break;
@@ -405,7 +406,7 @@ export class SignIn {
         // The sign-in must still be there in Wakeshift: once it's forgotten,
         // asking makes a new workspace, so the session ends (and that one is
         // forgotten too).
-        if ((await this.o.wake.workspace(row.id, "Agent Hold'em player")) !== row.workspace) {
+        if ((await this.o.wake.workspace({ user: row.id, name: "Agent Hold'em player" })) !== row.workspace) {
           await this.end(row.id);
           throw new OAuthFailure(400, "invalid_grant", "this sign-in's access was revoked; sign in again");
         }

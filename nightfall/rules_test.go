@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/gamekit/gametest"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 func get(t *testing.T, u string) (string, http.Header) {
@@ -30,7 +30,7 @@ func get(t *testing.T, u string) (string, http.Header) {
 // strict policy and no script; the landing page, the games pages and the
 // role list on the landing page link to it or come from the same table.
 func TestRulesPage(t *testing.T) {
-	app := &App{Kit: &appkit.App{ID: "nightfall", MCPURL: "https://nf.example.test/mcp"}}
+	app := &App{Kit: agentkit.TestApp("nightfall", nil, "", "https://nf.example.test/mcp")}
 	app.Store, _ = gametest.Store(t)
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)

@@ -514,11 +514,13 @@ test("try against a real core", { skip: !harness && "set WAKESHIFT_SDK_HARNESS (
   assert.match(grokSaid, /you're blocked on that command/, grokSaid);
   assert.doesNotMatch(grokSaid, /Shell tool|notify_on_output|Monitor tool|To give you the right instructions/, grokSaid);
   // A Cursor client claiming Claude Code is still Cursor: the claim is
-  // ignored, and it gets Cursor's instructions (and is asked who it is).
+  // ignored, and it gets Cursor's instructions (and how to say it's Grok
+  // Bot or a cloud agent instead).
   const notClaude = await connect("Cursor");
   const notClaudeSaid = textOf((await notClaude.callTool({ name: "watch", arguments: { harness: "claude-code" } })) as CallToolResult);
   assert.match(notClaudeSaid, /^Watching your webhook\./);
-  assert.match(notClaudeSaid, /To give you the right instructions, call this again with harness and conversation_id\./, notClaudeSaid);
+  assert.match(notClaudeSaid, /If you're Grok Bot or a Cursor cloud agent, pass harness/, notClaudeSaid);
+  assert.doesNotMatch(notClaudeSaid, /call this (tool )?again/, notClaudeSaid);
   assert.match(notClaudeSaid, /Shell tool/, notClaudeSaid);
   assert.doesNotMatch(notClaudeSaid, /Monitor tool/, notClaudeSaid);
 });

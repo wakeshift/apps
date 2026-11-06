@@ -20,6 +20,7 @@ async function connect(t: { after: (fn: () => Promise<void>) => void }, operator
   const notes: (string | undefined)[] = [];
   const casino = {
     playerFor: async () => ({ id: "p1" }),
+    playersOfGuest: async () => [{ id: "p1" }],
     takeNotice: async () => undefined,
     act: async (_player: string, _action: unknown, _turn: string, _message: unknown, note?: string) => {
       notes.push(note);
@@ -40,7 +41,7 @@ async function connect(t: { after: (fn: () => Promise<void>) => void }, operator
     await server.close();
   });
   const act = async (args: Record<string, unknown>) => {
-    const r = (await client.callTool({ name: "act", arguments: { action: "fold", turn: "t1", message: "hi", session_key: "s1", ...args } })) as CallToolResult;
+    const r = (await client.callTool({ name: "act", arguments: { action: "fold", turn: "t1", message: "hi", ...args } })) as CallToolResult;
     const text = r.content.map((c) => (c.type === "text" ? c.text : "")).join(" ");
     assert.match(text, /acted/, "the move reached the casino: " + text);
     return notes.pop();
@@ -86,7 +87,7 @@ class FakeCore {
   calls: { path: string; body: any }[] = [];
   subs = 0;
   fetch = (async (url: string | URL | Request, init?: RequestInit) => {
-    const path = String(url).replace("http://core.test/api/apps/v1", "");
+    const path = String(url).replace("https://core.test/api/apps/v1", "");
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     if (path !== "/manifest" && path !== "/manifest/merge") this.calls.push({ path, body });
     const reply = (json: unknown) => new Response(JSON.stringify(json), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -99,6 +100,8 @@ class FakeCore {
         return reply({ event_subscription: { id: `sub-${this.subs}`, user: body.call.user, created: true }, session: "wsc_s1", agent: { harness: "claude-code" }, pending: "pa_1" });
       case "/event-subscriptions/unsubscribe":
         return reply({ ended: true });
+      case "/calls/session":
+        return reply({ session: body.call.session || "wsc_new", pending: "pa_s", agent: { harness: "claude-code" } });
       case "/calls/addition":
         return reply({ text: body.native ? `WAKESHIFT NATIVE ${JSON.stringify(body.native)}` : "WAKESHIFT BLOCK" });
     }
@@ -129,6 +132,8 @@ function stubCasino(o: { joinFails?: boolean; seatedAt?: string; known?: boolean
       return { table: o.seatedAt ?? opts.table ?? "thouse", seat: 1, buyIn: 100, already: false };
     },
     dropIfEmpty: async (t: string) => void log.dropped.push(t),
+    // holdem.turn's authorize, which a native subscribe consults (seated first, so yes).
+    guestSeatedAt: async () => true,
     keepSubscription: async (s: string) => void log.kept.push(s),
     takeNotice: async () => undefined,
     watchLink: async () => undefined,
@@ -144,7 +149,7 @@ function stubCasino(o: { joinFails?: boolean; seatedAt?: string; known?: boolean
  */
 async function serve(t: { after: (fn: () => Promise<void>) => void }, casino: Casino, client = "Claude Code", modern = false) {
   const core = new FakeCore();
-  const wake = new Wakeshift({ key: "wst_test_holdem_" + "x".repeat(43), core: "http://core.test", fetch: core.fetch, onWarning: () => {} });
+  const wake = new Wakeshift({ key: "wst_test_holdem_" + "x".repeat(43), core: "https://core.test", fetch: core.fetch, logger: { error: () => {}, warn: () => {} } });
   const events = defineHoldemEvents(wake, casino);
   const endpoint = mcpEndpoint(() => holdemServer({ wake, casino, events, secret: "tools-test-secret-at-least-32-bytes-long", publicUrl: "http://localhost", log: () => {}, houseSecret: HOUSE_SECRET }));
   const http = createServer(async (req: IncomingMessage & { auth?: AuthInfo }, res) => {
@@ -175,11 +180,14 @@ async function serve(t: { after: (fn: () => Promise<void>) => void }, casino: Ca
   return { core, connect, open, listTools: async () => (await (await open()).listTools()).tools };
 }
 
-test("every tool takes Wakeshift's session_key, harness and conversation_id", async (t) => {
+test("join takes Wakeshift's session_key, harness and conversation_id; the player's other tools take session_key; leaderboard none", async (t) => {
   const { listTools } = await serve(t, stubCasino().casino);
   const ours = (await listTools()).filter((x) => !/_events$|^list_subscriptions$/.test(x.name));
   assert.deepEqual(ours.map((x) => x.name).sort(), ["act", "hand_history", "join", "leaderboard", "leave", "say", "state", "watch_link"]);
-  for (const tool of ours) for (const k of ["session_key", "harness", "conversation_id"]) assert.ok(Object.hasOwn(tool.inputSchema.properties ?? {}, k), `${tool.name} takes ${k}`);
+  const wakeArgs = (name: string) => ["session_key", "harness", "conversation_id"].filter((k) => Object.hasOwn(ours.find((x) => x.name === name)!.inputSchema.properties ?? {}, k));
+  assert.deepEqual(wakeArgs("join"), ["session_key", "harness", "conversation_id"]);
+  for (const name of ["act", "hand_history", "leave", "say", "state", "watch_link"]) assert.deepEqual(wakeArgs(name), ["session_key"], name);
+  assert.deepEqual(wakeArgs("leaderboard"), []);
 });
 
 test("join subscribes the conversation to its table's turns, names the player by the session, and carries Wakeshift's block", async (t) => {

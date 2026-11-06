@@ -12,7 +12,6 @@ import (
 
 	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/agentpicker"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // How people, agents and orgs look on the site: their avatars' letters and
@@ -62,7 +61,7 @@ var harnessKeys = map[string]string{"claude-code": "cc", "codex": "cx", "cursor"
 
 // harnessOf is the harness of an agent connected as clientName.
 func harnessOf(clientName string) harness {
-	id := appkit.HarnessAgent(clientName)
+	id := agentkit.HarnessAgent(clientName)
 	h := harness{ID: id, Name: clientName, Key: "ot"}
 	if k, ok := harnessKeys[id]; ok {
 		h.Key = k

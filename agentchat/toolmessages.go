@@ -12,7 +12,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/agentkit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Agents' tools for messages: posting and reading.
@@ -22,11 +22,11 @@ import (
 // that reads a mention there and answers it isn't woken for it again after
 // its turn (agentkit.Seen). Best effort: a failure costs a repeated
 // wake, not the result.
-func (a *App) seen(ctx context.Context, call *appkit.ToolCall, args appkit.WakeArgs, msgs []message) {
+func (a *App) seen(ctx context.Context, call *wakeshift.ToolCall, msgs []message) {
 	if len(msgs) == 0 || call.Native {
 		return
 	}
-	session, ok, err := conversation(ctx, call, args)
+	session, ok, err := conversation(ctx, call)
 	if err != nil || !ok || session == "" {
 		return
 	}
@@ -40,16 +40,16 @@ func (a *App) seen(ctx context.Context, call *appkit.ToolCall, args appkit.WakeA
 	}
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if _, err := agentkit.Seen(sctx, ag, session, ids); err != nil && !appkit.IsCode(err, "unknown_session") {
+	if _, err := agentkit.Seen(sctx, ag, session, ids); err != nil && !wakeshift.IsCode(err, "unknown_session") {
 		slog.Warn("agentchat: marking history's messages seen", "err", err)
 	}
 }
 
 // addMessageTools: posting and reading a channel's messages.
-func (a *App) addMessageTools(srv *mcp.Server, at *appkit.Attachment) {
-	mcp.AddTool(srv, &mcp.Tool{Name: "post", Description: "Post to a channel you've joined, or to dm (your direct messages with your user). Pass session_key, so your own post doesn't wake you. @-mention agents by handle to wake them. " +
+func (a *App) addMessageTools(srv *mcp.Server, at *wakeshift.Attachment) {
+	wakeshift.AddTool(at, &mcp.Tool{Name: "post", Description: "Post to a channel you've joined, or to dm (your direct messages with your user). Pass session_key, so your own post doesn't wake you. @-mention agents by handle to wake them. " +
 		"To answer a message in its thread, set reply_to to its id (data.id in a delivered message, or the id post gave you); a message that is itself a reply keeps the answer in the same thread. Without reply_to, the post goes to the channel."},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in postIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in postIn) (*mcp.CallToolResult, map[string]any, error) {
 			me, err := connected(call.Request)
 			if err != nil {
 				return nil, nil, err
@@ -62,7 +62,7 @@ func (a *App) addMessageTools(srv *mcp.Server, at *appkit.Attachment) {
 			if err != nil {
 				return nil, nil, err
 			}
-			session, _, err := conversation(ctx, call, in.WakeArgs)
+			session, _, err := conversation(ctx, call)
 			if err != nil {
 				return nil, nil, friendly(err)
 			}
@@ -84,11 +84,11 @@ func (a *App) addMessageTools(srv *mcp.Server, at *appkit.Attachment) {
 				out["thread"] = res.Message.ThreadID
 			}
 			return nil, out, nil
-		}))
+		}, wakeshift.Subscribes())
 
-	mcp.AddTool(srv, &mcp.Tool{Name: "history", Description: "Read recent messages (from the past 30 days) in a channel you've joined, or in dm, oldest first, for context. Each message's id is what reply_to takes. " +
+	wakeshift.AddTool(at, &mcp.Tool{Name: "history", Description: "Read recent messages (from the past 30 days) in a channel you've joined, or in dm, oldest first, for context. Each message's id is what reply_to takes. " +
 		"Not for waiting: once you watch, new messages wake you. A message shown here that would have woken this conversation won't wake it again.", Annotations: readOnly},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in historyIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in historyIn) (*mcp.CallToolResult, map[string]any, error) {
 			me, err := connected(call.Request)
 			if err != nil {
 				return nil, nil, err
@@ -119,7 +119,7 @@ func (a *App) addMessageTools(srv *mcp.Server, at *appkit.Attachment) {
 			for _, m := range msgs {
 				out = append(out, messageOut(m))
 			}
-			a.seen(ctx, call, in.WakeArgs, out)
+			a.seen(ctx, call, out)
 			return nil, map[string]any{"channel": c.Ref(), "messages": out}, nil
-		}))
+		}, wakeshift.Subscribes())
 }

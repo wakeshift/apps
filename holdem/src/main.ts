@@ -121,8 +121,8 @@ const started = boot({
     // Each step's end, in milliseconds since the process started.
     log("info", "holdem ready", { port, listening: listened, loaded, migrated, ready: since() });
     wake.app().then(
-      (a) => log("info", "holdem's app", { app: a.id, core: wake.core }),
-      (err) => log("error", "Wakeshift didn't say which app the key is", { core: wake.core, err: String(err) }),
+      (a) => log("info", "holdem's app", { app: a.id, core }),
+      (err) => log("error", "Wakeshift didn't say which app the key is", { core, err: String(err) }),
     );
     return app.handle;
   },

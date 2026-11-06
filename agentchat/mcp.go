@@ -10,7 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/agentkit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // The MCP endpoint agents add, behind Agent Chat's own OAuth (oauth.go).
@@ -33,11 +33,11 @@ func (a *App) mcpHandler() http.Handler {
 	a.notifications()
 	// Wait: Claude Code's wait tool (docs/harnesses.md, "Claude Code: MCP
 	// tasks as a wake path").
-	attached := a.Kit.Attach(srv, appkit.AttachOptions{Identify: a.identify, Tools: appkit.Tools{Wait: appkit.Wait{Enabled: true}}})
 	// Only watch subscribes a conversation (chat.notification's Authorize
 	// refuses everyone but a client that subscribes itself, which uses MCP
 	// Events, not this tool), so subscribe_events isn't offered.
-	srv.RemoveTools("subscribe_events")
+	attached := a.Kit.Attach(srv, wakeshift.AttachOptions{Identify: a.identify,
+		BuiltinTools: wakeshift.BuiltinTools{Wait: true, DisableSubscribe: true}})
 	a.addTools(srv, attached)
 	// After Attach, so outside its middleware: it sees the call's final
 	// result, and records a watch's new subscription only on success.
@@ -46,7 +46,7 @@ func (a *App) mcpHandler() http.Handler {
 	agentkit.WaitTool{Agent: a.agentFor, App: "Agent Chat", Format: chatMessage, Friendly: friendly,
 		Reply: "Answer a message in its channel with the post tool (reply_to: its id, data.id in a delivered message)."}.Add(srv)
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})
-	return appkit.RequireBearer(a.verify, a.URL+"/.well-known/oauth-protected-resource")(attached.Wrap(h))
+	return wakeshift.RequireBearer(a.verify, a.URL+"/.well-known/oauth-protected-resource")(attached.Handler(h))
 }
 
 // verify checks an access token, and that its agent is still connected.
@@ -68,17 +68,20 @@ func (a *App) verify(ctx context.Context, token string, _ *http.Request) (*auth.
 
 // identify is the agent behind a request, as Agent Chat acts for it: each
 // of its conversations' chat.notification subscriptions belongs to the
-// agent's user, <workspace>/<agent> (appkit.Agent.User).
-func (a *App) identify(ctx context.Context, ti *auth.TokenInfo) (appkit.Identity, error) {
-	me, ok := ti.Extra["agent"].(Agent)
+// agent's user, <workspace>/<agent> (wakeshift.Agent.User).
+func (a *App) identify(ctx context.Context, r wakeshift.Request) (wakeshift.Identity, error) {
+	if r.Token == nil {
+		return wakeshift.Identity{}, errors.New("not signed in to Agent Chat")
+	}
+	me, ok := r.Token.Extra["agent"].(Agent)
 	if !ok {
-		return appkit.Identity{}, errors.New("not signed in to Agent Chat")
+		return wakeshift.Identity{}, errors.New("not signed in to Agent Chat")
 	}
 	ag, err := a.actAs(ctx, me)
 	if err != nil {
-		return appkit.Identity{}, err
+		return wakeshift.Identity{}, err
 	}
-	return appkit.Identity{User: ag.User(), Agent: ag}, nil
+	return wakeshift.Identity{User: ag.User(), Agent: ag}, nil
 }
 
 // connected is the calling agent, as Agent Chat keeps it.
@@ -92,7 +95,7 @@ func connected(req *mcp.CallToolRequest) (Agent, error) {
 }
 
 // agentFor is the app acting for the calling agent in Wakeshift.
-func (a *App) agentFor(ctx context.Context, req *mcp.CallToolRequest) (*appkit.Agent, error) {
+func (a *App) agentFor(ctx context.Context, req *mcp.CallToolRequest) (*wakeshift.Agent, error) {
 	ag, err := connected(req)
 	if err != nil {
 		return nil, err
@@ -107,9 +110,9 @@ func (a *App) agentFor(ctx context.Context, req *mcp.CallToolRequest) (*appkit.A
 // TTL. People revoke by disconnecting the agent, or deleting their account
 // (which forgets their workspace, so no grant can be made again); verify
 // refuses a disconnected agent's tokens before this is reached.
-func (a *App) actAs(ctx context.Context, ag Agent) (*appkit.Agent, error) {
+func (a *App) actAs(ctx context.Context, ag Agent) (*wakeshift.Agent, error) {
 	w, err := a.Kit.ActAs(ctx, ag.Workspace, ag.Agent)
-	if appkit.IsCode(err, "no_grant") {
+	if wakeshift.IsCode(err, "no_grant") {
 		if _, err := a.Kit.AddAgent(ctx, ag.Workspace, ag.Agent, ag.ClientName); err != nil {
 			// A concurrent call may have renewed it first.
 			if w, aerr := a.Kit.ActAs(ctx, ag.Workspace, ag.Agent); aerr == nil {
@@ -123,7 +126,7 @@ func (a *App) actAs(ctx context.Context, ag Agent) (*appkit.Agent, error) {
 }
 
 // caller is the calling agent and its Wakeshift agent, in a wrapped tool.
-func (a *App) caller(ctx context.Context, call *appkit.ToolCall) (Agent, *appkit.Agent, error) {
+func (a *App) caller(ctx context.Context, call *wakeshift.ToolCall) (Agent, *wakeshift.Agent, error) {
 	me, err := connected(call.Request)
 	if err != nil {
 		return Agent{}, nil, err
@@ -140,23 +143,21 @@ func (a *App) caller(ctx context.Context, call *appkit.ToolCall) (Agent, *appkit
 
 // conversation is the calling conversation's session, if it's known: ""
 // for a client that subscribes itself (its conversation is the native
-// marker), the session_key passed, else a Codex thread's own (or the
-// conversation another harness names), found by Wakeshift. ok is false
-// when nothing names it.
-func conversation(ctx context.Context, call *appkit.ToolCall, args appkit.WakeArgs) (session string, ok bool, err error) {
+// marker), the session_key passed, else the conversation the harness names
+// (a Codex thread), found by Wakeshift. ok is false when nothing names it
+// (ResolveSession returns "" without asking Wakeshift).
+func conversation(ctx context.Context, call *wakeshift.ToolCall) (session string, ok bool, err error) {
 	switch {
 	case call.Native:
 		return "", true, nil
-	case call.Session != "":
-		return call.Session, true, nil
-	case codexThread(call.Request) != "" || args.ConversationID != "":
-		s, err := call.ResolveSession(ctx)
-		if appkit.IsCode(err, "unknown_session") {
-			return "", false, nil
-		}
-		return s, err == nil, err
+	case call.Session() != "":
+		return string(call.Session()), true, nil
 	}
-	return "", false, nil
+	s, err := call.ResolveSession(ctx)
+	if wakeshift.IsCode(err, "unknown_session") {
+		return "", false, nil
+	}
+	return string(s), err == nil && s != "", err
 }
 
 // noteLabel records the label in the calling conversation's session

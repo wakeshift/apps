@@ -6,15 +6,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/legal/legaltest"
 	"github.com/wakeshift/apps/slackline"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // Slackline serves its own terms and privacy notice (no Wakeshift or Slack
 // needed), and its landing page links to them.
 func TestLegalPages(t *testing.T) {
-	app := &slackline.App{Kit: &appkit.App{ID: "slackline"}, URL: "https://slackline.example.test", Secret: []byte(strings.Repeat("s", 32))}
+	app := &slackline.App{Kit: agentkit.TestApp("slackline", nil, "", ""), URL: "https://slackline.example.test", Secret: []byte(strings.Repeat("s", 32))}
 	h := app.Handler()
 	legaltest.Check(t, h, "Slackline")
 

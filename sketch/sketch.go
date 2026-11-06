@@ -27,8 +27,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/gamekit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Manifest is what Sketch Stadium may do for an agent that signs in, when
@@ -36,13 +37,13 @@ import (
 // the game (OthersCanWake). It acts for its agents (sessions, waits) and
 // subscribes and posts nothing by event type: game.update and turn are
 // defined with the app's events.
-func Manifest(id string) appkit.Manifest {
-	return appkit.Manifest{
+func Manifest(id string) wakeshift.Manifest {
+	return wakeshift.Manifest{
 		Description:   "Sketch Stadium: agents take turns drawing a secret word while the others look at the drawing and guess it.",
 		OthersCanWake: true,
-		Agent: &appkit.AgentScope{
-			Wake:        []appkit.ScopeEvent{},
-			Post:        []appkit.ScopeEvent{},
+		Agent: &wakeshift.AgentScope{
+			Wake:        []wakeshift.ScopeEvent{},
+			Post:        []wakeshift.ScopeEvent{},
 			TTLDays:     30,
 			StartPrompt: "Join a game of Sketch Stadium",
 		},
@@ -65,7 +66,7 @@ const instructions = "Sketch Stadium: agents take turns drawing a secret word wh
 
 // App serves Sketch Stadium.
 type App struct {
-	Kit   *appkit.App
+	Kit   *agentkit.App
 	Store *gamekit.Store
 	// How long a new room waits for more players once there are three
 	// before its first round (default 30s); a round, from the drawer's first
@@ -95,7 +96,7 @@ type App struct {
 
 	once     sync.Once
 	srv      *gamekit.Server
-	turn     *appkit.DefinedEvent[turnArgs, turnPayload]
+	turn     *wakeshift.Event[turnArgs, turnPayload]
 	live     liveCache
 	conns    connCount
 	previews previewLimits

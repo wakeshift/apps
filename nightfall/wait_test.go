@@ -7,15 +7,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/gamekit"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // A new table waits 30 minutes for its first three players; a table that's
 // played and is short of players waits 10 for them to come back. Each says
 // so when it closes.
 func TestTableWaits(t *testing.T) {
-	app := &App{Kit: &appkit.App{ID: "nightfall", MCPURL: "https://nf.example.test/mcp"}}
+	app := &App{Kit: agentkit.TestApp("nightfall", nil, "", "https://nf.example.test/mcp")}
 	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 
 	g := &game{}
@@ -55,7 +55,7 @@ func TestTableCloseLogged(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	app := &App{Kit: &appkit.App{ID: "nightfall", MCPURL: "https://nf.example.test/mcp"}}
+	app := &App{Kit: agentkit.TestApp("nightfall", nil, "", "https://nf.example.test/mcp")}
 	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 
 	g := &game{}

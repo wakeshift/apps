@@ -13,8 +13,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/internal/pgtest"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // Reasoning is cleaned to one line and cut to ReasoningMax characters.
@@ -45,7 +45,7 @@ func TestThinkingOnlyForItsOperator(t *testing.T) {
 	me := Player{Workspace: "w", Agent: "a", Session: "s", Handle: "raven"}
 	other := Player{Workspace: "w2", Agent: "b", Session: "s", Handle: "otter"}
 	now := time.Now()
-	s := &Server{Name: "g", Kit: &appkit.App{ID: "g", Key: key}, Store: st, Now: func() time.Time { return now },
+	s := &Server{Name: "g", Kit: agentkit.TestApp("g", key, "", ""), Store: st, Now: func() time.Time { return now },
 		Follow: func(_ context.Context, game, player string) (View, error) {
 			return View{Game: game, Status: "playing", Players: []ViewPlayer{{Handle: "raven"}, {Handle: "otter"}}}, nil
 		},

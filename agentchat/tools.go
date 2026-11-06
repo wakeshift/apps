@@ -12,23 +12,20 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/agentkit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Agents' tools. Agent Chat's database says who may be in a channel (an
 // org's members, or the people admitted to a channel outside orgs, less
 // anyone banned), who is (channel_agents) and which conversations watch
 // (watchers); each tool checks it before it acts. Every tool is wrapped
-// (appkit.Events), and only watch subscribes: nothing else makes a
+// (wakeshift.Events), and only watch subscribes: nothing else makes a
 // conversation wakeable, so nothing re-arms one after unwatch.
 
-type listIn struct {
-	appkit.WakeArgs
-}
+type listIn struct{}
 
 type leaveIn struct {
 	Channel string `json:"channel" jsonschema:"The channel (org/name, or its name)"`
-	appkit.WakeArgs
 }
 
 type createIn struct {
@@ -36,14 +33,12 @@ type createIn struct {
 	Topic string `json:"topic" jsonschema:"What the channel is for"`
 	Org   string `json:"org,omitempty" jsonschema:"An org you manage (its short name, as list_channels shows it), for an org channel. Without it, the channel is outside orgs: you own it, and invite others with the invite tool. Its name gets a code added."`
 	Wake  string `json:"wake,omitempty" jsonschema:"all (default): once you've called watch, every message in the channel wakes you; mentions: only @-mentions of you; none: nothing does (read it with history)"`
-	appkit.WakeArgs
 }
 
 type joinIn struct {
 	Channel string `json:"channel,omitempty" jsonschema:"The channel (org/name, or its name; not needed with an invite)"`
 	Invite  string `json:"invite,omitempty" jsonschema:"An invite code (or link) to a channel outside orgs"`
 	Wake    string `json:"wake,omitempty" jsonschema:"all (default): once you've called watch, every message in the channel wakes you; mentions: only @-mentions of you; none: nothing does (read it with history)"`
-	appkit.WakeArgs
 }
 
 type postIn struct {
@@ -51,35 +46,28 @@ type postIn struct {
 	Text     string   `json:"text" jsonschema:"The message. @-mention agents by their handle (e.g. @ada-codex) to wake them."`
 	Mentions []string `json:"mentions,omitempty" jsonschema:"Handles to wake, besides @-mentions in the text"`
 	ReplyTo  string   `json:"reply_to,omitempty" jsonschema:"The id of the message you are answering (data.id in a delivered message, or the id post gave you): the post goes in its thread"`
-	appkit.WakeArgs
 }
 
 type historyIn struct {
 	Channel string `json:"channel" jsonschema:"The channel (org/name, or its name), or dm"`
 	Limit   int    `json:"limit,omitempty" jsonschema:"How many recent messages (default 20, at most 100)"`
-	appkit.WakeArgs
 }
 
 type inviteIn struct {
 	Channel string `json:"channel" jsonschema:"A channel outside orgs that you own"`
-	appkit.WakeArgs
 }
 
 type removeIn struct {
 	Channel string `json:"channel" jsonschema:"The channel (org/name, or its name)"`
 	Member  string `json:"member" jsonschema:"A member's handle, as list_channels shows it (e.g. bob-codex)"`
 	Ban     bool   `json:"ban,omitempty" jsonschema:"Keep that member's person out of a channel outside orgs (org channels always do)"`
-	appkit.WakeArgs
 }
 
-type unwatchIn struct {
-	appkit.WakeArgs
-}
+type unwatchIn struct{}
 
 type watchIn struct {
 	Ack   bool   `json:"ack,omitempty" jsonschema:"Set if your client acknowledges each event ({type: ack, delivery_id}); Monitor can't, so leave it unset there"`
 	Label string `json:"label,omitempty" jsonschema:"Name a new session (e.g. pipe gives claude-code@pipe); default numbered"`
-	appkit.WakeArgs
 }
 
 type memberOut struct {
@@ -168,7 +156,7 @@ func (a *App) resolve(ctx context.Context, person, raw string) (Channel, error) 
 // changes anything.
 var readOnly = &mcp.ToolAnnotations{ReadOnlyHint: true}
 
-func (a *App) addTools(srv *mcp.Server, at *appkit.Attachment) {
+func (a *App) addTools(srv *mcp.Server, at *wakeshift.Attachment) {
 	a.addChannelTools(srv, at)
 	a.addMessageTools(srv, at)
 	a.addModerationTools(srv, at)

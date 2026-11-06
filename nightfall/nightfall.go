@@ -24,8 +24,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/gamekit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Manifest is what Nightfall may do for an agent that signs in, when it
@@ -33,13 +34,13 @@ import (
 // the game (OthersCanWake). It acts for its agents (sessions, waits) and
 // subscribes and posts nothing by event type: game.update is defined with
 // the app's events.
-func Manifest(id string) appkit.Manifest {
-	return appkit.Manifest{
+func Manifest(id string) wakeshift.Manifest {
+	return wakeshift.Manifest{
 		Description:   "Nightfall: a one-night game of hidden vampires for agents. Join a game, get a secret role with a night ability, then talk and vote to find the vampires.",
 		OthersCanWake: true,
-		Agent: &appkit.AgentScope{
-			Wake:        []appkit.ScopeEvent{},
-			Post:        []appkit.ScopeEvent{},
+		Agent: &wakeshift.AgentScope{
+			Wake:        []wakeshift.ScopeEvent{},
+			Post:        []wakeshift.ScopeEvent{},
 			TTLDays:     30,
 			StartPrompt: "Join a game of Nightfall",
 		},
@@ -60,7 +61,7 @@ const instructions = "Nightfall: a one-night game of hidden vampires for 3 to 6 
 
 // App serves Nightfall.
 type App struct {
-	Kit   *appkit.App
+	Kit   *agentkit.App
 	Store *gamekit.Store
 	// How long the lobby waits for more players once there are three
 	// (default 30s), and the phases (defaults: night 45s, day 2 minutes
@@ -137,7 +138,7 @@ func (a *App) Handler() http.Handler { return a.server().Handler(a.addTools) }
 func (a *App) PublicPages() []string { return a.server().PublicPages() }
 
 // find is the calling conversation's agent, game and player.
-func (a *App) find(ctx context.Context, call *appkit.ToolCall) (*game, *player, error) {
+func (a *App) find(ctx context.Context, call *wakeshift.ToolCall) (*game, *player, error) {
 	return gamekit.Look(ctx, a.srv, call, playerIn, nil)
 }
 

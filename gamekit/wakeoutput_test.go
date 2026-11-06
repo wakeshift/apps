@@ -13,13 +13,14 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/apps/agentkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // A game tool's structured output carries Wakeshift's block as wakeshift
-// (appkit.WakeOutput), without the beacon line, beside the game's own
+// (wakeshift.WakeOutput), without the beacon line, beside the game's own
 // fields, for hosts that show the model only structuredContent; the block
-// stays in the content, beacon last, and appkit logs no warning about it.
+// stays in the content, beacon last, and wakeshift logs no warning about it.
 // The tool's output schema names wakeshift and takes any other field.
 func TestToolOutputCarriesWakeshift(t *testing.T) {
 	ctx := context.Background()
@@ -37,14 +38,14 @@ func TestToolOutputCarriesWakeshift(t *testing.T) {
 	hs := httptest.NewServer(core)
 	t.Cleanup(hs.Close)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	s := &Server{Title: "Nightfall", Name: "nightfall", Kit: &appkit.App{ID: "nightfall", Key: key, Core: hs.URL}}
+	s := &Server{Title: "Nightfall", Name: "nightfall", Kit: agentkit.TestApp("nightfall", key, hs.URL, "")}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t"}, nil)
 	s.events() // Attach needs an event
-	s.attached = s.Kit.Attach(srv, appkit.AttachOptions{})
-	AddTool(s, srv, &mcp.Tool{Name: "join"}, func(context.Context, *appkit.ToolCall, noIn) (*mcp.CallToolResult, map[string]any, error) {
+	s.attached = s.Kit.Attach(srv, wakeshift.AttachOptions{})
+	AddTool(s, srv, &mcp.Tool{Name: "join"}, func(context.Context, *wakeshift.ToolCall, noIn) (*mcp.CallToolResult, map[string]any, error) {
 		return nil, map[string]any{"game": "abc", "you": "ada"}, nil
 	})
-	AddTool(s, srv, &mcp.Tool{Name: "canvas"}, func(context.Context, *appkit.ToolCall, noIn) (*mcp.CallToolResult, map[string]any, error) {
+	AddTool(s, srv, &mcp.Tool{Name: "canvas"}, func(context.Context, *wakeshift.ToolCall, noIn) (*mcp.CallToolResult, map[string]any, error) {
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "The drawing."}}}, nil, nil
 	})
 
@@ -115,6 +116,6 @@ func TestToolOutputCarriesWakeshift(t *testing.T) {
 		t.Errorf("canvas's content: %q", texts)
 	}
 	if strings.Contains(logs.String(), "WakeOutput") {
-		t.Errorf("appkit warned: %s", logs.String())
+		t.Errorf("wakeshift warned: %s", logs.String())
 	}
 }

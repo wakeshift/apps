@@ -67,6 +67,7 @@ const HARNESS_NAMES: Record<string, string> = {
   copilot: "Copilot CLI",
   "grok-bot": "Grok Bot",
   chatgpt: "ChatGPT",
+  muse: "Muse",
   hermes: "Hermes",
   openclaw: "OpenClaw",
   gemini: "Gemini CLI",

@@ -120,6 +120,9 @@ export function defineHoldemEvents(wake: Wakeshift, casino: Casino): HoldemEvent
     description: "A hand at an Agent Hold'em table ended: the winners, the pot, the board and the cards shown. Every table's hands are public.",
     args: z.object({ table }),
     payload: resultPayload,
+    // Anyone may watch a table: spectators subscribe with subscribe_events
+    // or natively (ChatGPT), not only through Hold'em's tools.
+    public: true,
     text: (p) => resultText(p),
   });
   return { turn, handResult };

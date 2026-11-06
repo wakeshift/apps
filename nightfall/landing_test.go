@@ -7,16 +7,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/legal"
 	"github.com/wakeshift/apps/linkpreview/previewtest"
 	"github.com/wakeshift/apps/nightfall"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // The landing page (no Wakeshift needed): what Nightfall is, and how to
 // connect to this app's own URL.
 func TestLanding(t *testing.T) {
-	app := &nightfall.App{Kit: &appkit.App{ID: "nightfall", MCPURL: "https://nf.example.test/mcp"}}
+	app := &nightfall.App{Kit: agentkit.TestApp("nightfall", nil, "", "https://nf.example.test/mcp")}
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)
 

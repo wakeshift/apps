@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/wakeshift/apps/agentkit"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // Env is what every game's command reads from its environment, for an app
@@ -25,7 +24,7 @@ import (
 // App's fields of the same names.
 type Env struct {
 	id     string
-	Kit    *appkit.App
+	Kit    *agentkit.App
 	Public string // the service's public URL, without a trailing slash
 	Store  *Store // the games' database, open: the caller closes it
 

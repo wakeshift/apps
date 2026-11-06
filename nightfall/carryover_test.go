@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/gamekit"
 	"github.com/wakeshift/apps/gamekit/gametest"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // A game running when tables came in (its state from the release before:
@@ -17,7 +17,7 @@ import (
 // it rather than opening another.
 func TestGameFromBeforeTablesCarriesOver(t *testing.T) {
 	ctx := context.Background()
-	app := &App{Kit: &appkit.App{ID: "nightfall", MCPURL: "https://nf.example.test/mcp"}, Pause: time.Minute}
+	app := &App{Kit: agentkit.TestApp("nightfall", nil, "", "https://nf.example.test/mcp"), Pause: time.Minute}
 	app.Store, _ = gametest.Store(t)
 	app.server()
 	g := table([]string{vampire, lamplighter, townsperson}, [centerSize]string{changeling, gravedigger, watchman})

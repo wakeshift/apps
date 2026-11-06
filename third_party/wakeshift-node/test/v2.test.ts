@@ -10,7 +10,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { McpServer, createMcpHandler, type ServerContext } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { Wakeshift, type Attached } from "../src/index.js";
+import { Wakeshift, type Attachment } from "../src/index.js";
+import { quiet, warningsInto } from "./logs.js";
 import { EXTENSION_KEY } from "../src/spec.js";
 import { hostOf } from "../src/host.js";
 import { WAIT_TOOL } from "../src/tasks.js";
@@ -28,18 +29,21 @@ interface CoreReq {
 function fakeCore(answers: Record<string, (body: any) => unknown> = {}) {
   const reqs: CoreReq[] = [];
   const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
-    const path = String(url).replace("http://core.test/api/apps/v1", "");
+    const path = String(url).replace("https://core.test/api/apps/v1", "");
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     reqs.push({ path, body });
     const out = answers[path]?.(body) ?? {};
     return new Response(JSON.stringify(out), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
-  return { reqs, wake: new Wakeshift({ key: `wst_test_chat_${seed}`, core: "http://core.test", fetch: fakeFetch, onWarning: () => {} }) };
+  return { reqs, wake: new Wakeshift({ key: `wst_test_chat_${seed}`, core: "https://core.test", fetch: fakeFetch, logger: quiet }) };
 }
 
+// A client that declares MCP Events is "acme-agent": Claude Code (a harness
+// Wakeshift wakes itself) is never treated as native, whatever it declares.
+const speaks = (caps: Record<string, unknown>) => !!(caps.extensions as Record<string, unknown> | undefined)?.[EXTENSION_KEY];
 const envelope = (caps: Record<string, unknown> = {}) => ({
   [VERSION]: "2026-07-28",
-  [INFO]: { name: "claude-code", version: "2.1.314" },
+  [INFO]: { name: speaks(caps) ? "acme-agent" : "claude-code", version: "2.1.314" },
   [CAPS]: caps,
 });
 
@@ -74,6 +78,7 @@ function chatApp(wake: Wakeshift) {
     args: z.object({ channel: z.string() }),
     payload: z.object({ from: z.string(), text: z.string() }),
     text: (m) => `${m.from}: ${m.text}`,
+    public: true,
   });
 }
 
@@ -82,7 +87,7 @@ test("2.x: attach takes 2.x's McpServer, and identify gets its ctx", () => {
   chatApp(wake);
   const server = new McpServer({ name: "chat", version: "1" });
   assert.equal(hostOf(server).version, 2);
-  const attached: Attached<ServerContext> = wake.attach(server, { identify: (ctx) => ({ user: ctx.http?.authInfo?.clientId }) });
+  const attached: Attachment<McpServer> = wake.attach(server, { identify: (ctx) => ({ user: ctx.http?.authInfo?.clientId }) });
   assert.ok(attached);
   assert.throws(() => hostOf({}), /attach takes an McpServer/);
 });
@@ -96,15 +101,15 @@ test("2.x on 2026-07-28: a wrapped tool's call reaches Wakeshift as from 1.x, an
   let seen: ServerContext | undefined;
   const rpc = serve(() => {
     const server = new McpServer({ name: "chat", version: "1" });
-    const attached = wake.attach(server, { identify: (ctx) => ({ user: ctx.http?.authInfo?.clientId }), tools: { wait: { enabled: true } } });
-    server.registerTool(
+    const attached = wake.attach(server, { identify: (ctx) => ({ user: ctx.http?.authInfo?.clientId }), builtinTools: { wait: true } });
+    attached.registerTool(
       "watch",
-      { description: "Watch a channel", inputSchema: attached.inputs(z.object({ channel: z.string() })), outputSchema: z.object({ channel: z.string() }) },
-      attached.events("watch", async ({ channel }, call) => {
-        seen = call.extra;
+      { description: "Watch a channel", inputSchema: z.object({ channel: z.string() }), outputSchema: z.object({ channel: z.string() }), subscribes: [message] },
+      async ({ channel }, _ctx, call) => {
+        seen = call.ctx;
         await call.subscribe(message, { channel }, { reason: "Watching" });
         return { content: [{ type: "text", text: `Watching ${channel}.` }], structuredContent: { channel } };
-      }),
+      }
     );
     return server;
   });
@@ -151,14 +156,14 @@ test("2.x on 2026-07-28: a call that fails rolls its subscription back", async (
   const rpc = serve(() => {
     const server = new McpServer({ name: "chat", version: "1" });
     const attached = wake.attach(server, { identify: (ctx) => ({ user: ctx.http?.authInfo?.clientId }) });
-    server.registerTool(
+    attached.registerTool(
       "watch",
-      { inputSchema: attached.inputs(z.object({ channel: z.string() })), outputSchema: z.object({ n: z.number() }) },
-      attached.events("watch", async ({ channel }, call) => {
+      { inputSchema: z.object({ channel: z.string() }), outputSchema: z.object({ n: z.number() }), subscribes: [message] },
+      async ({ channel }, _ctx, call) => {
         await call.subscribe(message, { channel });
         // Breaks its own output schema: 2.x refuses it, so the subscription goes.
-        return { content: [{ type: "text", text: "x" }], structuredContent: { n: "not a number" } };
-      }),
+        return { content: [{ type: "text", text: "x" }], structuredContent: { n: "not a number" } } as any;
+      }
     );
     return server;
   });
@@ -192,7 +197,7 @@ test("2.x on 2026-07-28: native events/subscribe and events/poll, with Mcp-Name 
   assert.equal(sub.result.id, "sub_1");
   const body = reqs.find((r) => r.path === "/events/subscribe")!.body;
   assert.equal(body.call.user, "ada");
-  assert.equal(body.call.client, "claude-code");
+  assert.equal(body.call.client, "acme-agent");
   assert.deepEqual(body.call.meta, envelope(native), "the envelope's keys reach Wakeshift");
 
   const mismatch = await rpc("events/subscribe", { name: "chat.message", arguments: { channel: "eng" }, delivery }, { caps: native, name: "other", user: "ada" });
@@ -259,20 +264,20 @@ test("2.x: tasks/get for an ID that isn't Wakeshift's goes to the app's own hand
 // one installed (the peer range's floor or later) routes them.
 test("2.x: attach warns, once, on a server too old to route tasks/get", () => {
   const warnings: string[] = [];
-  const wake = new Wakeshift({ key: `wst_test_chat_${seed}`, core: "http://core.test", onWarning: (m) => warnings.push(m) });
+  const wake = new Wakeshift({ key: `wst_test_chat_${seed}`, core: "https://core.test", logger: warningsInto(warnings) });
   chatApp(wake);
-  wake.attach(new McpServer({ name: "chat", version: "1" }), { tools: { wait: { enabled: true } } });
+  wake.attach(new McpServer({ name: "chat", version: "1" }), { builtinTools: { wait: true } });
   assert.deepEqual(warnings, [], "the installed 2.x routes them");
   for (let i = 0; i < 2; i++) {
     const old = new McpServer({ name: "chat", version: "1" });
     // What 2.0 to 2.2 lack: the Set of methods registered with a schema,
     // which 2.3.0's era gate lets through (stubbed, so registering still works).
     (old.server as unknown as Record<string, unknown>)._customSchemaRequestMethods = { add() {}, delete() {}, has: () => false };
-    wake.attach(old, { tools: { wait: { enabled: true } } });
+    wake.attach(old, { builtinTools: { wait: true } });
   }
   // Without the wait tool there's nothing to route, so nothing to say.
   const quiet: string[] = [];
-  const off = new Wakeshift({ key: `wst_test_chat_${seed}`, core: "http://core.test", onWarning: (m) => quiet.push(m) });
+  const off = new Wakeshift({ key: `wst_test_chat_${seed}`, core: "https://core.test", logger: warningsInto(quiet) });
   chatApp(off);
   const old = new McpServer({ name: "chat", version: "1" });
   (old.server as unknown as Record<string, unknown>)._customSchemaRequestMethods = { add() {}, delete() {}, has: () => false };

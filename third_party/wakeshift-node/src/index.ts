@@ -1,74 +1,40 @@
-export {
-  Wakeshift,
-  DEFAULT_CORE,
-  SESSION_ARG,
-  HARNESS_ARG,
-  CONVERSATION_ARG,
-  type WakeshiftOptions,
-  type AppInfo,
-  type Duration,
-  type Recognized,
-  type Emitted,
-  type Recipient,
-  type Via,
-  type PublishUrl,
-  type ToolExtra,
-  type Manifest,
-  type AgentScope,
-  type ScopeEvent,
-} from "./wakeshift.js";
-export { harnessAgent } from "./harness.js";
-export { IdReusedError, WakeshiftError, isCode } from "./errors.js";
-export { parseKey, signAssertion, type AppKey } from "./key.js";
-export {
+// @wakeshift/sdk: the public surface (design §5, test/SURFACE.md).
+export { Wakeshift, type WakeshiftOptions, type Duration, type Recognized, type Emitted, type Recipient, type PublishUrl, type Manifest, type AgentScope, type ScopeEvent, type ManifestEvent, type Agent } from "./wakeshift.js";
+export { APIConnectionError, APIError, IdReusedError, UsageError, WakeshiftError, isWakeshiftError, type WakeshiftErrorCode } from "./errors.js";
+export { redactSecrets } from "./secrets.js";
+export { decodeArgValue, encodeArgValue } from "./argvalue.js";
+export type { LogFields, LogLevel, Logger } from "./log.js";
+export type {
   WakeEvent,
-  ArgsError,
-  EVENT_TOOL_TEXT,
-  notifies,
-  type NotifiesOptions,
-  SUBSCRIBE_TOOL_DESCRIPTION,
-  UNSUBSCRIBE_TOOL_DESCRIPTION,
-  LIST_TOOL_DESCRIPTION,
-  BUILTIN_TOOLS,
-  type BuiltinTool,
-  type EventOptions,
-  type EmitOptions,
-  type EventStatus,
-  type EventSubscriptionStatus,
-  MAX_STATUS_SUBSCRIPTIONS,
-  type EventTypeManifest,
-  type AttachOptions,
-  type AttachTools,
-  type ToolOptions,
-  type WaitToolOptions,
-  type Identity,
-  type Subscriber,
+  EventOptions,
+  EmitOptions,
+  PublishUrlOptions,
+  EventStatus,
+  SubscriptionStatus,
+  RequestOptions,
+  AttachOptions,
+  BuiltinTools,
+  Identity,
+  Subscriber,
 } from "./events.js";
-export {
-  CallEnded,
-  type AnyWakeEvent,
-  type EventArgs,
-  type ToolCallBase,
-  type ToolCallSubscribe,
-  type ToolEventsOptions,
-  type Attached,
-  type AppArgs,
-  type EventsOptions,
-  type Subscription,
-  type ToolCall,
-  type ToolCallExtra,
-  type ToolSubscribeOptions,
-  type WakeArgs,
-  type WakeInputs,
-  type WakeInputsV3,
-  type WakeInputsV4,
-  type WakeKey,
-  type WakeOutputShape,
-  type WakeOutputV3,
-  type WakeOutputV4,
-  type WakeShape,
-  type WrappedCallback,
-  type WrappedResult,
+export { BUILTIN_TOOL_NAMES } from "./toolcall.js";
+export type {
+  Attachment,
+  AnyEvent,
+  SharedEvent,
+  EventArgs,
+  EventPayload,
+  RegisterToolConfig,
+  RegisterToolHandler,
+  RegisterToolResult,
+  InferArgs,
+  ToolResult,
+  SubscribeOptions,
+  Subscription,
+  SubscriptionState,
+  ToolCall,
+  ToolCallBase,
+  ToolCallSubscribe,
 } from "./toolcall.js";
-export type { AuthInfo, CallToolResult, ContentBlock, HostContext, McpServerLike } from "./mcp.js";
-export { EXTENSION_KEY, TEXT_META, REVISION as EVENTS_REVISION } from "./spec.js";
+export type { AuthInfo, ToolCallExtra, McpServerLike, LowServerLike, HostContext } from "./mcp.js";
+export type { Subscribed, Watch, WatchCheck, WatchCheckContext, WatchOptions, WatchResult } from "./watch.js";

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // ── Slack's requests ─────────────────────────────────────────────────────
@@ -470,8 +470,8 @@ func (a *App) deliver(ctx context.Context, m incoming, ag Agent, l Listener, whe
 	msg := Message{Where: where, Text: truncate(strings.TrimSpace(m.ev.Text), 32000), Channel: m.ev.Channel, ChannelName: channelName,
 		ThreadTS: m.root(), TS: m.ev.TS, From: m.ev.User, FromOwner: fromOwner}
 	// Personal: only the agent's own person's subscriptions can match.
-	pub, err := a.messages().Emit(ctx, MessageArgs{Listener: l.ID}, msg, appkit.To(wsUser(ag.TeamID, ag.UserID)),
-		appkit.WithID("slack:"+m.team.ID+":"+m.eventID+":"+l.ID))
+	pub, err := a.messages().Emit(ctx, MessageArgs{Listener: l.ID}, msg, wakeshift.To(wsUser(ag.TeamID, ag.UserID)),
+		wakeshift.WithID("slack:"+m.team.ID+":"+m.eventID+":"+l.ID))
 	if err != nil {
 		return err
 	}

@@ -10,7 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/agentkit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Agents' tools for sessions: being woken.
@@ -27,20 +27,19 @@ type watchOut struct {
 	// Wakeshift doesn't recognize that holds one itself.
 	URL       string `json:"url,omitempty"`
 	ExpiresAt string `json:"expires_at,omitempty"`
-	appkit.WakeOutput
 }
 
 // addSessionTools: watch and unwatch, which start and stop what wakes a
 // conversation. Watch is the only tool that subscribes.
-func (a *App) addSessionTools(srv *mcp.Server, at *appkit.Attachment) {
-	mcp.AddTool(srv, &mcp.Tool{Name: "unwatch", Description: "Stop new messages waking this conversation (the opposite of watch). Pass session_key (from watch); a Codex thread needs nothing. " +
+func (a *App) addSessionTools(srv *mcp.Server, at *wakeshift.Attachment) {
+	wakeshift.AddTool(at, &mcp.Tool{Name: "unwatch", Description: "Stop new messages waking this conversation (the opposite of watch). Pass session_key (from watch); a Codex thread needs nothing. " +
 		"Your channel memberships stay: you can still read and post, and watch again wakes them."},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in unwatchIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in unwatchIn) (*mcp.CallToolResult, map[string]any, error) {
 			me, ag, err := a.caller(ctx, call)
 			if err != nil {
 				return nil, nil, err
 			}
-			session, ok, err := conversation(ctx, call, in.WakeArgs)
+			session, ok, err := conversation(ctx, call)
 			if err != nil {
 				return nil, nil, friendly(err)
 			}
@@ -51,7 +50,7 @@ func (a *App) addSessionTools(srv *mcp.Server, at *appkit.Attachment) {
 				if _, err := a.notifications().Unsubscribe(ctx, call, NotificationArgs{}); err != nil {
 					return nil, nil, friendly(err)
 				}
-			} else if err := agentkit.Unwatch(ctx, ag, session); appkit.IsCode(err, "unknown_session") {
+			} else if err := agentkit.Unwatch(ctx, ag, session); wakeshift.IsCode(err, "unknown_session") {
 				return nil, nil, fmt.Errorf("you have no session %s", session)
 			} else if err != nil {
 				return nil, nil, friendly(err)
@@ -63,7 +62,7 @@ func (a *App) addSessionTools(srv *mcp.Server, at *appkit.Attachment) {
 			if watching && sub != "" {
 				// No message is routed to it any more; ending it in
 				// Wakeshift too keeps the console honest.
-				if _, err := a.notifications().End(context.WithoutCancel(ctx), subscriber, sub); err != nil {
+				if _, err := a.Kit.EndSubscription(context.WithoutCancel(ctx), subscriber, sub); err != nil {
 					slog.Warn("agentchat: ending an unwatched conversation's subscription", "err", err)
 				}
 			}
@@ -72,10 +71,10 @@ func (a *App) addSessionTools(srv *mcp.Server, at *appkit.Attachment) {
 				out["session_key"] = session
 			}
 			return nil, out, nil
-		}))
+		}, wakeshift.Subscribes())
 
-	mcp.AddTool(srv, &mcp.Tool{Name: "watch", Description: watchDescription},
-		appkit.Events(at, func(ctx context.Context, call *appkit.ToolCall, in watchIn) (*mcp.CallToolResult, watchOut, error) {
+	wakeshift.AddTool(at, &mcp.Tool{Name: "watch", Description: watchDescription},
+		func(ctx context.Context, call *wakeshift.ToolCall, in watchIn) (*mcp.CallToolResult, watchOut, error) {
 			me, ag, err := a.caller(ctx, call)
 			if err != nil {
 				return nil, watchOut{}, err
@@ -85,16 +84,20 @@ func (a *App) addSessionTools(srv *mcp.Server, at *appkit.Attachment) {
 			// command, the install offer for its hooks or plugin, a beacon
 			// where its hook reads it). A client that subscribes itself is
 			// told to subscribe to chat.notification.
-			opts := []appkit.SubscribeOption{appkit.Reason("Messages for @" + me.Handle + " in Agent Chat")}
+			opts := []wakeshift.SubscribeOption{wakeshift.Reason("Messages for @" + me.Handle + " in Agent Chat")}
 			if in.Label != "" {
-				opts = append(opts, appkit.Label(in.Label))
+				opts = append(opts, wakeshift.Label(in.Label))
 			}
 			sub, err := a.notifications().Subscribe(ctx, call, NotificationArgs{}, opts...)
 			if err != nil {
 				return nil, watchOut{}, friendly(err)
 			}
-			session, subscriber := sub.Session, sub.User
-			if sub.Native {
+			if sub.State == wakeshift.SubscriptionUnavailable {
+				return nil, watchOut{}, fmt.Errorf("Agent Chat can't wake this client (%s)", sub.Reason)
+			}
+			native := sub.State == wakeshift.SubscriptionNative
+			session, subscriber := string(sub.Session), sub.User
+			if native {
 				session, subscriber = "", me.wakeUser() // the native marker
 			}
 			// Routing reaches the conversation from its watchers row on. A
@@ -106,7 +109,7 @@ func (a *App) addSessionTools(srv *mcp.Server, at *appkit.Attachment) {
 			// (recordWatch): a failed call's rollback ends it, and a row
 			// holding it would read as ended at the next message, which
 			// forgets the conversation's memberships.
-			if pw, ok := ctx.Value(pendingWatchKey{}).(*pendingWatch); ok && sub.Created {
+			if pw, ok := ctx.Value(pendingWatchKey{}).(*pendingWatch); ok && sub.State == wakeshift.SubscriptionCreated {
 				*pw = pendingWatch{set: true, agent: me.ID, session: session, subscription: sub.ID, subscriber: subscriber}
 			} else if err := a.Store.Watch(ctx, me.ID, session, sub.ID, subscriber); errors.Is(err, ErrNotFound) {
 				// Disconnected meanwhile: the error rolls the subscription back.
@@ -116,7 +119,7 @@ func (a *App) addSessionTools(srv *mcp.Server, at *appkit.Attachment) {
 			}
 			a.noteLabel(ctx, me, session)
 			out := watchOut{Handle: me.Handle, SessionKey: session, DM: dmNote}
-			if sub.Native {
+			if native {
 				out.Note = dmNote + " In channels you're @" + me.Handle + ". Join a channel to read and post in it; its messages reach you through your chat.notification subscription. " +
 					"Answer a message where it came from with the post tool (reply_to: its data.id)."
 				return nil, out, nil
@@ -135,7 +138,7 @@ func (a *App) addSessionTools(srv *mcp.Server, at *appkit.Attachment) {
 				out.URL, out.ExpiresAt = link.URL, link.ExpiresAt.Format(time.RFC3339)
 			}
 			return nil, out, nil
-		}, appkit.Subscribes(a.notifications())))
+		}, wakeshift.Subscribes(a.notifications()))
 }
 
 // errDisconnected is a watch's error for an agent disconnected while it
@@ -168,6 +171,18 @@ func (a *App) recordWatch(next mcp.MethodHandler) mcp.MethodHandler {
 		if !pw.set || err != nil || out == nil || out.IsError || ctx.Err() != nil {
 			return res, err // failed: Attach rolled the subscription back
 		}
+		// A watch whose Wakeshift block couldn't be had answers as it would
+		// without Wakeshift, never an error (#941), and Attach rolled its
+		// subscription back: so a result that isn't an error doesn't say the
+		// subscription survived. Record it only if Wakeshift still has it;
+		// if Wakeshift can't say, don't (a row holding an ended subscription
+		// would forget the conversation's memberships at the next message).
+		if st, serr := a.notifications().StatusOf(context.WithoutCancel(ctx), wakeshift.Recipient{User: pw.subscriber, Subscription: pw.subscription}); serr != nil || len(st) != 1 || !st[0].Live {
+			if serr != nil {
+				slog.Warn("agentchat: checking a watch's new subscription", "err", serr)
+			}
+			return res, err
+		}
 		werr := a.Store.Watch(context.WithoutCancel(ctx), pw.agent, pw.session, pw.subscription, pw.subscriber)
 		if werr == nil {
 			return res, err
@@ -181,7 +196,7 @@ func (a *App) recordWatch(next mcp.MethodHandler) mcp.MethodHandler {
 		} else {
 			slog.Warn("agentchat: recording a watch", "err", werr)
 		}
-		if _, err := a.notifications().End(context.WithoutCancel(ctx), pw.subscriber, pw.subscription); err != nil {
+		if _, err := a.Kit.EndSubscription(context.WithoutCancel(ctx), pw.subscriber, pw.subscription); err != nil {
 			slog.Warn("agentchat: ending a watch's subscription it couldn't record", "err", err)
 		}
 		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: msg}}}, nil

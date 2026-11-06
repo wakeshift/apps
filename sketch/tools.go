@@ -12,18 +12,15 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wakeshift/apps/gamekit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
-type sessionIn struct {
-	appkit.WakeArgs
-}
+type sessionIn struct{}
 
 type drawIn struct {
 	SVG     string     `json:"svg,omitempty" jsonschema:"What to add to the drawing, as SVG in the subset the tool describes: elements in the 100×100 viewBox, with or without an <svg> around them, up to 16 KB. Give svg or strokes, not both."`
 	Strokes []strokeIn `json:"strokes,omitempty" jsonschema:"Or up to 10 strokes to add to the drawing, in order, instead of svg"`
-	appkit.WakeArgs
-	Note string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
+	Note    string     `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 // drawCall is a draw call's marks: its strokes, or its svg's shapes.
@@ -87,18 +84,15 @@ func (d drawCall) fits(before []stroke) error {
 
 type previewIn struct {
 	SVG string `json:"svg" jsonschema:"The SVG to render on your drawing so far, in the same subset as draw's svg"`
-	appkit.WakeArgs
 }
 
 type guessIn struct {
 	Word string `json:"word" jsonschema:"Your guess: a word or short phrase (letters only). A wrong guess is shown to every player and spectator."`
-	appkit.WakeArgs
 	Note string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
 type sayIn struct {
 	Text string `json:"text" jsonschema:"Public: said aloud to every other player in the room and to every spectator."`
-	appkit.WakeArgs
 	Note string `json:"note,omitempty" jsonschema:"Optional short note for your operator about this move, shown on their watch page."`
 }
 
@@ -231,7 +225,7 @@ func (a *App) addTools(srv *mcp.Server) {
 		"In a room that's playing, you guess from now on and draw when the rotation reaches you; a new room's first round starts 30 seconds after three players are in. " +
 		"Scores count the room's last 20 rounds. Stay as long as you like and call `leave` when you're done; missing two rounds in a row takes you out. " +
 		"A client that subscribes to events itself subscribes to turn after joining, with the game's ID."},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			gs, key, err := a.srv.Join(ctx, call, func(tx *gamekit.Tx, gs gamekit.State, p gamekit.Player) error {
 				return a.seated(tx, gs.(*game), p)
 			})
@@ -254,11 +248,11 @@ func (a *App) addTools(srv *mcp.Server) {
 			}
 			a.touchNow(ctx, g.ID, key) // one already seated, joining again, is there
 			return nil, a.srv.Joined(call, a.view(ctx, g, me)), nil
-		}, appkit.Subscribes(a.srv.Updates(), a.turn))
+		}, wakeshift.Subscribes(a.srv.Updates(), a.turn))
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "game", Description: "Your room: the round, who's drawing, what the word is worth, the scores (the last 20 rounds), the latest guesses, and the hint so far. " +
 		"When you're drawing, your secret word."},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			g, me, err := a.mine(ctx, call)
 			if err != nil {
 				return nil, nil, err
@@ -270,7 +264,7 @@ func (a *App) addTools(srv *mcp.Server) {
 		"Start within 30 seconds of your round starting, or the turn passes to the next drawer; the round then lasts 60 seconds from your first drawing. The guessers see your drawing as you draw it. " + svgRules + " " +
 		"strokes: up to 10 a call, each a line (2 points) or a polyline (up to 32 points) with [x, y] from 0 to 100, a color from the same palette and a width from 1 to 6. " +
 		drawRules},
-		func(ctx context.Context, call *appkit.ToolCall, in drawIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in drawIn) (*mcp.CallToolResult, map[string]any, error) {
 			d, err := checkDraw(in)
 			if err != nil {
 				return nil, nil, err
@@ -317,7 +311,7 @@ func (a *App) addTools(srv *mcp.Server) {
 		"It takes the same subset as draw's svg and says how it was read (shapes, colors snapped, attributes ignored) or why it would be refused. " +
 		"Nothing is added to the drawing, nobody else sees the preview, and it doesn't count as starting to draw. At most one every 2 seconds and 20 a round.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
-		func(ctx context.Context, call *appkit.ToolCall, in previewIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in previewIn) (*mcp.CallToolResult, map[string]any, error) {
 			g, me, err := a.mine(ctx, call)
 			if err != nil {
 				return nil, nil, err
@@ -353,7 +347,7 @@ func (a *App) addTools(srv *mcp.Server) {
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "canvas", Description: "The drawing so far, as an image, and its marks as text: a stroke's color, width and [x, y] points from 0 to 100; a shape's fill and outline colors. " +
 		"Guessers: look, then `guess` the word.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			g, _, err := a.mine(ctx, call)
 			if err != nil {
 				return nil, nil, err
@@ -382,7 +376,7 @@ func (a *App) addTools(srv *mcp.Server) {
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "guess", Description: "Guess the word or phrase being drawn (not when you're the drawer). Case, plurals and common synonyms don't matter. " +
 		"Words can be compound ideas, actions or idioms drawn literally. The first right guess scores for you and for the drawer (1, 2 or 3 points: easy, medium or hard) and ends the round. " +
 		"Everyone sees wrong guesses."},
-		func(ctx context.Context, call *appkit.ToolCall, in guessIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in guessIn) (*mcp.CallToolResult, map[string]any, error) {
 			text := strings.Join(strings.Fields(in.Word), " ")
 			if !validGuess(text) {
 				return nil, nil, errors.New("word is required: letters, spaces and hyphens only, up to 40 characters")
@@ -399,7 +393,7 @@ func (a *App) addTools(srv *mcp.Server) {
 		})
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "say", Description: "Say something to the other players in your room. Not while you're drawing, and not the word: guess with `guess`."},
-		func(ctx context.Context, call *appkit.ToolCall, in sayIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sayIn) (*mcp.CallToolResult, map[string]any, error) {
 			text := strings.TrimSpace(in.Text)
 			if text == "" || len(text) > 300 {
 				return nil, nil, errors.New("text is required (at most 300 characters)")
@@ -422,7 +416,7 @@ func (a *App) addTools(srv *mcp.Server) {
 		})
 
 	gamekit.AddTool(a.srv, srv, &mcp.Tool{Name: "leave", Description: "Leave your room when you're done playing. The room plays on without you; if you're drawing, the round is void."},
-		func(ctx context.Context, call *appkit.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, call *wakeshift.ToolCall, in sessionIn) (*mcp.CallToolResult, map[string]any, error) {
 			_, err := a.move(ctx, call, func(tx *gamekit.Tx, g *game, me *player) error { return a.leave(tx, g, me) })
 			if err != nil {
 				return nil, nil, err
@@ -481,14 +475,14 @@ func (a *App) guess(tx *gamekit.Tx, g *game, p *player, text string, owner bool)
 // mine is the calling conversation's agent, game and player. A call as
 // the player means it's there (checkAway): that's noted before the game is
 // read, so a round that ends after this read counts it.
-func (a *App) mine(ctx context.Context, call *appkit.ToolCall) (*game, *player, error) {
+func (a *App) mine(ctx context.Context, call *wakeshift.ToolCall) (*game, *player, error) {
 	return gamekit.Look(ctx, a.srv, call, playerIn, func(game, key string) { a.touchNow(ctx, game, key) })
 }
 
 // move runs a player's move on its game, under the game's lock (with who's
 // away found first: Wakeshift isn't called under the lock), noting that the
 // player is there.
-func (a *App) move(ctx context.Context, call *appkit.ToolCall, fn func(tx *gamekit.Tx, g *game, me *player) error) (*game, error) {
+func (a *App) move(ctx context.Context, call *wakeshift.ToolCall, fn func(tx *gamekit.Tx, g *game, me *player) error) (*game, error) {
 	return gamekit.Move(ctx, a.srv, call, playerIn, func(tx *gamekit.Tx, g *game, me *player) error {
 		if err := touch(tx.Ctx, tx, g.ID, me.Key(), tx.Now); err != nil {
 			return err

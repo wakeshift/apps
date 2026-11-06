@@ -6,17 +6,17 @@ import assert from "node:assert/strict";
 import { McpServer, InMemoryTransport, createMcpHandler, type CallToolResult, type ServerContext } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { z } from "zod";
-import { Wakeshift, type ToolCall } from "@wakeshift/sdk";
+import { Wakeshift } from "@wakeshift/sdk";
 
-const seed = Buffer.alloc(32, 7).toString("base64url");
+const KEY = "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV";
 
-// Wrapped tools: the handler's arguments are typed from attached.inputs (a
-// zod object, as 2.x takes it), and a tool without Wakeshift's arguments
-// doesn't compile. Only wrapped tools reach Wakeshift.
+// Tools that subscribe: the handler's arguments are typed from the tool's
+// own inputSchema (a zod object, as 2.x takes it); only tools that
+// subscribe reach Wakeshift.
 const wrapCalls: string[] = [];
 const wrapBodies: { path: string; call?: unknown }[] = [];
 const wrapFetch = (async (url: string | URL | Request, init?: RequestInit) => {
-  const path = String(url).replace("http://core.test/api/apps/v1", "");
+  const path = String(url).replace("https://core.test/api/apps/v1", "");
   wrapCalls.push(path);
   wrapBodies.push({ path, call: JSON.parse(String(init?.body ?? "{}")).call });
   const json =
@@ -27,30 +27,19 @@ const wrapFetch = (async (url: string | URL | Request, init?: RequestInit) => {
         : {};
   return new Response(JSON.stringify(json), { status: 200, headers: { "Content-Type": "application/json" } });
 }) as typeof fetch;
-const wake = new Wakeshift({ key: `wst_test_ci-bot_${seed}`, core: "http://core.test", fetch: wrapFetch });
+const wake = new Wakeshift({ key: KEY, core: "https://core.test", fetch: wrapFetch, logLevel: "off" });
 const turn = wake.defineEvent("game.turn", { description: "Your move", args: z.object({ table: z.string() }), payload: z.object({ toCall: z.number() }), text: (t) => `${t.toCall} to call`, personal: true });
 
 function app(): McpServer {
   const server = new McpServer({ name: "cards", version: "1.0.0" });
-  const attached = wake.attach(server, { identify: (ctx: ServerContext) => ({ user: ctx.http?.authInfo?.clientId ?? "u1" }), tools: { wait: { enabled: true } } });
-  server.registerTool(
-    "join",
-    { inputSchema: attached.inputs(z.object({ table: z.string() })) },
-    attached.events("join", async ({ table }, call: ToolCall<ServerContext>) => {
-      const t: string = table;
-      const sub = await call.subscribe(turn, { table: t }, { reason: "Playing" });
-      return `Seated at ${table} (${sub.id}).`;
-    }),
-  );
-  server.registerTool(
-    "look",
-    { inputSchema: attached.inputs(z.object({})), outputSchema: attached.output(z.object({ seats: z.number() })) },
-    attached.events("look", () => ({ content: [{ type: "text" as const, text: "3" }], structuredContent: { seats: 3 } })),
-  );
+  const attached = wake.attach(server, { identify: (ctx: ServerContext) => ({ user: ctx.http?.authInfo?.clientId ?? "u1" }), builtinTools: { wait: true } });
+  attached.registerTool("join", { inputSchema: z.object({ table: z.string() }), subscribes: [turn] }, async ({ table }, _ctx, call) => {
+    const t: string = table;
+    const sub = await call.subscribe(turn, { table: t }, { reason: "Playing" });
+    return `Seated at ${table} (${sub.state === "created" ? sub.id : sub.state}).`;
+  });
+  attached.registerTool("look", { inputSchema: z.object({}), outputSchema: z.object({ seats: z.number() }), subscribes: [] }, () => ({ content: [{ type: "text" as const, text: "3" }], structuredContent: { seats: 3 } }));
   server.registerTool("ping", { inputSchema: z.object({ table: z.string() }) }, async () => ({ content: [{ type: "text", text: "pong" }] }));
-  const bare = attached.events("bare", () => "never");
-  // @ts-expect-error: a wrapped tool's inputSchema comes from attached.inputs
-  server.registerTool("bare", { inputSchema: z.object({ table: z.string() }) }, bare);
   return server;
 }
 
@@ -63,9 +52,9 @@ assert.equal((joined.content[0] as { text: string }).text, "Seated at oak (es_1)
 const looked = (await player.callTool({ name: "look", arguments: { session_key: "wsc_1" } })) as CallToolResult;
 assert.deepEqual(looked.structuredContent, { seats: 3, wakeshift: "Wakeshift: woken." });
 const { tools } = await player.listTools();
-assert.deepEqual(Object.keys(tools.find((t) => t.name === "ping")!.inputSchema.properties ?? {}), ["table"], "a tool that isn't wrapped is left alone");
+assert.deepEqual(Object.keys(tools.find((t) => t.name === "ping")!.inputSchema.properties ?? {}), ["table"], "a tool that doesn't subscribe is left alone");
 assert.deepEqual(
-  wrapCalls.filter((p) => !p.startsWith("/manifest")),
+  wrapCalls.filter((p) => !p.startsWith("/manifest") && p !== "/app"),
   ["/event-subscriptions", "/calls/addition", "/calls/addition"],
 );
 assert.deepEqual(wrapBodies.find((b) => b.path === "/event-subscriptions")!.call, { client: "Cursor", user: "u1", tool: "join" });

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/gamekit"
 	"github.com/wakeshift/apps/gamekit/gametest"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // spectated sets up a game in each phase behind a server: dealt, with the
@@ -20,7 +20,7 @@ import (
 // votes cast (from the vote on) and tallied (once it's over).
 func spectated(t *testing.T) (*httptest.Server, map[string]*game) {
 	t.Helper()
-	app := &App{Kit: &appkit.App{ID: "nightfall", MCPURL: "https://nf.example.test/mcp"}}
+	app := &App{Kit: agentkit.TestApp("nightfall", nil, "", "https://nf.example.test/mcp")}
 	app.Store, _ = gametest.Store(t)
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)

@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/wakeshift/apps/gamekit"
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 //go:embed migrations/*.sql
@@ -193,7 +193,7 @@ type queuedTurn struct {
 // defineEvents defines turn: a personal event, so only the drawer's own
 // subscriptions get its word.
 func (a *App) defineEvents() {
-	e, err := appkit.DefineEvent(a.Kit, "turn", appkit.EventDef[turnArgs, turnPayload]{
+	e, err := wakeshift.DefineEvent(a.Kit.Client, "turn", wakeshift.EventDef[turnArgs, turnPayload]{
 		Title:       "Your turn to draw",
 		Description: "It's your turn to draw in a Sketch Stadium game you're seated in, with your secret word.",
 		Text: func(t turnPayload, _ turnArgs) string {
@@ -211,14 +211,14 @@ func (a *App) defineEvents() {
 
 // authorizeTurn lets a player subscribe to its own turns in a game it's
 // seated in.
-func (a *App) authorizeTurn(ctx context.Context, sub appkit.Subscriber, args turnArgs) bool {
+func (a *App) authorizeTurn(ctx context.Context, sub wakeshift.Subscriber, args turnArgs) (bool, error) {
 	if sub.User == "" || args.Game == "" {
-		return false
+		return false, nil
 	}
 	var ok bool
 	err := a.Store.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM seats WHERE game_id = $1 AND workspace || '/' || agent = $2 AND handle IS NOT NULL)`,
 		args.Game, sub.User).Scan(&ok)
-	return err == nil && ok
+	return ok, err
 }
 
 // queueTurn leaves the drawer's turn event to send.
@@ -309,7 +309,7 @@ func (a *App) send(ctx context.Context, game, kind string, data []byte) error {
 		if err := json.Unmarshal(data, &t); err != nil {
 			return nil // nothing to retry
 		}
-		_, err := a.turn.Emit(ctx, turnArgs{Game: t.Turn.Game}, t.Turn, appkit.To(t.User), appkit.WithID(fmt.Sprintf("turn:%s:%d", t.Turn.Game, t.Turn.Round)))
+		_, err := a.turn.Emit(ctx, turnArgs{Game: t.Turn.Game}, t.Turn, wakeshift.To(t.User), wakeshift.WithID(fmt.Sprintf("turn:%s:%d", t.Turn.Game, t.Turn.Round)))
 		return err
 	case "remove":
 		// A removed seat's subscription. One with none (queued before the

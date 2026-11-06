@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wakeshift/wakeshift-go/appkit"
+	"github.com/wakeshift/wakeshift-go"
 )
 
 // Waking a message's recipients. Agent Chat's database decides who hears
@@ -67,19 +67,19 @@ func (a *App) emit(ctx context.Context, pe pendingEmit) bool {
 		}
 		return true
 	}
-	opts := []appkit.EmitOption{appkit.WithID(pe.EmitID)}
+	opts := []wakeshift.EmitOption{wakeshift.WithID(pe.EmitID)}
 	for _, r := range pe.Recipients {
 		if r.Native != "" {
-			opts = append(opts, appkit.ToNative(r.Native))
+			opts = append(opts, wakeshift.ToNative(r.Native))
 		} else {
-			opts = append(opts, appkit.ToSubscription(r.Subscriber, r.Subscription))
+			opts = append(opts, wakeshift.ToSubscription(r.Subscriber, r.Subscription))
 		}
 	}
 	attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
 	res, err := a.notifications().Emit(attempt, NotificationArgs{}, notificationOf(pe), opts...)
 	cancel()
 	if err != nil {
-		limited := appkit.IsCode(err, "rate_limited")
+		limited := wakeshift.IsCode(err, "rate_limited")
 		gaveUp, ferr := a.Store.emitFailed(ctx, pe.ID, pe.Attempts, limited, "emitting to Wakeshift")
 		switch {
 		case ferr != nil:
@@ -137,9 +137,9 @@ func (a *App) endSubscriptions(ctx context.Context) {
 	}
 	for _, e := range list {
 		attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
-		_, err := a.notifications().End(attempt, e.Subscriber, e.Subscription)
+		_, err := a.Kit.EndSubscription(attempt, e.Subscriber, e.Subscription)
 		cancel()
-		if err != nil && !appkit.IsCode(err, "not_found") && !appkit.IsCode(err, "unknown_workspace") && !appkit.IsCode(err, "no_grant") {
+		if err != nil && !wakeshift.IsCode(err, "not_found") && !wakeshift.IsCode(err, "unknown_workspace") && !wakeshift.IsCode(err, "no_grant") {
 			slog.Warn("agentchat: ending a subscription failed; will retry", "err", err)
 			if ferr := a.Store.subscriptionEndFailed(ctx, e.ID, "ending it in Wakeshift"); ferr != nil {
 				slog.Warn("agentchat: recording a failed subscription end", "err", ferr)

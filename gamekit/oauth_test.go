@@ -22,9 +22,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 
+	"github.com/wakeshift/apps/agentkit"
 	"github.com/wakeshift/apps/internal/pgtest"
 	"github.com/wakeshift/apps/legal"
-	"github.com/wakeshift/wakeshift-go/appkit"
 )
 
 // fakeCore is the part of Wakeshift's app API sign-in uses: workspaces,
@@ -105,7 +105,7 @@ func newSignInApp(t *testing.T, withLegal bool) *signInApp {
 	t.Cleanup(coreSrv.Close)
 	_, key, _ := ed25519.GenerateKey(nil)
 	srv := httptest.NewUnstartedServer(nil)
-	s := &Server{Kit: &appkit.App{ID: "quiz", Key: key, Core: coreSrv.URL, MCPURL: "http://" + srv.Listener.Addr().String() + "/mcp"}, Name: "quiz", Title: "Agent's Quiz",
+	s := &Server{Kit: agentkit.TestApp("quiz", key, coreSrv.URL, "http://"+srv.Listener.Addr().String()+"/mcp"), Name: "quiz", Title: "Agent's Quiz",
 		Store: st, Static: fstest.MapFS{"logo.svg": {Data: []byte("<svg/>")}}, Logo: "logo.svg"}
 	if withLegal {
 		p, err := legal.New(legal.Config{App: "Quiz", Terms: []byte("# Terms\n"), Privacy: []byte("# Privacy\n")})
